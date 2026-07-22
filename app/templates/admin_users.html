@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}用户管理{% endblock %}
+{% block content %}
+<section class="page-heading"><div><h1>用户管理</h1><p class="muted">API Key 仅以加密形式保存在服务端，页面不会显示其值。</p></div><a class="button" href="/admin/users/new">创建用户</a></section>
+<div class="panel table-wrap"><table><thead><tr><th>ID</th><th>用户名</th><th>身份</th><th>状态</th><th>API Key</th><th>App ID</th><th>实例</th><th>并发</th><th></th></tr></thead>
+<tbody>{% for user in users %}<tr><td>{{ user.id }}</td><td>{{ user.username }}</td><td>{{ "管理员" if user.is_admin else "普通用户" }}</td><td>{{ "启用" if user.is_active else "禁用" }}</td><td>{{ mask_secret(user.runninghub_config.api_key_encrypted if user.runninghub_config else none) }}</td><td>{{ user.runninghub_config.ai_app_id if user.runninghub_config else "—" }}</td><td>{{ user.runninghub_config.instance_type if user.runninghub_config else "—" }}</td><td>{{ user.runninghub_config.max_concurrent_tasks if user.runninghub_config else "—" }}</td><td><a href="/admin/users/{{ user.id }}">编辑</a></td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

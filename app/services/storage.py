@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import mimetypes
+import os
+import shutil
+import uuid
+from pathlib import Path
+
+from fastapi import UploadFile
+
+from app.config import Settings
+
+
+class UploadValidationError(ValueError):
+    """The uploaded file is invalid for the requested slot."""
+
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac"}
+IMAGE_MIME_PREFIX = "image/"
+AUDIO_MIME_TYPES = {
+    "audio/mpeg",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/aac",
+    "audio/flac",
+    "audio/x-flac",
+}
+
+
+def safe_relative_path(path: str, data_dir: Path) -> Path:
+    root = data_dir.resolve()
+    resolved = (root / path).resolve()
+    if root != resolved and root not in resolved.parents:
+        raise ValueError("非法文件路径")
+    return resolved
+
+
+def _validate_content_signature(path: Path, kind: str) -> None:
+    header = path.read_bytes()[:32]
+    if kind == "image":
+        valid = (
+            header.startswith(b"\xff\xd8\xff")
+            or header.startswith(b"\x89PNG\r\n\x1a\n")
+            or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+        )
+    else:
+        valid = (
+            header.startswith(b"ID3")
+            or header[:2] in {b"\xff\xfb", b"\xff\xf3", b"\xff\xf1"}
+            or (header.startswith(b"RIFF") and header[8:12] == b"WAVE")
+            or header.startswith(b"fLaC")
+            or header[4:8] == b"ftyp"
+        )
+    if not valid:
+        raise UploadValidationError("文件内容与声明的格式不匹配")
+
+
+def _validate_mime(upload: UploadFile, kind: str) -> None:
+    content_type = (upload.content_type or "").lower()
+    if not content_type:
+        return
+    if kind == "image" and content_type.startswith(IMAGE_MIME_PREFIX):
+        return
+    if kind == "audio" and content_type in AUDIO_MIME_TYPES:
+        return
+    raise UploadValidationError("文件 MIME 类型不受支持")
+
+
+def save_upload(
+    upload: UploadFile,
+    destination_dir: Path,
+    kind: str,
+    settings: Settings,
+) -> tuple[Path, str]:
+    original_name = Path(upload.filename or "").name
+    if not original_name:
+        raise UploadValidationError("请选择文件")
+    extension = Path(original_name).suffix.lower()
+    allowed_extensions = IMAGE_EXTENSIONS if kind == "image" else AUDIO_EXTENSIONS
+    if extension not in allowed_extensions:
+        raise UploadValidationError("文件扩展名不受支持")
+    _validate_mime(upload, kind)
+
+    max_bytes = (
+        settings.max_image_size_mb if kind == "image" else settings.max_audio_size_mb
+    ) * 1024 * 1024
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    output_path = destination_dir / f"{kind}-{uuid.uuid4().hex}{extension}"
+    written = 0
+    try:
+        with output_path.open("wb") as output:
+            while chunk := upload.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise UploadValidationError("上传文件超过大小限制")
+                output.write(chunk)
+        if written == 0:
+            raise UploadValidationError("上传文件不能为空")
+        _validate_content_signature(output_path, kind)
+        guessed_type, _ = mimetypes.guess_type(output_path.name)
+        if kind == "image" and guessed_type and not guessed_type.startswith("image/"):
+            raise UploadValidationError("图片格式不正确")
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+    finally:
+        upload.file.seek(0)
+    return output_path, original_name
+
+
+def remove_directory(path: Path) -> None:
+    """Remove a known task directory; callers must construct this from trusted IDs."""
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def task_upload_dir(settings: Settings, user_id: int, task_id: str) -> Path:
+    return settings.uploads_dir / str(user_id) / task_id
+
+
+def task_output_dir(settings: Settings, user_id: int, task_id: str) -> Path:
+    return settings.outputs_dir / str(user_id) / task_id
+
+
+def to_relative_data_path(path: Path, settings: Settings) -> str:
+    return str(path.resolve().relative_to(settings.data_dir.resolve())).replace("\\", "/")
+
+
+def create_download_target(
+    settings: Settings, user_id: int, task_id: str, extension: str
+) -> Path:
+    extension = extension.lower().lstrip(".")
+    if extension not in {"mp4", "webm", "mov"}:
+        extension = "mp4"
+    directory = task_output_dir(settings, user_id, task_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"result.{extension}"

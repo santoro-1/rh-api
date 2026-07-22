@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}任务历史{% endblock %}
+{% block content %}
+<section class="page-heading"><div><h1>任务历史</h1><p class="muted">{% if current_user.is_admin %}管理员视图：显示全部用户的任务。{% else %}这里只显示你的任务。{% endif %}</p></div><a class="button secondary" href="/generate">创建任务</a></section>
+{% if tasks %}
+<div class="task-list">
+  {% for task in tasks %}
+  <article class="task-card">
+    <img src="/api/tasks/{{ task.id }}/image" alt="参考图">
+    <div class="task-main">
+      <h2><a href="/tasks/{{ task.id }}">{{ status_labels.get(task.status, task.status) }}</a></h2>
+      <p>{{ task.created_at.strftime("%Y-%m-%d %H:%M") }} · {{ task.audio_original_name }}</p>
+      <p>{{ task.start_seconds|timecode }} — {{ task.end_seconds|timecode }}</p>
+      <p class="truncate">{{ task.prompt }}</p>
+      {% if current_user.is_admin %}<p class="muted">用户：{{ task.user.username }}</p>{% endif %}
+      {% if task.error_message %}<p class="error">{{ task.error_message }}</p>{% endif %}
+    </div>
+    <div class="task-actions">
+      <a class="button secondary" href="/tasks/{{ task.id }}">详情</a>
+      {% if task.status == "SUCCESS" %}<a class="button" href="/api/tasks/{{ task.id }}/download">下载</a>{% endif %}
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% else %}<section class="empty-state"><p>还没有任务。</p><a class="button" href="/generate">创建第一个任务</a></section>{% endif %}
+{% endblock %}

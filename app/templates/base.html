@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}数字人视频生成{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/generate">数字人视频生成</a>
+    {% if request.session.get("user_id") %}
+      <nav>
+        <a href="/generate">创建任务</a>
+        <a href="/tasks">任务历史</a>
+        {% if current_user is defined and current_user.is_admin %}<a href="/admin/users">用户管理</a>{% endif %}
+        <form method="post" action="/logout"><button class="link-button" type="submit">退出登录</button></form>
+      </nav>
+    {% endif %}
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

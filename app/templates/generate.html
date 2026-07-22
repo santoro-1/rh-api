@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}创建数字人视频{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><h1>创建数字人视频</h1><p class="muted">素材将先保存到本机，再由后台任务安全调用 RunningHub。</p></div>
+</section>
+{% if not has_api_key %}
+  <p class="error">
+    当前账号尚未完成 RunningHub 配置。
+    {% if current_user.is_admin %}
+      <a href="/admin/users/{{ current_user.id }}">前往配置当前账号</a>
+    {% else %}
+      请联系管理员。
+    {% endif %}
+  </p>
+{% endif %}
+<form id="task-form" class="panel stack-form" enctype="multipart/form-data">
+  <label>最长分辨率
+    <input id="resolution" name="resolution" type="number" value="1024" min="1" step="1" inputmode="numeric" required {% if not has_api_key %}disabled{% endif %}>
+    <span class="field-help">填写输出画面的最长边像素，默认 1024。</span>
+  </label>
+
+  <label>总体模式选择
+    <select id="overallMode" name="overallMode" required {% if not has_api_key %}disabled{% endif %}>
+      <option value="0">灵动模式</option>
+      <option value="2" selected>稳定模式 v2（推荐）</option>
+      <option value="1">稳定模式 v1</option>
+    </select>
+    <span id="overall-mode-help" class="field-help">采用新模型和提示词 Agent，支持运镜，兼顾稳定性与表现力，泛用性更强。</span>
+  </label>
+
+  <label>单双人模式选择
+    <select id="personMode" name="personMode" required {% if not has_api_key %}disabled{% endif %}>
+      <option value="0">双人模式</option>
+      <option value="1" selected>单人模式</option>
+    </select>
+  </label>
+
+  <label>参考图片（JPG / JPEG / PNG / WEBP）
+    <input id="image" name="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" required {% if not has_api_key %}disabled{% endif %}>
+  </label>
+  <img id="image-preview" class="image-preview hidden" alt="参考图片预览">
+
+  <label>参考音频（MP3 / WAV / M4A / AAC / FLAC）
+    <input id="audio" name="audio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" required {% if not has_api_key %}disabled{% endif %}>
+  </label>
+  <p id="audio-info" class="muted">请选择音频文件以检测时长。</p>
+
+  <div class="two-columns">
+    <label>开始时间<input id="startTime" name="startTime" value="0:00" pattern="\d+:[0-5]\d" required {% if not has_api_key %}disabled{% endif %}></label>
+    <label>结束时间<input id="endTime" name="endTime" placeholder="自动填写" pattern="\d+:[0-5]\d" required {% if not has_api_key %}disabled{% endif %}></label>
+  </div>
+
+  <div id="dual-audio-fields" class="two-columns hidden">
+    <label>左边人物音频（MP3 / WAV / M4A / AAC / FLAC）
+      <input id="leftAudio" name="leftAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" disabled>
+    </label>
+    <label>右边人物音频（MP3 / WAV / M4A / AAC / FLAC）
+      <input id="rightAudio" name="rightAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" disabled>
+    </label>
+  </div>
+  <label>提示词
+    <textarea name="prompt" rows="4" maxlength="5000" required {% if not has_api_key %}disabled{% endif %}>{{ config.default_prompt if config else "" }}</textarea>
+  </label>
+  <p id="form-error" class="error hidden"></p>
+  <button id="submit-button" type="submit" {% if not has_api_key %}disabled{% endif %}>开始生成</button>
+</form>
+<script>
+const audioInput = document.getElementById("audio");
+const imageInput = document.getElementById("image");
+const info = document.getElementById("audio-info");
+const errorBox = document.getElementById("form-error");
+const form = document.getElementById("task-form");
+const submitButton = document.getElementById("submit-button");
+const overallMode = document.getElementById("overallMode");
+const personMode = document.getElementById("personMode");
+const dualAudioFields = document.getElementById("dual-audio-fields");
+const dualAudioInputs = [document.getElementById("leftAudio"), document.getElementById("rightAudio")];
+const canSubmit = {{ "true" if has_api_key else "false" }};
+const overallModeHelp = {
+  "0": "动作和镜头表现更灵活，适合更强调动态效果的内容。",
+  "1": "原稳定模式，镜头与人物表现偏稳定。",
+  "2": "采用新模型和提示词 Agent，支持运镜，兼顾稳定性与表现力，泛用性更强。"
+};
+overallMode?.addEventListener("change", () => {
+  document.getElementById("overall-mode-help").textContent = overallModeHelp[overallMode.value];
+});
+function syncPersonMode() {
+  const isDual = personMode?.value === "0";
+  dualAudioFields?.classList.toggle("hidden", !isDual);
+  dualAudioInputs.forEach((input) => {
+    input.disabled = !canSubmit || !isDual;
+    input.required = canSubmit && isDual;
+  });
+}
+personMode?.addEventListener("change", syncPersonMode);
+syncPersonMode();
+imageInput?.addEventListener("change", () => {
+  const file = imageInput.files[0], preview = document.getElementById("image-preview");
+  if (!file) return;
+  preview.src = URL.createObjectURL(file); preview.classList.remove("hidden");
+});
+audioInput?.addEventListener("change", async () => {
+  const file = audioInput.files[0]; if (!file) return;
+  errorBox.classList.add("hidden"); info.textContent = "正在读取音频时长…";
+  const fd = new FormData(); fd.append("audio", file);
+  try {
+    const response = await fetch("/api/audio/inspect", {method: "POST", body: fd});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "音频读取失败");
+    info.textContent = "音频：" + file.name + "，时长 " + data.durationText;
+    document.getElementById("startTime").value = data.suggestedStartTime;
+    document.getElementById("endTime").value = data.suggestedEndTime;
+  } catch (error) {
+    info.textContent = "未能读取音频时长"; errorBox.textContent = error.message;
+    errorBox.classList.remove("hidden");
+  }
+});
+form?.addEventListener("submit", async (event) => {
+  event.preventDefault(); errorBox.classList.add("hidden"); submitButton.disabled = true;
+  submitButton.textContent = "正在创建任务…";
+  try {
+    const response = await fetch("/api/tasks", {method: "POST", body: new FormData(form)});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "创建任务失败");
+    location.href = "/tasks/" + data.taskId;
+  } catch (error) {
+    errorBox.textContent = error.message; errorBox.classList.remove("hidden");
+    submitButton.disabled = false; submitButton.textContent = "开始生成";
+  }
+});
+</script>
+{% endblock %}

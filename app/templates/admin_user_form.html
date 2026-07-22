@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}{{ "编辑用户" if editing else "创建用户" }}{% endblock %}
+{% block content %}
+<section class="page-heading"><div><h1>{{ "编辑用户" if editing else "创建用户" }}</h1><p class="muted">留空 API Key 即保留原配置；新用户可稍后补充。</p></div><a class="button secondary" href="/admin/users">返回</a></section>
+<form method="post" action="{{ '/admin/users/' ~ user.id if editing else '/admin/users' }}" class="panel stack-form">
+  <div class="two-columns">
+    <label>用户名<input name="username" value="{{ user.username if user else '' }}" required maxlength="80"></label>
+    <label>{{ "新密码（留空不改）" if editing else "密码" }}<input name="password" type="password" {% if not editing %}required{% endif %} minlength="8"></label>
+  </div>
+  <div class="check-row"><label><input type="checkbox" name="is_admin" {% if user and user.is_admin %}checked{% endif %}> 管理员</label><label><input type="checkbox" name="is_active" {% if not user or user.is_active %}checked{% endif %}> 启用账号</label></div>
+  <hr><h2>RunningHub 配置</h2>
+  <label>RunningHub API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="{{ '已加密保存，留空不修改' if editing else '可稍后配置' }}"></label>
+  <div class="two-columns">
+    <label>Base URL<input name="base_url" value="{{ config.base_url }}" required></label>
+    <label>AI App ID<input name="ai_app_id" value="{{ config.ai_app_id }}" required></label>
+  </div>
+  <div class="two-columns">
+    <label>实例类型<select name="instance_type"><option value="plus" {% if config.instance_type == 'plus' %}selected{% endif %}>plus（48G，默认）</option><option value="default" {% if config.instance_type == 'default' %}selected{% endif %}>default（24G）</option></select></label>
+    <label>最大同时任务数<input name="max_concurrent_tasks" type="number" min="1" max="20" value="{{ config.max_concurrent_tasks }}" required></label>
+  </div>
+  <label>默认提示词<textarea name="default_prompt" rows="4">{{ config.default_prompt }}</textarea></label>
+  <button type="submit">保存</button>
+</form>
+{% endblock %}
