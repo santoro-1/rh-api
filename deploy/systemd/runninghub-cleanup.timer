@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily RunningHub expired-file cleanup
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=runninghub-cleanup.service
+
+[Install]
+WantedBy=timers.target

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from app.workflows.base import WorkflowAdapter
 from app.workflows.digital_human import DigitalHumanWorkflow
+from app.workflows.ltx_lip_sync import LtxLipSyncWorkflow
 
 
 _WORKFLOWS: dict[str, WorkflowAdapter] = {
     "digital_human": DigitalHumanWorkflow(),
+    "ltx_lip_sync": LtxLipSyncWorkflow(),
 }
 
 

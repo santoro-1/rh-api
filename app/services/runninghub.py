@@ -20,6 +20,7 @@ class RunningHubClient:
         base_url: str,
         ai_app_id: str,
         session: requests.Session | None = None,
+        submission_type: str = "ai-app",
     ) -> None:
         if not api_key.strip():
             raise ValueError("RunningHub API Key 不能为空")
@@ -27,6 +28,9 @@ class RunningHubClient:
             raise ValueError("RunningHub AI App ID 不能为空")
         self.base_url = base_url.rstrip("/")
         self.ai_app_id = ai_app_id.strip()
+        if submission_type not in {"ai-app", "workflow"}:
+            raise ValueError("RunningHub 提交类型不合法")
+        self.submission_type = submission_type
         self.session = session or requests.Session()
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -61,9 +65,12 @@ class RunningHubClient:
         return str(data["fileName"])
 
     def submit_task(self, payload: dict[str, Any]) -> str:
+        resource_path = (
+            "workflow" if self.submission_type == "workflow" else "ai-app"
+        )
         try:
             response = self.session.post(
-                f"{self.base_url}/openapi/v2/run/ai-app/{self.ai_app_id}",
+                f"{self.base_url}/openapi/v2/run/{resource_path}/{self.ai_app_id}",
                 headers={**self.headers, "Content-Type": "application/json"},
                 json=payload,
                 timeout=(15, 120),

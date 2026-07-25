@@ -34,14 +34,6 @@ class TaskStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
-ACTIVE_TASK_STATUSES = (
-    TaskStatus.PENDING.value,
-    TaskStatus.UPLOADING.value,
-    TaskStatus.SUBMITTED.value,
-    TaskStatus.RUNNING.value,
-)
-
-
 class User(Base):
     __tablename__ = "users"
 

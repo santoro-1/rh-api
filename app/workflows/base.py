@@ -33,6 +33,7 @@ class WorkflowAdapter(Protocol):
     display_name: str
     default_ai_app_id: str
     default_prompt: str
+    submission_type: str
 
     def validate_parameters(
         self, parameters: dict[str, Any], asset_metadata: dict[str, Any]

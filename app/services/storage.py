@@ -17,7 +17,9 @@ class UploadValidationError(ValueError):
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
 IMAGE_MIME_PREFIX = "image/"
+VIDEO_MIME_PREFIX = "video/"
 AUDIO_MIME_TYPES = {
     "audio/mpeg",
     "audio/wav",
@@ -46,13 +48,18 @@ def _validate_content_signature(path: Path, kind: str) -> None:
             or header.startswith(b"\x89PNG\r\n\x1a\n")
             or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
         )
-    else:
+    elif kind == "audio":
         valid = (
             header.startswith(b"ID3")
             or header[:2] in {b"\xff\xfb", b"\xff\xf3", b"\xff\xf1"}
             or (header.startswith(b"RIFF") and header[8:12] == b"WAVE")
             or header.startswith(b"fLaC")
             or header[4:8] == b"ftyp"
+        )
+    else:
+        valid = (
+            header[4:8] == b"ftyp"
+            or header.startswith(b"\x1a\x45\xdf\xa3")
         )
     if not valid:
         raise UploadValidationError("文件内容与声明的格式不匹配")
@@ -65,6 +72,8 @@ def _validate_mime(upload: UploadFile, kind: str) -> None:
     if kind == "image" and content_type.startswith(IMAGE_MIME_PREFIX):
         return
     if kind == "audio" and content_type in AUDIO_MIME_TYPES:
+        return
+    if kind == "video" and content_type.startswith(VIDEO_MIME_PREFIX):
         return
     raise UploadValidationError("文件 MIME 类型不受支持")
 
@@ -79,14 +88,23 @@ def save_upload(
     if not original_name:
         raise UploadValidationError("请选择文件")
     extension = Path(original_name).suffix.lower()
-    allowed_extensions = IMAGE_EXTENSIONS if kind == "image" else AUDIO_EXTENSIONS
+    allowed_extensions = {
+        "image": IMAGE_EXTENSIONS,
+        "audio": AUDIO_EXTENSIONS,
+        "video": VIDEO_EXTENSIONS,
+    }.get(kind)
+    if allowed_extensions is None:
+        raise UploadValidationError("未知的上传素材类型")
     if extension not in allowed_extensions:
         raise UploadValidationError("文件扩展名不受支持")
     _validate_mime(upload, kind)
 
-    max_bytes = (
-        settings.max_image_size_mb if kind == "image" else settings.max_audio_size_mb
-    ) * 1024 * 1024
+    max_megabytes = {
+        "image": settings.max_image_size_mb,
+        "audio": settings.max_audio_size_mb,
+        "video": settings.max_video_size_mb,
+    }[kind]
+    max_bytes = max_megabytes * 1024 * 1024
     destination_dir.mkdir(parents=True, exist_ok=True)
     output_path = destination_dir / f"{kind}-{uuid.uuid4().hex}{extension}"
     written = 0

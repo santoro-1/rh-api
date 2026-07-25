@@ -7,9 +7,13 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import get_settings
+from app.database import engine
 from app.routes import admin, auth, tasks
 
 
@@ -35,6 +39,10 @@ def create_app() -> FastAPI:
         same_site="lax",
         max_age=60 * 60 * 24 * 7,
     )
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=list(settings.allowed_hosts),
+    )
     app.mount(
         "/static",
         StaticFiles(directory=str(Path(__file__).resolve().parent / "static")),
@@ -44,6 +52,15 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(admin.router)
     app.include_router(tasks.router)
+
+    @app.get("/healthz", include_in_schema=False)
+    def healthcheck():
+        try:
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            return JSONResponse({"status": "unhealthy"}, status_code=503)
+        return {"status": "ok"}
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):

@@ -3,6 +3,7 @@
 {% block content %}
 <section class="page-heading"><div><h1>{{ "编辑用户" if editing else "创建用户" }}</h1><p class="muted">留空 API Key 即保留原配置；新用户可稍后补充。</p></div><a class="button secondary" href="/admin/users">返回</a></section>
 <form method="post" action="{{ '/admin/users/' ~ user.id if editing else '/admin/users' }}" class="panel stack-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <div class="two-columns">
     <label>用户名<input name="username" value="{{ user.username if user else '' }}" required maxlength="80"></label>
     <label>{{ "新密码（留空不改）" if editing else "密码" }}<input name="password" type="password" {% if not editing %}required{% endif %} minlength="8"></label>
@@ -14,11 +15,24 @@
     <label>Base URL<input name="base_url" value="{{ config.base_url }}" required></label>
     <label>AI App ID<input name="ai_app_id" value="{{ config.ai_app_id }}" required></label>
   </div>
+  <input name="instance_type" type="hidden" value="default">
   <div class="two-columns">
-    <label>实例类型<select name="instance_type"><option value="plus" {% if config.instance_type == 'plus' %}selected{% endif %}>plus（48G，默认）</option><option value="default" {% if config.instance_type == 'default' %}selected{% endif %}>default（24G）</option></select></label>
     <label>最大同时任务数<input name="max_concurrent_tasks" type="number" min="1" max="20" value="{{ config.max_concurrent_tasks }}" required></label>
   </div>
+  <p class="field-help">运行实例已移到用户创建任务页面，由每个任务单独选择。</p>
   <label>默认提示词<textarea name="default_prompt" rows="4">{{ config.default_prompt }}</textarea></label>
+  <hr><h2>视频对口型工作流</h2>
+  <label class="check-row"><span><input type="checkbox" name="ltx_enabled" {% if ltx_config.is_enabled %}checked{% endif %}> 为该账号启用</span></label>
+  <div class="two-columns">
+    <label>Workflow ID<input name="ltx_workflow_id" value="{{ ltx_config.ai_app_id }}" required></label>
+    <label>实例类型
+      <select name="ltx_instance_type">
+        <option value="plus" {% if ltx_config.instance_type == 'plus' %}selected{% endif %}>plus（48G，默认）</option>
+        <option value="default" {% if ltx_config.instance_type == 'default' %}selected{% endif %}>default（24G）</option>
+      </select>
+    </label>
+  </div>
+  <label>LTX 默认提示词<textarea name="ltx_default_prompt" rows="5">{{ ltx_config.default_prompt }}</textarea></label>
   <button type="submit">保存</button>
 </form>
 {% endblock %}

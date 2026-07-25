@@ -8,6 +8,24 @@ from app.services.storage import to_relative_data_path
 from tests.conftest import create_user, login
 
 
+def test_post_requires_csrf_token(client):
+    create_user("csrf-user")
+    response = client.get("/login")
+    assert response.status_code == 200
+    assert 'name="csrf_token"' in response.text
+    rejected = client.post(
+        "/login",
+        data={"username": "csrf-user", "password": "password123"},
+    )
+    assert rejected.status_code == 403
+
+
+def test_healthcheck_reports_database_ready(client):
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def _make_task(owner_id: int, task_id: str, *, result_path: str | None = None) -> None:
     with SessionLocal() as db:
         db.add(
@@ -36,7 +54,7 @@ def test_login_and_admin_permission(client):
     assert client.get("/admin/users").status_code == 403
 
 
-def test_admin_can_create_a_user_and_configure_default_plus(client):
+def test_admin_can_create_a_user_with_legacy_default_instance(client):
     create_user("admin", is_admin=True)
     login(client, "admin")
     response = client.post(
@@ -48,7 +66,7 @@ def test_admin_can_create_a_user_and_configure_default_plus(client):
             "api_key": "new-test-key",
             "base_url": "https://www.runninghub.cn",
             "ai_app_id": "2062251097452007426",
-            "instance_type": "plus",
+            "instance_type": "default",
             "default_prompt": "默认提示词",
             "max_concurrent_tasks": "1",
         },
@@ -58,12 +76,17 @@ def test_admin_can_create_a_user_and_configure_default_plus(client):
     with SessionLocal() as db:
         user = db.query(User).filter_by(username="created-user").one()
         assert user.runninghub_config is not None
-        assert user.runninghub_config.instance_type == "plus"
+        assert user.runninghub_config.instance_type == "default"
         workflow_config = db.query(WorkflowConfig).filter_by(
             user_id=user.id, workflow_key="digital_human"
         ).one()
         assert workflow_config.ai_app_id == "2062251097452007426"
-        assert workflow_config.instance_type == "plus"
+        assert workflow_config.instance_type == "default"
+        ltx_config = db.query(WorkflowConfig).filter_by(
+            user_id=user.id, workflow_key="ltx_lip_sync"
+        ).one()
+        assert ltx_config.ai_app_id == "2080551073030434817"
+        assert ltx_config.is_enabled is False
 
 
 def test_task_isolation_and_admin_visibility(client):

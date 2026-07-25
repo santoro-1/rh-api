@@ -1,0 +1,26 @@
+[Unit]
+Description=RunningHub video web application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=runninghub
+Group=runninghub
+WorkingDirectory=/opt/runninghub
+EnvironmentFile=/opt/runninghub/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/runninghub/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/runninghub/data
+
+[Install]
+WantedBy=multi-user.target

@@ -40,7 +40,7 @@ def test_upload_and_submit_are_server_side_and_use_filename(tmp_path: Path):
     filename = client.upload_file(media)
     payload = build_payload(filename, "openapi/audio.mp3", "0:00", "0:10", "提示", "plus")
     assert client.submit_task(payload) == "remote-123"
-    assert payload["instanceType"] == "plus"
+    assert payload["instanceType"] == "default"
     assert payload["usePersonalQueue"] is False
     assert "retainSeconds" not in payload
     assert any(node["fieldValue"] == "openapi/image.png" for node in payload["nodeInfoList"])
@@ -67,3 +67,21 @@ def test_query_preserves_usage_null():
         FakeSession([FakeResponse(200, {"taskId": "x", "status": "SUCCESS", "usage": None})]),
     )
     assert client.query_task("x")["usage"] is None
+
+
+def test_workflow_submission_uses_workflow_v2_endpoint():
+    session = FakeSession(
+        [FakeResponse(200, {"taskId": "workflow-task", "status": "RUNNING"})]
+    )
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "2080551073030434817",
+        session,
+        submission_type="workflow",
+    )
+    assert client.submit_task({"nodeInfoList": []}) == "workflow-task"
+    assert (
+        session.calls[0][0][0]
+        == "https://rh.example/openapi/v2/run/workflow/2080551073030434817"
+    )

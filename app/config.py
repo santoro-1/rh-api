@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,6 +50,11 @@ def _resolve_path(raw: str) -> Path:
     return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
 
+def _as_csv(value: str | None, default: str) -> tuple[str, ...]:
+    items = [item.strip() for item in (value or default).split(",") if item.strip()]
+    return tuple(dict.fromkeys(items))
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str
@@ -63,20 +70,46 @@ class Settings:
     runninghub_task_timeout_seconds: int
     max_image_size_mb: int
     max_audio_size_mb: int
+    max_video_size_mb: int
     upload_retention_days: int
     output_retention_days: int
     cookie_secure: bool
+    allowed_hosts: tuple[str, ...]
     login_rate_limit_per_minute: int
     task_create_rate_limit_per_minute: int
 
     @classmethod
     def from_environment(cls) -> "Settings":
         app_env = os.getenv("APP_ENV", "development").strip().lower()
+        if app_env not in {"development", "test", "production"}:
+            raise ValueError("APP_ENV 只能为 development、test 或 production")
+
         secret = os.getenv("APP_SECRET_KEY", "development-only-change-me")
+        cookie_secure = _as_bool(os.getenv("COOKIE_SECURE"), False)
+        allowed_hosts = _as_csv(
+            os.getenv("ALLOWED_HOSTS"),
+            "localhost,127.0.0.1,testserver",
+        )
+        if app_env == "production":
+            if (
+                len(secret) < 32
+                or secret == "development-only-change-me"
+                or secret.lower().startswith(("change-", "replace-"))
+            ):
+                raise ValueError("生产环境必须设置至少 32 个字符的随机 APP_SECRET_KEY")
+            if not cookie_secure:
+                raise ValueError("生产环境必须设置 COOKIE_SECURE=true")
+            if not allowed_hosts or "*" in allowed_hosts:
+                raise ValueError("生产环境必须在 ALLOWED_HOSTS 中填写明确域名")
+
         configured_encryption_key = os.getenv("APP_ENCRYPTION_KEY", "").strip()
         if configured_encryption_key:
             encryption_key = configured_encryption_key
-        elif app_env == "development":
+            try:
+                Fernet(encryption_key.encode("ascii"))
+            except (ValueError, TypeError) as exc:
+                raise ValueError("APP_ENCRYPTION_KEY 必须是有效的 Fernet Key") from exc
+        elif app_env in {"development", "test"}:
             # Local convenience only. Production must explicitly provide a stable key.
             encryption_key = base64.urlsafe_b64encode(
                 hashlib.sha256(secret.encode("utf-8")).digest()
@@ -84,7 +117,7 @@ class Settings:
         else:
             raise ValueError("生产环境必须设置 APP_ENCRYPTION_KEY")
 
-        instance_type = os.getenv("DEFAULT_RUNNINGHUB_INSTANCE_TYPE", "plus").strip()
+        instance_type = os.getenv("DEFAULT_RUNNINGHUB_INSTANCE_TYPE", "default").strip()
         if instance_type not in {"default", "plus"}:
             raise ValueError("DEFAULT_RUNNINGHUB_INSTANCE_TYPE 只能为 default 或 plus")
 
@@ -110,9 +143,11 @@ class Settings:
             ),
             max_image_size_mb=_as_int("MAX_IMAGE_SIZE_MB", 20),
             max_audio_size_mb=_as_int("MAX_AUDIO_SIZE_MB", 100),
+            max_video_size_mb=_as_int("MAX_VIDEO_SIZE_MB", 500),
             upload_retention_days=_as_int("UPLOAD_RETENTION_DAYS", 3),
             output_retention_days=_as_int("OUTPUT_RETENTION_DAYS", 7),
-            cookie_secure=_as_bool(os.getenv("COOKIE_SECURE"), False),
+            cookie_secure=cookie_secure,
+            allowed_hosts=allowed_hosts,
             login_rate_limit_per_minute=_as_int("LOGIN_RATE_LIMIT_PER_MINUTE", 10),
             task_create_rate_limit_per_minute=_as_int(
                 "TASK_CREATE_RATE_LIMIT_PER_MINUTE", 10

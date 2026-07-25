@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import User
 from app.routes.dependencies import check_rate_limit, get_current_user
+from app.services.csrf import SESSION_KEY, require_csrf
 from app.services.security import verify_password
 from app.web import templates
 
@@ -33,6 +34,7 @@ def login(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
+    csrf_ok: None = Depends(require_csrf),
     db: Session = Depends(get_db),
 ):
     settings = get_settings()
@@ -45,13 +47,15 @@ def login(
             {"error": "用户名或密码错误"},
             status_code=401,
         )
+    csrf_token = request.session.get(SESSION_KEY)
     request.session.clear()
     request.session["user_id"] = user.id
+    request.session[SESSION_KEY] = csrf_token
     return RedirectResponse("/generate", status_code=303)
 
 
 @router.post("/logout")
-def logout(request: Request):
+def logout(request: Request, csrf_ok: None = Depends(require_csrf)):
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
 

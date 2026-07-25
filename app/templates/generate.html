@@ -1,9 +1,27 @@
 {% extends "base.html" %}
-{% block title %}创建数字人视频{% endblock %}
+{% block title %}创建视频任务{% endblock %}
 {% block content %}
 <section class="page-heading">
-  <div><h1>创建数字人视频</h1><p class="muted">素材将先保存到本机，再由后台任务安全调用 RunningHub。</p></div>
+  <div>
+    <h1>创建视频任务</h1>
+    <p class="muted">选择工作流后填写对应素材，任务统一处理。</p>
+  </div>
 </section>
+
+<section class="panel instance-panel">
+  <label>运行实例
+    <select id="task-instance-type">
+      <option value="default">Stand 运行（24G）</option>
+      <option value="plus">Plus 运行（48G）</option>
+    </select>
+  </label>
+</section>
+
+<div class="workflow-switch" role="tablist" aria-label="选择视频工作流">
+  <button type="button" class="workflow-tab" data-workflow="digital_human">数字人视频</button>
+  <button type="button" class="workflow-tab" data-workflow="ltx_lip_sync">视频对口型</button>
+</div>
+
 {% if not has_api_key %}
   <p class="error">
     当前账号尚未完成 RunningHub 配置。
@@ -14,77 +32,145 @@
     {% endif %}
   </p>
 {% endif %}
-<form id="task-form" class="panel stack-form" enctype="multipart/form-data">
-  <label>最长分辨率
-    <input id="resolution" name="resolution" type="number" value="1024" min="1" step="1" inputmode="numeric" required {% if not has_api_key %}disabled{% endif %}>
-    <span class="field-help">填写输出画面的最长边像素，默认 1024。</span>
-  </label>
 
-  <label>总体模式选择
-    <select id="overallMode" name="overallMode" required {% if not has_api_key %}disabled{% endif %}>
-      <option value="0">灵动模式</option>
-      <option value="2" selected>稳定模式 v2（推荐）</option>
-      <option value="1">稳定模式 v1</option>
-    </select>
-    <span id="overall-mode-help" class="field-help">采用新模型和提示词 Agent，支持运镜，兼顾稳定性与表现力，泛用性更强。</span>
-  </label>
-
-  <label>单双人模式选择
-    <select id="personMode" name="personMode" required {% if not has_api_key %}disabled{% endif %}>
-      <option value="0">双人模式</option>
-      <option value="1" selected>单人模式</option>
-    </select>
-  </label>
-
-  <label>参考图片（JPG / JPEG / PNG / WEBP）
-    <input id="image" name="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" required {% if not has_api_key %}disabled{% endif %}>
-  </label>
-  <img id="image-preview" class="image-preview hidden" alt="参考图片预览">
-
-  <label>参考音频（MP3 / WAV / M4A / AAC / FLAC）
-    <input id="audio" name="audio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" required {% if not has_api_key %}disabled{% endif %}>
-  </label>
-  <p id="audio-info" class="muted">请选择音频文件以检测时长。</p>
-
-  <div class="two-columns">
-    <label>开始时间<input id="startTime" name="startTime" value="0:00" pattern="\d+:[0-5]\d" required {% if not has_api_key %}disabled{% endif %}></label>
-    <label>结束时间<input id="endTime" name="endTime" placeholder="自动填写" pattern="\d+:[0-5]\d" required {% if not has_api_key %}disabled{% endif %}></label>
+<section id="workflow-digital_human" class="workflow-panel">
+  <div class="panel-heading">
+    <h2>数字人视频</h2>
+    <p class="muted">上传参考图片与音频，支持单人和双人模式。</p>
   </div>
+  <form id="task-form" class="panel stack-form" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>最长分辨率
+      <input id="resolution" name="resolution" type="number" value="1024" min="1" step="1" inputmode="numeric" required {% if not has_api_key %}disabled{% endif %}>
+      <span class="field-help">填写输出画面的最长边像素，默认 1024。</span>
+    </label>
 
-  <div id="dual-audio-fields" class="two-columns hidden">
-    <label>左边人物音频（MP3 / WAV / M4A / AAC / FLAC）
-      <input id="leftAudio" name="leftAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" disabled>
+    <p class="field-help">生成模式：稳定模式 v2（RunningHub 新版工作流默认，无需选择）。</p>
+
+    <label>单双人模式选择
+      <select id="personMode" name="personMode" required {% if not has_api_key %}disabled{% endif %}>
+        <option value="0">双人模式</option>
+        <option value="1" selected>单人模式</option>
+      </select>
     </label>
-    <label>右边人物音频（MP3 / WAV / M4A / AAC / FLAC）
-      <input id="rightAudio" name="rightAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" disabled>
+
+    <label>参考图片（JPG / JPEG / PNG / WEBP）
+      <input id="image" name="image" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" required {% if not has_api_key %}disabled{% endif %}>
     </label>
+    <img id="image-preview" class="image-preview hidden" alt="参考图片预览">
+
+    <label>参考音频（MP3 / WAV / M4A / AAC / FLAC）
+      <input id="audio" name="audio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" required {% if not has_api_key %}disabled{% endif %}>
+    </label>
+    <p id="audio-info" class="muted">请选择音频文件以检测时长。</p>
+
+    <div class="two-columns">
+      <label>开始时间<input id="startTime" name="startTime" value="0:00" pattern="\d+:[0-5]\d" required {% if not has_api_key %}disabled{% endif %}></label>
+      <label>结束时间<input id="endTime" name="endTime" placeholder="自动填写" pattern="\d+:[0-5]\d" required {% if not has_api_key %}disabled{% endif %}></label>
+    </div>
+
+    <div id="dual-audio-fields" class="two-columns hidden">
+      <label>左边人物音频（MP3 / WAV / M4A / AAC / FLAC）
+        <input id="leftAudio" name="leftAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" disabled>
+      </label>
+      <label>右边人物音频（MP3 / WAV / M4A / AAC / FLAC）
+        <input id="rightAudio" name="rightAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" disabled>
+      </label>
+    </div>
+    <label>提示词
+      <textarea name="prompt" rows="4" maxlength="5000" required {% if not has_api_key %}disabled{% endif %}>{{ config.default_prompt if config else "" }}</textarea>
+    </label>
+    <p id="form-error" class="error hidden"></p>
+    <button id="submit-button" type="submit" {% if not has_api_key %}disabled{% endif %}>开始生成</button>
+  </form>
+</section>
+
+<section id="workflow-ltx_lip_sync" class="workflow-panel hidden">
+  <div class="panel-heading">
+    <h2>视频对口型</h2>
+    <p class="muted">上传源视频和自定义音频；音频控制输出时长，提示词作为对口型正向条件。</p>
   </div>
-  <label>提示词
-    <textarea name="prompt" rows="4" maxlength="5000" required {% if not has_api_key %}disabled{% endif %}>{{ config.default_prompt if config else "" }}</textarea>
-  </label>
-  <p id="form-error" class="error hidden"></p>
-  <button id="submit-button" type="submit" {% if not has_api_key %}disabled{% endif %}>开始生成</button>
-</form>
+  {% if has_api_key and not can_generate_ltx %}
+    <p class="error">
+      当前账号尚未启用视频对口型工作流。
+      {% if current_user.is_admin %}
+        <a href="/admin/users/{{ current_user.id }}">前往配置当前账号</a>
+      {% else %}
+        请联系管理员。
+      {% endif %}
+    </p>
+  {% endif %}
+  <form id="ltx-task-form" class="panel stack-form" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>源视频（MP4 / MOV / WEBM）
+      <input id="sourceVideo" name="sourceVideo" type="file" accept=".mp4,.mov,.webm,video/*" required {% if not can_generate_ltx %}disabled{% endif %}>
+    </label>
+    <video id="source-preview" class="video hidden" controls></video>
+
+    <label>自定义音频（MP3 / WAV / M4A / AAC / FLAC）
+      <input id="customAudio" name="customAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" required {% if not can_generate_ltx %}disabled{% endif %}>
+      <span class="field-help">工作流会根据音频时长计算视频帧数。</span>
+    </label>
+
+    <label>画面及对白提示词
+      <textarea name="prompt" rows="6" maxlength="5000" required {% if not can_generate_ltx %}disabled{% endif %}>{{ ltx_config.default_prompt }}</textarea>
+      <span class="field-help">请填写与自定义音频内容一致的说话文本及画面描述，例如“女人用中文说：……”。</span>
+    </label>
+    <p id="ltx-form-error" class="error hidden"></p>
+    <button id="ltx-submit-button" type="submit" {% if not can_generate_ltx %}disabled{% endif %}>开始生成</button>
+  </form>
+</section>
+
 <script>
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+const initialWorkflow = {{ initial_workflow|tojson }};
+const ltxDefaultInstance = {{ ltx_config.instance_type|tojson }};
+const instanceSelect = document.getElementById("task-instance-type");
+const workflowTabs = document.querySelectorAll(".workflow-tab");
+const workflowPanels = document.querySelectorAll(".workflow-panel");
+const instanceSelections = {
+  digital_human: "default",
+  ltx_lip_sync: ["default", "plus"].includes(ltxDefaultInstance) ? ltxDefaultInstance : "plus",
+};
+let activeWorkflow = null;
+function activateWorkflow(workflow) {
+  if (activeWorkflow) instanceSelections[activeWorkflow] = instanceSelect.value;
+  activeWorkflow = workflow;
+  if (workflow === "digital_human") {
+    instanceSelect.value = "default";
+    instanceSelect.disabled = true;
+  } else {
+    instanceSelect.disabled = false;
+    instanceSelect.value = instanceSelections.ltx_lip_sync;
+  }
+  workflowTabs.forEach((tab) => {
+    const active = tab.dataset.workflow === workflow;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  workflowPanels.forEach((panel) => {
+    panel.classList.toggle("hidden", panel.id !== "workflow-" + workflow);
+  });
+  history.replaceState(null, "", "/generate?workflow=" + encodeURIComponent(workflow));
+}
+instanceSelect.addEventListener("change", () => {
+  instanceSelections[activeWorkflow] = instanceSelect.value;
+});
+workflowTabs.forEach((tab) => {
+  tab.addEventListener("click", () => activateWorkflow(tab.dataset.workflow));
+});
+activateWorkflow(initialWorkflow);
+
 const audioInput = document.getElementById("audio");
 const imageInput = document.getElementById("image");
 const info = document.getElementById("audio-info");
 const errorBox = document.getElementById("form-error");
 const form = document.getElementById("task-form");
 const submitButton = document.getElementById("submit-button");
-const overallMode = document.getElementById("overallMode");
 const personMode = document.getElementById("personMode");
 const dualAudioFields = document.getElementById("dual-audio-fields");
 const dualAudioInputs = [document.getElementById("leftAudio"), document.getElementById("rightAudio")];
 const canSubmit = {{ "true" if has_api_key else "false" }};
-const overallModeHelp = {
-  "0": "动作和镜头表现更灵活，适合更强调动态效果的内容。",
-  "1": "原稳定模式，镜头与人物表现偏稳定。",
-  "2": "采用新模型和提示词 Agent，支持运镜，兼顾稳定性与表现力，泛用性更强。"
-};
-overallMode?.addEventListener("change", () => {
-  document.getElementById("overall-mode-help").textContent = overallModeHelp[overallMode.value];
-});
 function syncPersonMode() {
   const isDual = personMode?.value === "0";
   dualAudioFields?.classList.toggle("hidden", !isDual);
@@ -105,7 +191,11 @@ audioInput?.addEventListener("change", async () => {
   errorBox.classList.add("hidden"); info.textContent = "正在读取音频时长…";
   const fd = new FormData(); fd.append("audio", file);
   try {
-    const response = await fetch("/api/audio/inspect", {method: "POST", body: fd});
+    const response = await fetch("/api/audio/inspect", {
+      method: "POST",
+      headers: {"X-CSRF-Token": csrfToken},
+      body: fd,
+    });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "音频读取失败");
     info.textContent = "音频：" + file.name + "，时长 " + data.durationText;
@@ -120,13 +210,54 @@ form?.addEventListener("submit", async (event) => {
   event.preventDefault(); errorBox.classList.add("hidden"); submitButton.disabled = true;
   submitButton.textContent = "正在创建任务…";
   try {
-    const response = await fetch("/api/tasks", {method: "POST", body: new FormData(form)});
+    const formData = new FormData(form);
+    formData.set("instanceType", instanceSelect.value);
+    const response = await fetch("/api/tasks", {
+      method: "POST",
+      headers: {"X-CSRF-Token": csrfToken},
+      body: formData,
+    });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "创建任务失败");
     location.href = "/tasks/" + data.taskId;
   } catch (error) {
     errorBox.textContent = error.message; errorBox.classList.remove("hidden");
     submitButton.disabled = false; submitButton.textContent = "开始生成";
+  }
+});
+
+const ltxForm = document.getElementById("ltx-task-form");
+const sourceVideo = document.getElementById("sourceVideo");
+const sourcePreview = document.getElementById("source-preview");
+const ltxError = document.getElementById("ltx-form-error");
+const ltxSubmit = document.getElementById("ltx-submit-button");
+sourceVideo?.addEventListener("change", () => {
+  const file = sourceVideo.files[0];
+  if (!file) return;
+  sourcePreview.src = URL.createObjectURL(file);
+  sourcePreview.classList.remove("hidden");
+});
+ltxForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  ltxError.classList.add("hidden");
+  ltxSubmit.disabled = true;
+  ltxSubmit.textContent = "正在创建任务…";
+  try {
+    const formData = new FormData(ltxForm);
+    formData.set("instanceType", instanceSelect.value);
+    const response = await fetch("/api/tasks/ltx-lip-sync", {
+      method: "POST",
+      headers: {"X-CSRF-Token": csrfToken},
+      body: formData,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "创建任务失败");
+    location.href = "/tasks/" + data.taskId;
+  } catch (error) {
+    ltxError.textContent = error.message;
+    ltxError.classList.remove("hidden");
+    ltxSubmit.disabled = false;
+    ltxSubmit.textContent = "开始生成";
   }
 });
 </script>

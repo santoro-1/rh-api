@@ -6,11 +6,16 @@
 <div class="task-list">
   {% for task in tasks %}
   <article class="task-card">
-    <img src="/api/tasks/{{ task.id }}/image" alt="参考图">
+    {% if task.workflow_type == "digital_human" %}
+      <img src="/api/tasks/{{ task.id }}/image" alt="参考图">
+    {% else %}
+      <div class="video-placeholder">视频</div>
+    {% endif %}
     <div class="task-main">
       <h2><a href="/tasks/{{ task.id }}">{{ status_labels.get(task.status, task.status) }}</a></h2>
+      <p class="muted">{{ workflow_names.get(task.workflow_type, task.workflow_type) }}</p>
       <p>{{ task.created_at.strftime("%Y-%m-%d %H:%M") }} · {{ task.audio_original_name }}</p>
-      <p>{{ task.start_seconds|timecode }} — {{ task.end_seconds|timecode }}</p>
+      {% if task.workflow_type == "digital_human" %}<p>{{ task.start_seconds|timecode }} — {{ task.end_seconds|timecode }}</p>{% endif %}
       <p class="truncate">{{ task.prompt }}</p>
       {% if current_user.is_admin %}<p class="muted">用户：{{ task.user.username }}</p>{% endif %}
       {% if task.error_message %}<p class="error">{{ task.error_message }}</p>{% endif %}

@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -20,6 +20,12 @@ from app.workflows.base import WorkflowAdapter, resolve_asset_path
 
 
 logger = logging.getLogger(__name__)
+
+SLOT_OCCUPYING_TASK_STATUSES = (
+    TaskStatus.UPLOADING.value,
+    TaskStatus.SUBMITTED.value,
+    TaskStatus.RUNNING.value,
+)
 
 
 def _now() -> datetime:
@@ -72,24 +78,46 @@ def recover_interrupted_tasks(db: Session) -> int:
 
 
 def claim_next_pending_task(db: Session) -> str | None:
-    task_id = db.scalar(
-        select(GenerationTask.id)
+    active_counts = dict(
+        db.execute(
+            select(GenerationTask.user_id, func.count())
+            .where(GenerationTask.status.in_(SLOT_OCCUPYING_TASK_STATUSES))
+            .group_by(GenerationTask.user_id)
+        ).all()
+    )
+    concurrency_limits = dict(
+        db.execute(
+            select(
+                RunningHubConfig.user_id,
+                RunningHubConfig.max_concurrent_tasks,
+            )
+        ).all()
+    )
+    pending_tasks = db.execute(
+        select(GenerationTask.id, GenerationTask.user_id)
         .where(GenerationTask.status == TaskStatus.PENDING.value)
         .order_by(GenerationTask.created_at)
-        .limit(1)
-    )
-    if not task_id:
-        return None
-    result = db.execute(
-        update(GenerationTask)
-        .where(
-            GenerationTask.id == task_id,
-            GenerationTask.status == TaskStatus.PENDING.value,
+    ).all()
+    for task_id, user_id in pending_tasks:
+        limit = max(int(concurrency_limits.get(user_id, 1)), 1)
+        if int(active_counts.get(user_id, 0)) >= limit:
+            continue
+        result = db.execute(
+            update(GenerationTask)
+            .where(
+                GenerationTask.id == task_id,
+                GenerationTask.status == TaskStatus.PENDING.value,
+            )
+            .values(
+                status=TaskStatus.UPLOADING.value,
+                error_code=None,
+                error_message=None,
+            )
         )
-        .values(status=TaskStatus.UPLOADING.value, error_code=None, error_message=None)
-    )
-    db.commit()
-    return task_id if result.rowcount == 1 else None
+        db.commit()
+        if result.rowcount == 1:
+            return task_id
+    return None
 
 
 def _load_task(db: Session, task_id: str) -> GenerationTask | None:
@@ -201,6 +229,7 @@ def process_task(db: Session, task_id: str) -> None:
         # RunningHubClient is generic.  The workflow config determines only
         # which AI App the generic submit endpoint targets.
         client.ai_app_id = workflow_config.ai_app_id
+        client.submission_type = workflow.submission_type
     except (ValueError, RunningHubError) as exc:
         _mark_failed(task, "CONFIGURATION_ERROR", str(exc))
         db.commit()
@@ -252,8 +281,7 @@ def run_once() -> int:
             process_task(db, task_id)
             processed += 1
 
-        pending_task_id = claim_next_pending_task(db)
-        if pending_task_id:
+        while pending_task_id := claim_next_pending_task(db):
             process_task(db, pending_task_id)
             processed += 1
     return processed

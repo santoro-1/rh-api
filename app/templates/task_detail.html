@@ -4,12 +4,22 @@
 <section class="page-heading"><div><h1>任务详情</h1><p id="status-text" class="status">{{ status_labels.get(task.status, task.status) }}</p></div><a class="button secondary" href="/tasks">返回列表</a></section>
 <div class="detail-grid">
   <section class="panel">
-    <img class="detail-image" src="/api/tasks/{{ task.id }}/image" alt="参考图片">
+    {% if task.workflow_type == "digital_human" %}
+      <img class="detail-image" src="/api/tasks/{{ task.id }}/image" alt="参考图片">
+    {% else %}
+      <video class="video" controls preload="metadata" src="/api/tasks/{{ task.id }}/source-video"></video>
+    {% endif %}
     <dl>
+      <dt>工作流</dt><dd>{{ workflow_names.get(task.workflow_type, task.workflow_type) }}</dd>
       <dt>创建时间</dt><dd>{{ task.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</dd>
-      <dt>音频文件</dt><dd>{{ task.audio_original_name }}</dd>
-      <dt>音频时长</dt><dd>{{ task.audio_duration_seconds|round(1) }} 秒</dd>
-      <dt>截取范围</dt><dd>{{ task.start_seconds|timecode }} — {{ task.end_seconds|timecode }}</dd>
+      {% if task.workflow_type == "digital_human" %}
+        <dt>音频文件</dt><dd>{{ task.audio_original_name }}</dd>
+        <dt>音频时长</dt><dd>{{ task.audio_duration_seconds|round(1) }} 秒</dd>
+        <dt>截取范围</dt><dd>{{ task.start_seconds|timecode }} — {{ task.end_seconds|timecode }}</dd>
+      {% else %}
+        <dt>源视频</dt><dd>{{ task.image_original_name }}</dd>
+        <dt>音频方式</dt><dd>{{ task.audio_original_name }}</dd>
+      {% endif %}
       <dt>RunningHub Task ID</dt><dd>{{ task.runninghub_task_id or "尚未提交" }}</dd>
       <dt>提示词</dt><dd class="pre-wrap">{{ task.prompt }}</dd>
     </dl>

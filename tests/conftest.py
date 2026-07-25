@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -73,6 +74,13 @@ def create_user(
 
 
 def login(client: TestClient, username: str, password: str = "password123") -> None:
+    login_page = client.get("/login")
+    token_match = re.search(
+        r'name="csrf_token" value="([^"]+)"',
+        login_page.text,
+    )
+    assert token_match is not None
+    client.headers["X-CSRF-Token"] = token_match.group(1)
     response = client.post(
         "/login",
         data={"username": username, "password": password},

@@ -13,12 +13,12 @@ class DigitalHumanWorkflow:
     display_name = "数字人视频"
     default_ai_app_id = "2062251097452007426"
     default_prompt = "人物自然地说话，表情自然，动作自然，镜头保持稳定。"
+    submission_type = "ai-app"
 
     # This is intentionally private to this adapter.  Other workflows define
     # their own node map rather than extending generic task or worker code.
     _NODES = {
         "resolution": ("503", "value", "1024", "最长分辨率"),
-        "overall_mode": ("752", "select", "2", "总体模式选择"),
         "person_mode": ("753", "select", "1", "单双人模式选择"),
         "image": ("240", "image", None, "参考图像"),
         "audio": ("339", "audio", None, "总参考音频"),
@@ -41,9 +41,6 @@ class DigitalHumanWorkflow:
             str(parameters.get("end_time") or ""),
             duration,
         )
-        overall_mode = str(parameters.get("overall_mode", "2")).strip()
-        if overall_mode not in {"0", "1", "2"}:
-            raise ValueError("总体模式不合法")
         person_mode = str(parameters.get("person_mode", "1")).strip()
         if person_mode not in {"0", "1"}:
             raise ValueError("单双人模式不合法")
@@ -53,15 +50,20 @@ class DigitalHumanWorkflow:
                 raise ValueError
         except ValueError as exc:
             raise ValueError("最长分辨率必须是正整数") from exc
+        requested_instance_type = str(
+            parameters.get("instance_type") or "default"
+        ).strip()
+        if requested_instance_type != "default":
+            raise ValueError("数字人工作流当前固定使用 Stand 运行（24G）")
         return {
             "prompt": prompt,
             "start_seconds": start_seconds,
             "end_seconds": end_seconds,
             "start_time": format_timecode(start_seconds),
             "end_time": format_timecode(end_seconds),
-            "overall_mode": overall_mode,
             "person_mode": person_mode,
             "resolution": resolution,
+            "instance_type": "default",
         }
 
     def serialize_input(
@@ -155,6 +157,9 @@ class DigitalHumanWorkflow:
         values = self._input(task).get("parameters")
         if not isinstance(values, dict):
             raise ValueError("数字人任务参数不合法")
+        selected_instance_type = str(values.get("instance_type") or "default").strip()
+        if selected_instance_type != "default":
+            raise ValueError("数字人工作流当前固定使用 Stand 运行（24G）")
         values = {
             **values,
             "image": uploaded_files["image"],
@@ -176,7 +181,7 @@ class DigitalHumanWorkflow:
         ]
         return {
             "nodeInfoList": nodes,
-            "instanceType": instance_type,
+            "instanceType": "default",
             "usePersonalQueue": False,
         }
 

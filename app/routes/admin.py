@@ -9,8 +9,12 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import RunningHubConfig, User
 from app.routes.dependencies import get_page_admin
+from app.services.csrf import require_csrf
 from app.services.security import encrypt_secret, hash_password, mask_secret
-from app.services.workflow_configs import save_workflow_config
+from app.services.workflow_configs import (
+    get_user_workflow_config,
+    save_workflow_config,
+)
 from app.web import templates
 
 
@@ -37,6 +41,10 @@ def _save_config(
     instance_type: str,
     default_prompt: str,
     max_concurrent_tasks: int,
+    ltx_workflow_id: str,
+    ltx_instance_type: str,
+    ltx_default_prompt: str,
+    ltx_enabled: bool,
 ) -> None:
     _validate_config(base_url, ai_app_id, instance_type, max_concurrent_tasks)
     config = user.runninghub_config
@@ -69,6 +77,21 @@ def _save_config(
         default_prompt=config.default_prompt,
     )
     db.add(workflow_config)
+    ltx_workflow_id = ltx_workflow_id.strip()
+    if ltx_enabled and not ltx_workflow_id:
+        raise ValueError("启用视频对口型工作流时，Workflow ID 不能为空")
+    ltx_config = save_workflow_config(
+        user,
+        "ltx_lip_sync",
+        ai_app_id=ltx_workflow_id or "2080551073030434817",
+        instance_type=ltx_instance_type,
+        default_prompt=(
+            ltx_default_prompt.strip()
+            or "人物自然地说话，口型与语音一致，保持原视频动作、构图和镜头稳定。"
+        ),
+        is_enabled=ltx_enabled,
+    )
+    db.add(ltx_config)
 
 
 @router.get("/users")
@@ -78,7 +101,12 @@ def users_page(
     db: Session = Depends(get_db),
 ):
     users = db.scalars(
-        select(User).options(selectinload(User.runninghub_config)).order_by(User.id)
+        select(User)
+        .options(
+            selectinload(User.runninghub_config),
+            selectinload(User.workflow_configs),
+        )
+        .order_by(User.id)
     ).all()
     return templates.TemplateResponse(
         request,
@@ -107,6 +135,12 @@ def new_user_page(
             },
             "error": None,
             "current_user": current_user,
+            "ltx_config": {
+                "ai_app_id": "2080551073030434817",
+                "instance_type": "plus",
+                "default_prompt": "人物自然地说话，口型与语音一致，保持原视频动作、构图和镜头稳定。",
+                "is_enabled": False,
+            },
         },
     )
 
@@ -121,9 +155,14 @@ def create_user(
     api_key: str = Form(""),
     base_url: str = Form(...),
     ai_app_id: str = Form(...),
-    instance_type: str = Form("plus"),
+    instance_type: str = Form("default"),
     default_prompt: str = Form(""),
     max_concurrent_tasks: int = Form(1),
+    ltx_workflow_id: str = Form("2080551073030434817"),
+    ltx_instance_type: str = Form("plus"),
+    ltx_default_prompt: str = Form(""),
+    ltx_enabled: bool = Form(False),
+    csrf_ok: None = Depends(require_csrf),
     _: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
 ):
@@ -149,6 +188,10 @@ def create_user(
             instance_type,
             default_prompt,
             max_concurrent_tasks,
+            ltx_workflow_id,
+            ltx_instance_type,
+            ltx_default_prompt,
+            ltx_enabled,
         )
         db.commit()
     except ValueError as exc:
@@ -166,7 +209,10 @@ def edit_user_page(
 ):
     user = db.scalar(
         select(User)
-        .options(selectinload(User.runninghub_config))
+        .options(
+            selectinload(User.runninghub_config),
+            selectinload(User.workflow_configs),
+        )
         .where(User.id == user_id)
     )
     if not user:
@@ -180,6 +226,7 @@ def edit_user_page(
             "config": user.runninghub_config,
             "error": None,
             "current_user": current_user,
+            "ltx_config": get_user_workflow_config(user, "ltx_lip_sync"),
         },
     )
 
@@ -194,13 +241,25 @@ def update_user(
     api_key: str = Form(""),
     base_url: str = Form(...),
     ai_app_id: str = Form(...),
-    instance_type: str = Form("plus"),
+    instance_type: str = Form("default"),
     default_prompt: str = Form(""),
     max_concurrent_tasks: int = Form(1),
+    ltx_workflow_id: str = Form("2080551073030434817"),
+    ltx_instance_type: str = Form("plus"),
+    ltx_default_prompt: str = Form(""),
+    ltx_enabled: bool = Form(False),
+    csrf_ok: None = Depends(require_csrf),
     _: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
 ):
-    user = db.get(User, user_id)
+    user = db.scalar(
+        select(User)
+        .options(
+            selectinload(User.runninghub_config),
+            selectinload(User.workflow_configs),
+        )
+        .where(User.id == user_id)
+    )
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
     username = username.strip()
@@ -222,6 +281,10 @@ def update_user(
             instance_type,
             default_prompt,
             max_concurrent_tasks,
+            ltx_workflow_id,
+            ltx_instance_type,
+            ltx_default_prompt,
+            ltx_enabled,
         )
         db.commit()
     except ValueError as exc:
