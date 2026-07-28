@@ -9,12 +9,15 @@
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="/generate">RunningHub 视频生成</a>
+    <a class="brand" href="/generate/batch">RunningHub 视频生成</a>
     {% if request.session.get("user_id") %}
       <nav>
-        <a href="/generate">创建任务</a>
+        <a href="/generate/batch">批量生成</a>
+        <a href="/generate">单次生成</a>
+        <a href="/voices">声音管理</a>
         <a href="/tasks">任务历史</a>
-        {% if current_user is defined and current_user.is_admin %}<a href="/admin/users">用户管理</a>{% endif %}
+        <a href="/batches">批次历史</a>
+        {% if current_user is defined and current_user.is_admin %}<a href="/admin/users">用户管理</a><a href="/admin/operations">运行状态</a>{% endif %}
         <form method="post" action="/logout">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="link-button" type="submit">退出登录</button>

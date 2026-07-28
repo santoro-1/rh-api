@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -9,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -34,11 +36,44 @@ class TaskStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class AudioTaskStatus(str, Enum):
+    PENDING = "PENDING"
+    CLONING = "CLONING"
+    SYNTHESIZING = "SYNTHESIZING"
+    REMOTE_PENDING = "REMOTE_PENDING"
+    AWAITING_REVIEW = "AWAITING_REVIEW"
+    ALIGNING = "ALIGNING"
+    SEGMENTING = "SEGMENTING"
+    HANDOFF = "HANDOFF"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
+class VoiceAssetStatus(str, Enum):
+    TEMPORARY = "TEMPORARY"
+    UPLOADED = "UPLOADED"
+    CLONED = "CLONED"
+    READY = "READY"
+    ACTIVE = "ACTIVE"
+    FAILED = "FAILED"
+
+
+class VoiceCreationStatus(str, Enum):
+    PENDING = "PENDING"
+    CLONING = "CLONING"
+    SYNTHESIZING = "SYNTHESIZING"
+    PREVIEW_READY = "PREVIEW_READY"
+    SAVE_PENDING = "SAVE_PENDING"
+    SAVING = "SAVING"
+    SAVED = "SAVED"
+    FAILED = "FAILED"
+
+
 class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(80), index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -54,6 +89,26 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     tasks: Mapped[list["GenerationTask"]] = relationship(back_populates="user")
+    batches: Mapped[list["GenerationBatch"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    staged_assets: Mapped[list["StagedAsset"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    minimax_config: Mapped[Optional["MiniMaxConfig"]] = relationship(
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    minimax_voices: Mapped[list["MiniMaxVoiceAsset"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    audio_tasks: Mapped[list["AudioGenerationTask"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    voice_creation_tasks: Mapped[list["VoiceCreationTask"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (UniqueConstraint("username"),)
 
 
 class RunningHubConfig(Base):
@@ -77,6 +132,121 @@ class RunningHubConfig(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="runninghub_config")
+
+
+class MiniMaxConfig(Base):
+    """Encrypted account-level MiniMax connection and pacing settings."""
+
+    __tablename__ = "minimax_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    api_key_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The binding stays stable when an API key is rotated for the same
+    # MiniMax account. Credential fingerprints are retained only for audit.
+    account_binding_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    account_label: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="MiniMax 账号"
+    )
+    credential_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    base_url: Mapped[str] = mapped_column(
+        String(500), nullable=False, default="https://api.minimaxi.com"
+    )
+    requests_per_minute: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=20
+    )
+    last_t2a_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="minimax_config")
+    voices: Mapped[list["MiniMaxVoiceAsset"]] = relationship(
+        back_populates="config", cascade="all, delete-orphan"
+    )
+    audio_tasks: Mapped[list["AudioGenerationTask"]] = relationship(
+        back_populates="config"
+    )
+    voice_creation_tasks: Mapped[list["VoiceCreationTask"]] = relationship(
+        back_populates="config"
+    )
+
+
+class MiniMaxVoiceAsset(Base):
+    """One provider system voice or a reusable custom MiniMax voice."""
+
+    __tablename__ = "minimax_voice_assets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    config_id: Mapped[int] = mapped_column(
+        ForeignKey("minimax_configs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    voice_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    account_binding_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
+    credential_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=VoiceAssetStatus.TEMPORARY.value
+    )
+    method: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="legacy"
+    )
+    is_saved: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    source_relative_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    source_original_name: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+    remote_file_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    preview_relative_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    activated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="minimax_voices")
+    config: Mapped[MiniMaxConfig] = relationship(back_populates="voices")
+    creation_task: Mapped[Optional["VoiceCreationTask"]] = relationship(
+        back_populates="voice_asset", uselist=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("config_id", "voice_id", name="uq_minimax_voice_config_id"),
+    )
 
 
 class WorkflowConfig(Base):
@@ -118,8 +288,16 @@ class GenerationTask(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    batch_item_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("generation_batch_items.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    segment_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("generation_segments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     runninghub_task_id: Mapped[Optional[str]] = mapped_column(
-        String(100), unique=True, nullable=True, index=True
+        String(100), nullable=True, index=True
     )
     workflow_type: Mapped[str] = mapped_column(
         String(100), nullable=False, default="digital_human", index=True
@@ -153,3 +331,447 @@ class GenerationTask(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="tasks")
+    batch_item: Mapped[Optional["GenerationBatchItem"]] = relationship(
+        back_populates="generation_task"
+    )
+    segment: Mapped[Optional["GenerationSegment"]] = relationship(
+        back_populates="generation_task"
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_generation_tasks_batch_item_id",
+            "batch_item_id",
+            unique=True,
+        ),
+        Index(
+            "ix_generation_tasks_segment_id",
+            "segment_id",
+            unique=True,
+        ),
+        UniqueConstraint("runninghub_task_id"),
+        UniqueConstraint(
+            "batch_item_id",
+            name="uq_generation_tasks_batch_item",
+        ),
+    )
+
+
+class GenerationBatch(Base):
+    """One user submission containing multiple independently queued video tasks."""
+
+    __tablename__ = "generation_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    workflow_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    audio_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="upload")
+    review_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    request_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE")
+    total_items: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="batches")
+    items: Mapped[list["GenerationBatchItem"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="GenerationBatchItem.row_number",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "request_key", name="uq_batches_user_request_key"),
+    )
+
+
+class GenerationBatchItem(Base):
+    """Durable row-level orchestration state before and after audio is ready."""
+
+    __tablename__ = "generation_batch_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batches.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+    audio_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="AUDIO_READY"
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="TASK_CREATED"
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    batch: Mapped[GenerationBatch] = relationship(back_populates="items")
+    generation_task: Mapped[Optional[GenerationTask]] = relationship(
+        back_populates="batch_item", uselist=False
+    )
+    audio_task: Mapped[Optional["AudioGenerationTask"]] = relationship(
+        back_populates="batch_item",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    segments: Mapped[list["GenerationSegment"]] = relationship(
+        back_populates="batch_item",
+        cascade="all, delete-orphan",
+        order_by="GenerationSegment.segment_index",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("batch_id", "row_number", name="uq_batch_items_row_number"),
+        UniqueConstraint("batch_id", "row_key", name="uq_batch_items_row_key"),
+    )
+
+
+class StagedAsset(Base):
+    """Validated upload waiting to be referenced by a batch manifest."""
+
+    __tablename__ = "staged_assets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped[User] = relationship(back_populates="staged_assets")
+
+
+class GenerationSegment(Base):
+    """One visible RunningHub child task cut from a full script/audio row."""
+
+    __tablename__ = "generation_segments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    batch_item_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batch_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    script_text: Mapped[str] = mapped_column(Text, nullable=False)
+    start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    audio_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    video_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    alignment_method: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="punctuation_silence"
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="PENDING", index=True
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    batch_item: Mapped[GenerationBatchItem] = relationship(
+        back_populates="segments"
+    )
+    generation_task: Mapped[Optional[GenerationTask]] = relationship(
+        back_populates="segment", uselist=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_item_id",
+            "segment_index",
+            name="uq_generation_segments_item_index",
+        ),
+    )
+
+
+class AudioGenerationTask(Base):
+    """Persistent script-to-audio work that hands off to video task creation."""
+
+    __tablename__ = "audio_generation_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    config_id: Mapped[int] = mapped_column(
+        ForeignKey("minimax_configs.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
+    batch_item_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batch_items.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    voice_a_id: Mapped[str] = mapped_column(
+        ForeignKey("minimax_voice_assets.id", ondelete="RESTRICT"), nullable=False
+    )
+    voice_b_id: Mapped[str] = mapped_column(
+        ForeignKey("minimax_voice_assets.id", ondelete="RESTRICT"), nullable=False
+    )
+    voice_asset_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("minimax_voice_assets.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    planned_generation_task_id: Mapped[str] = mapped_column(
+        String(36), unique=True, nullable=False
+    )
+    account_binding_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
+    credential_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    primary_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    primary_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    primary_original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    speech_script: Mapped[str] = mapped_column(Text, nullable=False)
+    pronunciation_dict_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="[]"
+    )
+    video_parameters_json: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    weight_a: Mapped[int] = mapped_column(Integer, nullable=False)
+    weight_b: Mapped[int] = mapped_column(Integer, nullable=False)
+    speed: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    volume: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    pitch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    language_boost: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="auto"
+    )
+    output_format: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="mp3"
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=AudioTaskStatus.PENDING.value, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    output_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    subtitle_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    provider_task_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True, unique=True, index=True
+    )
+    provider_file_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    provider_submitted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    generation_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    alignment_method: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True
+    )
+    cost_confirmed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped[User] = relationship(back_populates="audio_tasks")
+    config: Mapped[MiniMaxConfig] = relationship(back_populates="audio_tasks")
+    batch_item: Mapped[GenerationBatchItem] = relationship(back_populates="audio_task")
+    voice_a: Mapped[MiniMaxVoiceAsset] = relationship(
+        foreign_keys=[voice_a_id]
+    )
+    voice_b: Mapped[MiniMaxVoiceAsset] = relationship(
+        foreign_keys=[voice_b_id]
+    )
+    voice_asset: Mapped[Optional[MiniMaxVoiceAsset]] = relationship(
+        foreign_keys=[voice_asset_id]
+    )
+    attempts: Mapped[list["AudioGenerationAttempt"]] = relationship(
+        back_populates="audio_task",
+        cascade="all, delete-orphan",
+        order_by="AudioGenerationAttempt.version",
+    )
+
+
+class AudioGenerationAttempt(Base):
+    """One paid MiniMax output version retained for review and audit."""
+
+    __tablename__ = "audio_generation_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    audio_task_id: Mapped[str] = mapped_column(
+        ForeignKey("audio_generation_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_task_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    provider_file_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    output_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    subtitle_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="READY"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    audio_task: Mapped[AudioGenerationTask] = relationship(
+        back_populates="attempts"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "audio_task_id",
+            "version",
+            name="uq_audio_attempts_task_version",
+        ),
+    )
+
+
+class VoiceCreationTask(Base):
+    """Persistent clone or blend audition that can be saved as one voice."""
+
+    __tablename__ = "voice_creation_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    config_id: Mapped[int] = mapped_column(
+        ForeignKey("minimax_configs.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    voice_asset_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("minimax_voice_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
+    account_binding_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
+    credential_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    method: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    preview_text: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    weight_a: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    weight_b: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    noise_reduction: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    volume_normalization: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    source_a_relative_path: Mapped[str] = mapped_column(
+        String(500), nullable=False
+    )
+    source_a_original_name: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    source_b_relative_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    source_b_original_name: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+    source_a_file_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    source_b_file_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    final_file_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    temporary_voice_a_id: Mapped[Optional[str]] = mapped_column(
+        String(256), nullable=True
+    )
+    temporary_voice_b_id: Mapped[Optional[str]] = mapped_column(
+        String(256), nullable=True
+    )
+    final_voice_id: Mapped[Optional[str]] = mapped_column(
+        String(256), nullable=True
+    )
+    preview_relative_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=VoiceCreationStatus.PENDING.value,
+        index=True,
+    )
+    cost_confirmed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    save_requested_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped[User] = relationship(back_populates="voice_creation_tasks")
+    config: Mapped[MiniMaxConfig] = relationship(
+        back_populates="voice_creation_tasks"
+    )
+    voice_asset: Mapped[Optional[MiniMaxVoiceAsset]] = relationship(
+        back_populates="creation_task"
+    )

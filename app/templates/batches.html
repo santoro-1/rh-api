@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}批次历史{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><h1>批次历史</h1><p class="muted">查看批次及其独立任务的整体进度。</p></div>
+  <a class="button secondary" href="/generate/batch">创建批次</a>
+</section>
+<section class="panel">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>创建时间</th>{% if current_user.is_admin %}<th>用户</th>{% endif %}<th>批次</th><th>工作流</th><th>进度</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        {% for batch in batches %}
+          {% set summary = summaries[batch.id] %}
+          <tr>
+            <td>{{ batch.created_at|beijing_datetime }}</td>
+            {% if current_user.is_admin %}<td>{{ batch.user.username }}</td>{% endif %}
+            <td><a href="/batches/{{ batch.id }}">{{ batch.name }}</a><br><small>{{ batch.id }}</small></td>
+            <td>{{ "数字人视频" if batch.workflow_type == "digital_human" else "视频对口型" }}<br><small>{{ "脚本语音" if batch.audio_mode == "minimax" else "上传音频" }}</small></td>
+            <td>{{ summary.finished }}/{{ summary.total }}（{{ summary.progress }}%）</td>
+            <td>{{ {"ACTIVE":"处理中","SUCCESS":"全部成功","PARTIAL_FAILED":"部分失败","FAILED":"失败"}[summary.status] }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="{{ 6 if current_user.is_admin else 5 }}" class="empty-cell">还没有批次记录</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

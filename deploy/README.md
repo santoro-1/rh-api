@@ -10,12 +10,12 @@ Internet -> Nginx :443 -> FastAPI :8000 (仅监听 127.0.0.1)
                               |
                          SQLite / data
                               |
-                      RunningHub Worker
+                      MiniMax Audio Worker → RunningHub Video Worker
 ```
 
-服务器无需 GPU。Nginx 负责公网入口和 HTTPS；systemd 分别守护 Web 与 Worker。
-当前 SQLite 架构只运行一个 Web 进程和一个 Worker，不要自行增加 Uvicorn
-`--workers` 或复制 Worker 服务。
+服务器无需 GPU。Nginx 负责公网入口和 HTTPS；systemd 分别守护 Web、语音
+Worker 与视频 Worker。当前 SQLite 架构只运行一个 Web 进程、一个语音 Worker
+和一个视频 Worker，不要自行增加 Uvicorn `--workers` 或复制 Worker 服务。
 
 ## 2. 准备条件
 
@@ -81,15 +81,15 @@ sudo -u runninghub /opt/runninghub/.venv/bin/python -m scripts.create_admin admi
 sudo cp /opt/runninghub/deploy/systemd/runninghub-*.service /etc/systemd/system/
 sudo cp /opt/runninghub/deploy/systemd/runninghub-*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now runninghub-web runninghub-worker
+sudo systemctl enable --now runninghub-web runninghub-audio-worker runninghub-worker
 sudo systemctl enable --now runninghub-backup.timer runninghub-cleanup.timer
 ```
 
 检查：
 
 ```bash
-sudo systemctl status runninghub-web runninghub-worker
-sudo journalctl -u runninghub-web -u runninghub-worker -n 100 --no-pager
+sudo systemctl status runninghub-web runninghub-audio-worker runninghub-worker
+sudo journalctl -u runninghub-web -u runninghub-audio-worker -u runninghub-worker -n 100 --no-pager
 curl -H "Host: video.example.com" http://127.0.0.1:8000/healthz
 ```
 
@@ -134,17 +134,18 @@ Nginx 模板已把请求体上限设为 550MB，以覆盖应用当前 500MB 的�
 查看日志：
 
 ```bash
-sudo journalctl -u runninghub-web -f
-sudo journalctl -u runninghub-worker -f
+sudo journalctl -u runninghub-web -u runninghub-audio-worker -u runninghub-worker -f
 ```
+
+管理员也可以在站内“运行状态”页面查看服务心跳、两级队列和近期脱敏日志。
 
 发布新版本：
 
 ```bash
-sudo systemctl stop runninghub-worker runninghub-web
+sudo systemctl stop runninghub-audio-worker runninghub-worker runninghub-web
 sudo -u runninghub /opt/runninghub/.venv/bin/pip install -r /opt/runninghub/requirements.txt
 sudo -u runninghub /opt/runninghub/.venv/bin/python -m alembic -c /opt/runninghub/alembic.ini upgrade head
-sudo systemctl start runninghub-web runninghub-worker
+sudo systemctl start runninghub-web runninghub-audio-worker runninghub-worker
 ```
 
 更新前先运行备份。不要删除或重建 `data/app.db` 来处理迁移问题。
@@ -161,8 +162,8 @@ sudo -u runninghub /bin/bash /opt/runninghub/deploy/scripts/backup.sh
 恢复会覆盖当前数据，必须先停止服务并显式确认：
 
 ```bash
-sudo systemctl stop runninghub-worker runninghub-web
+sudo systemctl stop runninghub-audio-worker runninghub-worker runninghub-web
 sudo /bin/bash /opt/runninghub/deploy/scripts/restore.sh \
   /var/backups/runninghub/runninghub-YYYYmmddTHHMMSSZ.tar.gz --confirm
-sudo systemctl start runninghub-web runninghub-worker
+sudo systemctl start runninghub-web runninghub-audio-worker runninghub-worker
 ```

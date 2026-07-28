@@ -14,7 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import get_settings
 from app.database import engine
-from app.routes import admin, auth, tasks
+from app.routes import admin, auth, batches, operations, tasks, voices
 
 
 def create_app() -> FastAPI:
@@ -24,6 +24,11 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         settings.uploads_dir.mkdir(parents=True, exist_ok=True)
         settings.outputs_dir.mkdir(parents=True, exist_ok=True)
+        settings.staged_assets_dir.mkdir(parents=True, exist_ok=True)
+        settings.voice_sources_dir.mkdir(parents=True, exist_ok=True)
+        settings.voice_creations_dir.mkdir(parents=True, exist_ok=True)
+        settings.logs_dir.mkdir(parents=True, exist_ok=True)
+        settings.runtime_dir.mkdir(parents=True, exist_ok=True)
         yield
 
     app = FastAPI(
@@ -52,6 +57,9 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(admin.router)
     app.include_router(tasks.router)
+    app.include_router(batches.router)
+    app.include_router(voices.router)
+    app.include_router(operations.router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthcheck():

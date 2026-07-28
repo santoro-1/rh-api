@@ -19,13 +19,15 @@ router = APIRouter()
 
 @router.get("/")
 def home(request: Request):
-    return RedirectResponse("/generate" if request.session.get("user_id") else "/login")
+    return RedirectResponse(
+        "/generate/batch" if request.session.get("user_id") else "/login"
+    )
 
 
 @router.get("/login")
 def login_page(request: Request):
     if request.session.get("user_id"):
-        return RedirectResponse("/generate", status_code=303)
+        return RedirectResponse("/generate/batch", status_code=303)
     return templates.TemplateResponse(request, "login.html", {"error": None})
 
 
@@ -51,7 +53,7 @@ def login(
     request.session.clear()
     request.session["user_id"] = user.id
     request.session[SESSION_KEY] = csrf_token
-    return RedirectResponse("/generate", status_code=303)
+    return RedirectResponse("/generate/batch", status_code=303)
 
 
 @router.post("/logout")

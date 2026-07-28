@@ -8,6 +8,11 @@ from app.models import RunningHubConfig, User, WorkflowConfig
 from app.workflows.registry import get_workflow
 
 
+_LEGACY_LTX_DEFAULT_PROMPT = (
+    "人物自然地说话，口型与语音一致，保持原视频动作、构图和镜头稳定。"
+)
+
+
 @dataclass(frozen=True)
 class ResolvedWorkflowConfig:
     """Effective per-user configuration consumed by a workflow adapter."""
@@ -44,11 +49,19 @@ def get_user_workflow_config(user: User, workflow_key: str) -> ResolvedWorkflowC
         None,
     )
     if config:
+        default_prompt = config.default_prompt
+        # Replace only the obsolete built-in text; custom administrator prompts
+        # remain untouched.
+        if (
+            workflow_key == "ltx_lip_sync"
+            and default_prompt == _LEGACY_LTX_DEFAULT_PROMPT
+        ):
+            default_prompt = workflow.default_prompt
         return ResolvedWorkflowConfig(
             workflow_key=workflow_key,
             ai_app_id=config.ai_app_id,
             instance_type=config.instance_type,
-            default_prompt=config.default_prompt,
+            default_prompt=default_prompt,
             is_enabled=config.is_enabled,
             settings=_decode_settings(config.settings_json),
         )

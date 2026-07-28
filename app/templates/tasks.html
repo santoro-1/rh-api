@@ -2,10 +2,46 @@
 {% block title %}任务历史{% endblock %}
 {% block content %}
 <section class="page-heading"><div><h1>任务历史</h1><p class="muted">{% if current_user.is_admin %}管理员视图：显示全部用户的任务。{% else %}这里只显示你的任务。{% endif %}</p></div><a class="button secondary" href="/generate">创建任务</a></section>
+<section class="panel task-tools">
+  <form class="date-filter" method="get" action="/tasks">
+    <label>开始日期
+      <input type="date" name="start_date" value="{{ start_date }}">
+    </label>
+    <label>结束日期
+      <input type="date" name="end_date" value="{{ end_date }}">
+    </label>
+    <button type="submit">按日期检索</button>
+    {% if has_date_filter %}<a class="button secondary" href="/tasks">清除筛选</a>{% endif %}
+  </form>
+  {% if tasks %}
+  <form id="bulk-delete-form" class="bulk-toolbar" method="post" action="/tasks/bulk-delete" onsubmit="return validateBulkDelete()">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="start_date" value="{{ start_date }}">
+    <input type="hidden" name="end_date" value="{{ end_date }}">
+    <label class="inline-check">
+      <input id="select-all-tasks" type="checkbox">
+      全选当前结果
+    </label>
+    <span id="selected-task-count" class="muted">已选择 0 项</span>
+    <button id="bulk-delete-button" class="button danger" type="submit" disabled>批量删除</button>
+  </form>
+  {% endif %}
+</section>
 {% if tasks %}
 <div class="task-list">
   {% for task in tasks %}
   <article class="task-card">
+    <label class="task-selector" title="选择此任务">
+      <input
+        class="task-select"
+        type="checkbox"
+        name="task_ids"
+        value="{{ task.id }}"
+        form="bulk-delete-form"
+        data-deletable="{{ 'true' if task.status in ['SUCCESS', 'FAILED', 'DOWNLOAD_FAILED', 'CANCELLED'] else 'false' }}"
+        aria-label="选择任务 {{ task.id }}"
+      >
+    </label>
     {% if task.workflow_type == "digital_human" %}
       <img src="/api/tasks/{{ task.id }}/image" alt="参考图">
     {% else %}
@@ -14,7 +50,7 @@
     <div class="task-main">
       <h2><a href="/tasks/{{ task.id }}">{{ status_labels.get(task.status, task.status) }}</a></h2>
       <p class="muted">{{ workflow_names.get(task.workflow_type, task.workflow_type) }}</p>
-      <p>{{ task.created_at.strftime("%Y-%m-%d %H:%M") }} · {{ task.audio_original_name }}</p>
+      <p>{{ task.created_at|beijing_datetime }} · {{ task.audio_original_name }}</p>
       {% if task.workflow_type == "digital_human" %}<p>{{ task.start_seconds|timecode }} — {{ task.end_seconds|timecode }}</p>{% endif %}
       <p class="truncate">{{ task.prompt }}</p>
       {% if current_user.is_admin %}<p class="muted">用户：{{ task.user.username }}</p>{% endif %}
@@ -23,9 +59,87 @@
     <div class="task-actions">
       <a class="button secondary" href="/tasks/{{ task.id }}">详情</a>
       {% if task.status == "SUCCESS" %}<a class="button" href="/api/tasks/{{ task.id }}/download">下载</a>{% endif %}
+      {% if task.status in ["FAILED", "DOWNLOAD_FAILED"] %}
+        <form method="post" action="/tasks/{{ task.id }}/retry" onsubmit="return confirm('重试会重新进入队列；生成失败时可能再次产生 RunningHub 费用。确定重试吗？')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button secondary" type="submit">失败重试</button>
+        </form>
+      {% endif %}
+      {% if task.status in ["SUCCESS", "FAILED", "DOWNLOAD_FAILED", "CANCELLED"] %}
+        <form method="post" action="/tasks/{{ task.id }}/delete" onsubmit="return confirm('删除后，任务记录、上传素材和本地结果都会被清除，且无法恢复。确定删除吗？')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button danger" type="submit">删除记录</button>
+        </form>
+      {% endif %}
     </div>
   </article>
   {% endfor %}
 </div>
-{% else %}<section class="empty-state"><p>还没有任务。</p><a class="button" href="/generate">创建第一个任务</a></section>{% endif %}
+{% else %}
+<section class="empty-state">
+  {% if has_date_filter %}
+    <p>当前日期范围内没有任务。</p><a class="button secondary" href="/tasks">查看全部任务</a>
+  {% else %}
+    <p>还没有任务。</p><a class="button" href="/generate">创建第一个任务</a>
+  {% endif %}
+</section>
+{% endif %}
+{% if tasks %}
+<script>
+const taskCheckboxes = Array.from(document.querySelectorAll(".task-select"));
+const selectAllTasks = document.getElementById("select-all-tasks");
+const selectedTaskCount = document.getElementById("selected-task-count");
+const bulkDeleteButton = document.getElementById("bulk-delete-button");
+
+function selectedTasks() {
+  return taskCheckboxes.filter((checkbox) => checkbox.checked);
+}
+
+function updateTaskSelection() {
+  const selected = selectedTasks();
+  selectedTaskCount.textContent = `已选择 ${selected.length} 项`;
+  bulkDeleteButton.disabled = selected.length === 0;
+  selectAllTasks.checked = selected.length === taskCheckboxes.length;
+  selectAllTasks.indeterminate = selected.length > 0 && selected.length < taskCheckboxes.length;
+}
+
+selectAllTasks.addEventListener("change", () => {
+  taskCheckboxes.forEach((checkbox) => {
+    checkbox.checked = selectAllTasks.checked;
+  });
+  updateTaskSelection();
+});
+taskCheckboxes.forEach((checkbox) => {
+  checkbox.addEventListener("change", updateTaskSelection);
+});
+
+function validateBulkDelete() {
+  const selected = selectedTasks();
+  if (!selected.length) return false;
+  if (selected.some((checkbox) => checkbox.dataset.deletable !== "true")) {
+    alert("所选任务中包含正在排队或处理的任务，请取消选择后再批量删除。");
+    return false;
+  }
+  return confirm(`确定删除选中的 ${selected.length} 条任务吗？任务记录、上传素材和本地结果都会被清除，且无法恢复。`);
+}
+</script>
+{% endif %}
+{% if has_active_tasks %}
+<script>
+function refreshTaskList() {
+  if (document.querySelector(".task-select:checked")) {
+    setTimeout(refreshTaskList, 5000);
+    return;
+  }
+  if (document.visibilityState === "visible") {
+    location.reload();
+    return;
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") location.reload();
+  }, {once: true});
+}
+setTimeout(refreshTaskList, 5000);
+</script>
+{% endif %}
 {% endblock %}

@@ -32,7 +32,45 @@
       </select>
     </label>
   </div>
-  <label>LTX 默认提示词<textarea name="ltx_default_prompt" rows="5">{{ ltx_config.default_prompt }}</textarea></label>
+  <label>工作流访问密码
+    <input name="ltx_access_password" type="password" autocomplete="new-password" maxlength="500" placeholder="{{ '已加密保存，留空不修改' if ltx_has_access_password else '仅发布时开启加密访问需要填写' }}">
+    <span class="field-help">RunningHub 发布设置开启“加密访问”时填写；仅加密保存在服务端，不会显示原密码。</span>
+  </label>
+  {% if ltx_has_access_password %}
+    <label class="check-row"><span><input type="checkbox" name="ltx_clear_access_password"> 清除已保存的工作流访问密码</span></label>
+  {% endif %}
+  <label>视频对口型默认正向提示词
+    <textarea name="ltx_default_prompt" rows="5">{{ ltx_config.default_prompt }}</textarea>
+    <span class="field-help">填写人物、语言和与音频一致的台词模板，不需要动作或画面描述。</span>
+  </label>
+  <hr><h2>MiniMax 语音账号</h2>
+  <p class="field-help">这里绑定实际承担调用费用的 MiniMax 账号。声音克隆、融合和语音任务会同时记录本地用户、账号绑定与当时使用的 API 凭证。</p>
+  <label>账号备注名称
+    <input name="minimax_account_label" maxlength="100" value="{{ minimax_config.account_label or 'MiniMax 账号' }}" placeholder="例如：公司主账号">
+  </label>
+  <label>MiniMax API Key
+    <input name="minimax_api_key" type="password" autocomplete="new-password" placeholder="{{ '已加密保存，留空不修改' if editing and minimax_config.api_key_encrypted else '可稍后配置' }}">
+  </label>
+  {% if editing and minimax_config.api_key_encrypted %}
+    <label class="check-row"><span><input type="checkbox" name="minimax_new_account"> 新填写的 API Key 属于另一个 MiniMax 官网账号</span></label>
+    <p class="field-help">仅轮换同一官网账号的 Key 时不要勾选；切换到其他官网账号时必须勾选，旧账号下保存的音色将不再出现在当前选择列表中。</p>
+  {% endif %}
+  <label>Base URL
+    <input name="minimax_base_url" value="{{ minimax_config.base_url }}" required>
+  </label>
+  <label>每分钟语音请求上限
+    <input name="minimax_requests_per_minute" type="number" min="1" max="60" value="{{ minimax_config.requests_per_minute }}" required>
+    <span class="field-help">用于本地语音 Worker 节流，请按该 MiniMax 账号的实际额度填写。</span>
+  </label>
+  {% if active_minimax_voices %}
+    <h3>该账号已保存音色</h3>
+    <div class="compact-list">
+      {% for voice in active_minimax_voices %}
+        <span class="asset-chip">{{ voice.name }} · {{ voice.activated_at|beijing_datetime if voice.activated_at else "已激活" }}</span>
+      {% endfor %}
+    </div>
+    <p class="field-help">这些音色由用户在“声音管理”页面完成克隆或融合后保存；声音参考原文件不会作为长期资料保存。</p>
+  {% endif %}
   <button type="submit">保存</button>
 </form>
 {% endblock %}

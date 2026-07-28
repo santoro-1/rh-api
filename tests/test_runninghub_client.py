@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from app.config import get_settings
 from app.services.runninghub import RunningHubClient, RunningHubError
 from app.services.workflow import build_payload
 
@@ -27,8 +28,14 @@ class FakeSession:
         return self.responses.pop(0)
 
 
-def test_upload_and_submit_are_server_side_and_use_filename(tmp_path: Path):
-    media = tmp_path / "source.png"
+def _test_media_path(name: str) -> Path:
+    directory = get_settings().data_dir / "runninghub-client-tests"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / name
+
+
+def test_upload_and_submit_are_server_side_and_use_filename():
+    media = _test_media_path("source.png")
     media.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
     session = FakeSession(
         [
@@ -46,8 +53,8 @@ def test_upload_and_submit_are_server_side_and_use_filename(tmp_path: Path):
     assert any(node["fieldValue"] == "openapi/image.png" for node in payload["nodeInfoList"])
 
 
-def test_upload_rejects_missing_filename(tmp_path: Path):
-    media = tmp_path / "source.png"
+def test_upload_rejects_missing_filename():
+    media = _test_media_path("missing-filename.png")
     media.write_bytes(b"x")
     client = RunningHubClient(
         "secret",

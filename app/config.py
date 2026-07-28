@@ -77,6 +77,13 @@ class Settings:
     allowed_hosts: tuple[str, ...]
     login_rate_limit_per_minute: int
     task_create_rate_limit_per_minute: int
+    max_batch_items: int
+    max_batch_total_upload_mb: int
+    staged_asset_retention_hours: int
+    minimax_default_base_url: str
+    minimax_request_timeout_seconds: int
+    temporary_voice_retention_hours: int
+    log_retention_days: int
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -144,7 +151,7 @@ class Settings:
             max_image_size_mb=_as_int("MAX_IMAGE_SIZE_MB", 20),
             max_audio_size_mb=_as_int("MAX_AUDIO_SIZE_MB", 100),
             max_video_size_mb=_as_int("MAX_VIDEO_SIZE_MB", 500),
-            upload_retention_days=_as_int("UPLOAD_RETENTION_DAYS", 3),
+            upload_retention_days=_as_int("UPLOAD_RETENTION_DAYS", 2),
             output_retention_days=_as_int("OUTPUT_RETENTION_DAYS", 7),
             cookie_secure=cookie_secure,
             allowed_hosts=allowed_hosts,
@@ -152,6 +159,23 @@ class Settings:
             task_create_rate_limit_per_minute=_as_int(
                 "TASK_CREATE_RATE_LIMIT_PER_MINUTE", 10
             ),
+            max_batch_items=_as_int("MAX_BATCH_ITEMS", 50),
+            max_batch_total_upload_mb=_as_int(
+                "MAX_BATCH_TOTAL_UPLOAD_MB", 5120
+            ),
+            staged_asset_retention_hours=_as_int(
+                "STAGED_ASSET_RETENTION_HOURS", 24
+            ),
+            minimax_default_base_url=os.getenv(
+                "MINIMAX_DEFAULT_BASE_URL", "https://api.minimaxi.com"
+            ).rstrip("/"),
+            minimax_request_timeout_seconds=_as_int(
+                "MINIMAX_REQUEST_TIMEOUT_SECONDS", 120
+            ),
+            temporary_voice_retention_hours=_as_int(
+                "TEMPORARY_VOICE_RETENTION_HOURS", 48
+            ),
+            log_retention_days=_as_int("LOG_RETENTION_DAYS", 14),
         )
 
     @property
@@ -161,6 +185,26 @@ class Settings:
     @property
     def outputs_dir(self) -> Path:
         return self.data_dir / "outputs"
+
+    @property
+    def staged_assets_dir(self) -> Path:
+        return self.data_dir / "staged-assets"
+
+    @property
+    def voice_sources_dir(self) -> Path:
+        return self.data_dir / "voice-sources"
+
+    @property
+    def voice_creations_dir(self) -> Path:
+        return self.data_dir / "voice-creations"
+
+    @property
+    def logs_dir(self) -> Path:
+        return self.data_dir / "logs"
+
+    @property
+    def runtime_dir(self) -> Path:
+        return self.data_dir / "runtime"
 
 
 @lru_cache

@@ -8,6 +8,8 @@ import wave
 
 from mutagen import File as MutagenFile
 
+from app.services.processes import hidden_creation_flags
+
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +84,12 @@ def inspect_audio_duration(path: Path) -> float:
     ]
     try:
         completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=30, check=False
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            creationflags=hidden_creation_flags(),
         )
     except FileNotFoundError as exc:
         fallback_duration = _duration_via_mutagen(path)

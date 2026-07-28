@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import json
+
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import GenerationTask, TaskStatus, User, WorkflowConfig
+from app.models import (
+    GenerationTask,
+    MiniMaxConfig,
+    TaskStatus,
+    User,
+    WorkflowConfig,
+)
+from app.services.security import decrypt_secret
 from app.services.storage import to_relative_data_path
 
 from tests.conftest import create_user, login
@@ -52,6 +61,58 @@ def test_login_and_admin_permission(client):
     login(client, "normal")
     assert client.get("/generate").status_code == 200
     assert client.get("/admin/users").status_code == 403
+    assert client.get("/admin/operations").status_code == 403
+    assert client.get("/admin/operations/updates").status_code == 403
+
+
+def test_admin_can_view_operations_without_terminal(client):
+    create_user("operations-admin", is_admin=True)
+    login(client, "operations-admin")
+
+    response = client.get("/admin/operations")
+
+    assert response.status_code == 200
+    assert "运行状态与日志" in response.text
+    assert "语音 Worker" in response.text
+    assert "视频 Worker" in response.text
+
+    update = client.get(
+        "/admin/operations/updates",
+        params={
+            "web": 0,
+            "audio_worker": 0,
+            "video_worker": 0,
+            "launcher": 0,
+        },
+    )
+    assert update.status_code == 200
+    payload = update.json()
+    assert set(payload) == {"services", "queue", "logs"}
+    assert set(payload["logs"]) == {
+        "web",
+        "audio_worker",
+        "video_worker",
+        "launcher",
+    }
+
+
+def test_task_list_auto_refreshes_only_while_tasks_are_active(client):
+    user = create_user("refresh-user")
+    _make_task(user.id, "refresh-task")
+    login(client, "refresh-user")
+
+    active_page = client.get("/tasks")
+    assert active_page.status_code == 200
+    assert "setTimeout(refreshTaskList, 5000)" in active_page.text
+
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "refresh-task")
+        task.status = TaskStatus.FAILED.value
+        db.commit()
+
+    terminal_page = client.get("/tasks")
+    assert terminal_page.status_code == 200
+    assert "setTimeout(refreshTaskList, 5000)" not in terminal_page.text
 
 
 def test_admin_can_create_a_user_with_legacy_default_instance(client):
@@ -69,6 +130,9 @@ def test_admin_can_create_a_user_with_legacy_default_instance(client):
             "instance_type": "default",
             "default_prompt": "默认提示词",
             "max_concurrent_tasks": "1",
+            "minimax_api_key": "new-minimax-key",
+            "minimax_base_url": "https://api.minimax.io",
+            "minimax_requests_per_minute": "20",
         },
         follow_redirects=False,
     )
@@ -87,6 +151,104 @@ def test_admin_can_create_a_user_with_legacy_default_instance(client):
         ).one()
         assert ltx_config.ai_app_id == "2080551073030434817"
         assert ltx_config.is_enabled is False
+        minimax_config = db.query(MiniMaxConfig).filter_by(user_id=user.id).one()
+        assert (
+            decrypt_secret(
+                minimax_config.api_key_encrypted,
+                label="MiniMax API Key",
+            )
+            == "new-minimax-key"
+        )
+        assert len(minimax_config.credential_fingerprint or "") == 64
+
+
+def test_admin_encrypts_preserves_and_clears_ltx_access_password(client):
+    create_user("password-admin", is_admin=True)
+    login(client, "password-admin")
+    create_response = client.post(
+        "/admin/users",
+        data={
+            "username": "encrypted-workflow-user",
+            "password": "password123",
+            "is_active": "true",
+            "api_key": "new-test-key",
+            "base_url": "https://www.runninghub.cn",
+            "ai_app_id": "2062251097452007426",
+            "instance_type": "default",
+            "default_prompt": "默认提示词",
+            "max_concurrent_tasks": "1",
+            "ltx_enabled": "true",
+            "ltx_workflow_id": "2080551073030434817",
+            "ltx_instance_type": "plus",
+            "ltx_default_prompt": "对口型提示词",
+            "ltx_access_password": "private-workflow-password",
+        },
+        follow_redirects=False,
+    )
+    assert create_response.status_code == 303
+
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(username="encrypted-workflow-user").one()
+        config = db.query(WorkflowConfig).filter_by(
+            user_id=user.id,
+            workflow_key="ltx_lip_sync",
+        ).one()
+        settings = json.loads(config.settings_json or "{}")
+        encrypted = settings["access_password_encrypted"]
+        assert "private-workflow-password" not in (config.settings_json or "")
+        assert (
+            decrypt_secret(encrypted, label="视频对口型工作流访问密码")
+            == "private-workflow-password"
+        )
+        user_id = user.id
+
+    edit_page = client.get(f"/admin/users/{user_id}")
+    assert edit_page.status_code == 200
+    assert "已加密保存，留空不修改" in edit_page.text
+    assert "private-workflow-password" not in edit_page.text
+
+    common_update = {
+        "username": "encrypted-workflow-user",
+        "is_active": "true",
+        "base_url": "https://www.runninghub.cn",
+        "ai_app_id": "2062251097452007426",
+        "instance_type": "default",
+        "default_prompt": "默认提示词",
+        "max_concurrent_tasks": "1",
+        "ltx_enabled": "true",
+        "ltx_workflow_id": "2080551073030434817",
+        "ltx_instance_type": "plus",
+        "ltx_default_prompt": "对口型提示词",
+    }
+    preserve_response = client.post(
+        f"/admin/users/{user_id}",
+        data=common_update,
+        follow_redirects=False,
+    )
+    assert preserve_response.status_code == 303
+    with SessionLocal() as db:
+        config = db.query(WorkflowConfig).filter_by(
+            user_id=user_id,
+            workflow_key="ltx_lip_sync",
+        ).one()
+        assert json.loads(config.settings_json or "{}")[
+            "access_password_encrypted"
+        ] == encrypted
+
+    clear_response = client.post(
+        f"/admin/users/{user_id}",
+        data={**common_update, "ltx_clear_access_password": "true"},
+        follow_redirects=False,
+    )
+    assert clear_response.status_code == 303
+    with SessionLocal() as db:
+        config = db.query(WorkflowConfig).filter_by(
+            user_id=user_id,
+            workflow_key="ltx_lip_sync",
+        ).one()
+        assert "access_password_encrypted" not in json.loads(
+            config.settings_json or "{}"
+        )
 
 
 def test_task_isolation_and_admin_visibility(client):

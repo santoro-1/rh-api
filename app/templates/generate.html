@@ -62,7 +62,7 @@
     <label>参考音频（MP3 / WAV / M4A / AAC / FLAC）
       <input id="audio" name="audio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" required {% if not has_api_key %}disabled{% endif %}>
     </label>
-    <p id="audio-info" class="muted">请选择音频文件以检测时长。</p>
+    <p id="audio-info" class="muted">请选择音频文件以检测时长；单次使用区间不能超过 45 秒。</p>
 
     <div class="two-columns">
       <label>开始时间<input id="startTime" name="startTime" value="0:00" pattern="\d+:[0-5]\d" required {% if not has_api_key %}disabled{% endif %}></label>
@@ -109,12 +109,12 @@
 
     <label>自定义音频（MP3 / WAV / M4A / AAC / FLAC）
       <input id="customAudio" name="customAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" required {% if not can_generate_ltx %}disabled{% endif %}>
-      <span class="field-help">工作流会根据音频时长计算视频帧数。</span>
+      <span class="field-help">工作流会根据音频时长计算视频帧数；单条音频不能超过 45 秒。</span>
     </label>
 
-    <label>画面及对白提示词
+    <label>视频正向提示词
       <textarea name="prompt" rows="6" maxlength="5000" required {% if not can_generate_ltx %}disabled{% endif %}>{{ ltx_config.default_prompt }}</textarea>
-      <span class="field-help">请填写与自定义音频内容一致的说话文本及画面描述，例如“女人用中文说：……”。</span>
+      <span class="field-help">只填写什么人、使用什么语言和音频中的完整台词，例如“一名女性用中文说：……”。不需要描述动作或画面。</span>
     </label>
     <p id="ltx-form-error" class="error hidden"></p>
     <button id="ltx-submit-button" type="submit" {% if not can_generate_ltx %}disabled{% endif %}>开始生成</button>

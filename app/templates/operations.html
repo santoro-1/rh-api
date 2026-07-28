@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}运行状态与日志{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>运行状态与日志</h1>
+    <p class="muted">只追加启动、任务状态变化、完成和异常事件，不显示普通轮询请求。</p>
+    <p class="live-log-state" id="live-log-state">
+      <span class="indicator" aria-hidden="true"></span>
+      <span id="live-log-message">正在连接实时日志</span>
+    </p>
+  </div>
+  <div class="button-row">
+    <a class="button secondary" id="refresh-operations" href="/admin/operations">立即同步</a>
+    <a class="button secondary" href="/generate/batch">返回批量生成</a>
+  </div>
+</section>
+
+<section class="service-status-grid">
+  {% for key, label in [("web", "Web"), ("audio_worker", "语音 Worker"), ("video_worker", "视频 Worker"), ("launcher", "本地总控")] %}
+    {% set service = services[key] %}
+    <div class="summary-card {{ 'success' if service.online else 'danger' }}" data-service-card="{{ key }}">
+      <strong data-service-state="{{ key }}">{{ "正常" if service.online else "离线" }}</strong>
+      <span>{{ label }}</span>
+    </div>
+  {% endfor %}
+</section>
+
+<section class="panel">
+  <div class="panel-heading"><h2>队列概况</h2><p class="muted">只显示数据库中的任务数量。</p></div>
+  <div class="two-columns">
+    <div>
+      <h3>语音任务</h3>
+      <p>活动：<strong id="audio-active-count">{{ audio_active }}</strong></p>
+      <p class="muted" id="audio-status-counts">{{ audio_counts }}</p>
+    </div>
+    <div>
+      <h3>视频任务</h3>
+      <p>活动：<strong id="video-active-count">{{ video_active }}</strong></p>
+      <p class="muted" id="video-status-counts">{{ video_counts }}</p>
+    </div>
+  </div>
+</section>
+
+{% for key, label in [("web", "Web"), ("audio_worker", "语音 Worker"), ("video_worker", "视频 Worker"), ("launcher", "本地总控")] %}
+  <details class="panel log-panel" {% if key == "audio_worker" %}open{% endif %}>
+    <summary>{{ label }} 事件日志</summary>
+    <pre data-log-service="{{ key }}" data-log-cursor="{{ logs[key].cursor }}"
+      data-log-empty="{{ '0' if logs[key].lines else '1' }}">{% if logs[key].lines %}{{ logs[key].lines|join("\n") }}{% else %}尚无事件日志。{% endif %}</pre>
+  </details>
+{% endfor %}
+
+<p class="field-help">页面每 2 秒增量读取新事件，不会整页刷新或打断滚动位置。原始日志仍按天轮转；API Key、Bearer Token 和工作流访问密码会在写入前脱敏。</p>
+<script src="/static/operations.js" defer></script>
+{% endblock %}

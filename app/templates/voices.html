@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}声音管理{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>声音管理</h1>
+    <p class="muted">先完成声音克隆或音色融合并保存，批量生成时只选择已经保存的音色。</p>
+  </div>
+  <a class="button secondary" href="/generate/batch">返回批量生成</a>
+</section>
+
+{% if not minimax_configured %}
+  <div class="error">当前账号尚未配置 MiniMax API Key，请联系管理员配置后再制作声音。</div>
+{% endif %}
+
+<div class="workflow-switch voice-method-switch" role="tablist" aria-label="声音制作方式">
+  <button id="voice-clone-tab" class="workflow-tab active" type="button">声音克隆</button>
+  <button id="voice-mix-tab" class="workflow-tab" type="button">音色融合</button>
+</div>
+
+<section id="voice-clone-panel" class="panel stack-form voice-studio-panel">
+  <div class="panel-heading">
+    <h2>声音克隆</h2>
+    <p class="muted">上传一份声音母带生成试听；满意后再保存为可供批量生成选择的音色。</p>
+  </div>
+  <form id="voice-clone-form" class="stack-form" enctype="multipart/form-data">
+    <input type="hidden" name="method" value="clone">
+    <div class="two-columns">
+      <label>音色名称
+        <input name="name" maxlength="100" placeholder="例如：品牌女声" required>
+      </label>
+      <label>语音模型
+        <select name="model">
+          <option value="speech-2.8-turbo">speech-2.8-turbo</option>
+          <option value="speech-2.8-hd">speech-2.8-hd</option>
+        </select>
+      </label>
+    </div>
+    <label>声音母带
+      <input name="source_a" type="file" accept=".mp3,.m4a,.wav,audio/mpeg,audio/mp4,audio/wav" required>
+      <span class="field-help">MP3/M4A/WAV，10 秒–5 分钟且不超过 20 MB。</span>
+    </label>
+    <label>试听文案
+      <textarea name="preview_text" rows="4" maxlength="1000" required>你好，这是一段用于试听克隆音色效果的文案。</textarea>
+    </label>
+    <div class="two-columns">
+      <label class="inline-check"><input name="noise_reduction" type="checkbox" checked> 启用降噪</label>
+      <label class="inline-check"><input name="volume_normalization" type="checkbox" checked> 启用音量归一化</label>
+    </div>
+    <div class="batch-order-warning">
+      <strong>费用提醒</strong>
+      <span>克隆试听和试听文案可能产生用量；保存后的新 voice_id 第一次用于正式语音生成时，可能再产生 ¥9.90 音色费用，最终以 MiniMax 账单为准。</span>
+    </div>
+    <label class="inline-check batch-confirm">
+      <input name="cost_confirmed" type="checkbox" required>
+      我已了解声音克隆、试听和首次正式使用可能产生费用
+    </label>
+    <button type="submit" {% if not minimax_configured %}disabled{% endif %}>生成克隆试听</button>
+  </form>
+</section>
+
+<section id="voice-mix-panel" class="panel stack-form voice-studio-panel hidden">
+  <div class="panel-heading">
+    <h2>音色融合</h2>
+    <p class="muted">A、B 会先分别克隆，再按权重生成融合试听；保存时把试听再次克隆为最终音色。</p>
+  </div>
+  <form id="voice-mix-form" class="stack-form" enctype="multipart/form-data">
+    <input type="hidden" name="method" value="mix">
+    <div class="two-columns">
+      <label>最终音色名称
+        <input name="name" maxlength="100" placeholder="例如：沉稳温柔融合声" required>
+      </label>
+      <label>语音模型
+        <select name="model">
+          <option value="speech-2.8-turbo">speech-2.8-turbo</option>
+          <option value="speech-2.8-hd">speech-2.8-hd</option>
+        </select>
+      </label>
+    </div>
+    <div class="two-columns">
+      <label>声音 A
+        <input name="source_a" type="file" accept=".mp3,.m4a,.wav,audio/mpeg,audio/mp4,audio/wav" required>
+        <span class="field-help">独立满足 10 秒–5 分钟、≤20 MB。</span>
+      </label>
+      <label>声音 B
+        <input name="source_b" type="file" accept=".mp3,.m4a,.wav,audio/mpeg,audio/mp4,audio/wav" required>
+        <span class="field-help">独立满足 10 秒–5 分钟、≤20 MB。</span>
+      </label>
+    </div>
+    <div class="voice-weight-row">
+      <label>声音 A 权重
+        <input id="voice-weight-a" name="weight_a" type="number" min="1" max="99" value="50" required>
+      </label>
+      <strong>+</strong>
+      <div><span class="field-help">声音 B 权重</span><strong id="voice-weight-b">50%</strong></div>
+      <span class="field-help">合计 100%</span>
+    </div>
+    <label>融合试听文案
+      <textarea name="preview_text" rows="4" maxlength="1000" required>你好，这是一段用于试听融合音色效果的文案。</textarea>
+    </label>
+    <div class="two-columns">
+      <label class="inline-check"><input name="noise_reduction" type="checkbox" checked> 两份声音均启用降噪</label>
+      <label class="inline-check"><input name="volume_normalization" type="checkbox" checked> 两份声音均启用音量归一化</label>
+    </div>
+    <div class="batch-order-warning">
+      <strong>费用提醒</strong>
+      <span>A、B 两个新 voice_id 首次参与融合试听可能产生合计 ¥19.80 音色费用，试听文本另计；融合试听保存为最终 voice_id 后，第一次用于正式批量语音时还可能产生 ¥9.90，最终以 MiniMax 账单为准。</span>
+    </div>
+    <label class="inline-check batch-confirm">
+      <input name="cost_confirmed" type="checkbox" required>
+      我已了解融合试听、保存及最终音色首次正式使用可能产生费用
+    </label>
+    <button type="submit" {% if not minimax_configured %}disabled{% endif %}>生成融合试听</button>
+  </form>
+</section>
+
+<div id="voice-form-message" class="error hidden"></div>
+
+<section class="panel">
+  <div class="panel-heading">
+    <h2>制作记录与试听</h2>
+    <p class="muted">试听成功后仍需点击“保存为可用音色”，批量页面才会出现它。</p>
+  </div>
+  <div class="voice-task-list">
+    {% for task in voice_tasks %}
+      <article class="voice-task-card">
+        <div>
+          <strong>{{ task.name }}</strong>
+          <span class="status-badge">{{ "声音克隆" if task.method == "clone" else "音色融合" }}</span>
+          <p class="muted">
+            {% if task.status == "PENDING" %}等待处理
+            {% elif task.status == "CLONING" %}正在克隆
+            {% elif task.status == "SYNTHESIZING" %}正在生成融合试听
+            {% elif task.status == "PREVIEW_READY" %}试听已生成，等待保存
+            {% elif task.status in ["SAVE_PENDING", "SAVING"] %}正在保存最终音色
+            {% elif task.status == "SAVED" %}已保存，可用于批量生成
+            {% else %}制作失败{% endif %}
+            · {{ task.created_at|beijing_datetime }}
+          </p>
+          {% if task.error_message %}<p class="error compact-error">{{ task.error_message }}</p>{% endif %}
+        </div>
+        <div class="voice-task-actions">
+          {% if task.preview_relative_path %}
+            <audio controls preload="none" src="/api/voice-creations/{{ task.id }}/preview"></audio>
+          {% endif %}
+          {% if task.status == "PREVIEW_READY" %}
+            <button class="button secondary save-voice-button" data-task-id="{{ task.id }}" type="button">保存为可用音色</button>
+          {% elif task.status == "SAVED" %}
+            <span class="success-text">已保存</span>
+          {% endif %}
+        </div>
+      </article>
+    {% else %}
+      <p class="muted">还没有声音制作记录。</p>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-heading">
+    <h2>已保存音色</h2>
+    <p class="muted">只有这里的音色可以在批量语音生成中选择。</p>
+  </div>
+  <div class="voice-library-grid">
+    {% for voice in voices %}
+      <article class="summary-card">
+        <strong>{{ voice.name }}</strong>
+        <span>{% if voice.method == "system" %}官方系统音色{% elif voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</span>
+        <small>{% if voice.method == "system" %}无 ¥9.90 克隆音色费，文本合成仍计费{% elif voice.status == "ACTIVE" %}已完成首次正式使用{% else %}首次正式使用可能收费{% endif %}</small>
+      </article>
+    {% else %}
+      <p class="muted">还没有已保存音色。请先完成上方克隆或融合流程。</p>
+    {% endfor %}
+  </div>
+</section>
+
+{% if has_active_tasks and request.query_params.get("watch") == "1" %}
+<script>setTimeout(() => location.reload(), 3000);</script>
+{% endif %}
+<script src="/static/voices.js" defer></script>
+{% endblock %}

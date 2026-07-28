@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from app.models import GenerationTask
+from app.services.security import decrypt_secret
 from app.workflows.base import WorkflowAsset, WorkflowOutput
 
 
@@ -13,14 +14,14 @@ class LtxLipSyncWorkflow:
     key = "ltx_lip_sync"
     display_name = "视频对口型"
     default_ai_app_id = "2080551073030434817"
-    default_prompt = "人物自然地说话，口型与语音一致，保持原视频动作、构图和镜头稳定。"
+    default_prompt = "一名人物用中文说：“请填写与音频一致的完整台词。”"
     submission_type = "workflow"
     output_node_id = "260"
 
     _NODES = {
         "video": ("237", "video", "源视频"),
         "audio": ("246", "audio", "自定义音频"),
-        "prompt": ("222", "text", "画面及对白提示词"),
+        "prompt": ("222", "text", "视频正向提示词"),
     }
 
     def validate_parameters(
@@ -102,7 +103,7 @@ class LtxLipSyncWorkflow:
         instance_type: str,
         settings: dict[str, Any],
     ) -> dict[str, Any]:
-        del ai_app_id, settings
+        del ai_app_id
         if instance_type not in {"default", "plus"}:
             raise ValueError("实例类型不合法")
         values = self._input(task).get("parameters")
@@ -135,12 +136,21 @@ class LtxLipSyncWorkflow:
                 "description": self._NODES["audio"][2],
             }
         )
-        return {
+        payload = {
             "addMetadata": True,
             "nodeInfoList": nodes,
             "instanceType": selected_instance_type,
             "usePersonalQueue": False,
         }
+        encrypted_access_password = settings.get("access_password_encrypted")
+        if encrypted_access_password:
+            if not isinstance(encrypted_access_password, str):
+                raise ValueError("视频对口型工作流访问密码配置不合法")
+            payload["accessPassword"] = decrypt_secret(
+                encrypted_access_password,
+                label="视频对口型工作流访问密码",
+            )
+        return payload
 
     def select_output(
         self, task: GenerationTask, result: dict[str, Any]
