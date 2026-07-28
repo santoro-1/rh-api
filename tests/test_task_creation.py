@@ -38,6 +38,30 @@ def test_old_ltx_page_redirects_to_unified_generate_page(client):
     assert response.headers["location"] == "/generate?workflow=ltx_lip_sync"
 
 
+def test_direct_audio_inspection_rejects_more_than_45_seconds(
+    client,
+    monkeypatch,
+):
+    create_user("long-audio-user")
+    login(client, "long-audio-user")
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_audio_duration",
+        lambda path: 45.5,
+    )
+    response = client.post(
+        "/api/audio/inspect",
+        files={
+            "audio": (
+                "long.mp3",
+                b"ID3audio-payload",
+                "audio/mpeg",
+            )
+        },
+    )
+    assert response.status_code == 400
+    assert "不能超过 45 秒" in response.json()["detail"]
+
+
 def test_task_creation_returns_immediately_without_calling_runninghub(client, monkeypatch):
     create_user("creator")
     login(client, "creator")
@@ -235,10 +259,14 @@ def test_ltx_task_creation_requires_custom_audio(client):
     assert "必须上传自定义音频" in response.json()["detail"]
 
 
-def test_ltx_task_creation_saves_custom_audio(client):
+def test_ltx_task_creation_saves_custom_audio(client, monkeypatch):
     create_user("ltx-audio-creator")
     _enable_ltx_workflow("ltx-audio-creator")
     login(client, "ltx-audio-creator")
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_audio_duration",
+        lambda path: 15.5,
+    )
     response = client.post(
         "/api/tasks/ltx-lip-sync",
         data={"prompt": "自定义配音", "instanceType": "default"},

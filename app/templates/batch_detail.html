@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block title %}批次详情{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>{{ batch.name }}</h1>
+    <p class="muted">{{ "数字人视频" if batch.workflow_type == "digital_human" else "视频对口型" }} · {{ "脚本生成语音" if batch.audio_mode == "minimax" else "上传音频" }} · {{ batch.created_at|beijing_datetime }}</p>
+  </div>
+  <div class="button-row">
+    <a class="button secondary" href="/batches/{{ batch.id }}">刷新状态</a>
+    <a class="button secondary" href="/batches">返回批次历史</a>
+  </div>
+</section>
+
+<section class="batch-summary-grid">
+  <div class="summary-card"><strong data-summary-key="total">{{ summary.total }}</strong><span>总任务</span></div>
+  {% if batch.audio_mode == "minimax" %}<div class="summary-card"><strong data-summary-key="childTotal">{{ summary.childTotal }}</strong><span>视频子任务</span></div>{% endif %}
+  <div class="summary-card"><strong data-summary-key="queued">{{ summary.queued }}</strong><span>等待处理</span></div>
+  <div class="summary-card"><strong data-summary-key="processing">{{ summary.processing }}</strong><span>处理中</span></div>
+  {% if batch.audio_mode == "minimax" %}<div class="summary-card"><strong data-summary-key="audioPreparing">{{ summary.audioPreparing }}</strong><span>准备语音</span></div>{% endif %}
+  {% if batch.review_required %}<div class="summary-card review"><strong data-summary-key="awaitingReview">{{ summary.awaitingReview }}</strong><span>等待语音审核</span></div>{% endif %}
+  <div class="summary-card success"><strong data-summary-key="success">{{ summary.success }}</strong><span>成功</span></div>
+  <div class="summary-card danger"><strong data-summary-key="failed">{{ summary.failed }}</strong><span>失败</span></div>
+</section>
+
+{% if request.query_params.get("retried") %}
+  <p class="error">已重新排队 {{ request.query_params.get("retried") }} 条，跳过 {{ request.query_params.get("skipped", "0") }} 条素材不可用任务。</p>
+{% endif %}
+{% if request.query_params.get("approved") %}
+  <p class="success-text">已通过 {{ request.query_params.get("approved") }} 条语音，正在进入视频任务创建流程。</p>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-heading"><h2>批次任务</h2></div>
+  <div id="batch-refresh-notice" class="batch-refresh-notice hidden">
+    任务结构或可用操作已经变化，请点击“刷新状态”查看最新内容。
+  </div>
+  <div class="table-wrap">
+    <table class="batch-detail-table">
+      <thead><tr><th>行</th><th>任务编号</th><th>主要素材</th><th>音频</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody>
+        {% for item in batch.items %}
+          {% set task = item.generation_task %}
+          {% set audio_task = item.audio_task %}
+          {% set manifest = manifests[item.id] %}
+          <tr class="batch-parent-row">
+            <td>{{ item.row_number }}</td>
+            <td>{{ item.row_key }}</td>
+            <td>{{ manifest.get("image_file") or manifest.get("source_video_file") }}</td>
+            <td>
+              {% if manifest.get("audio_file") %}
+                {{ manifest.get("audio_file") }}
+              {% else %}
+                <span class="compact-text" title="{{ manifest.get('speech_script', '') }}">脚本：{{ manifest.get("speech_script", "") }}</span>
+              {% endif %}
+            </td>
+            <td>
+              {% set item_status = item_statuses[item.id] %}
+              <span data-item-status="{{ item.id }}">{{ status_labels.get(item_status, item_status) }}</span>
+              {% if audio_task and audio_task.error_message %}<br><small class="error-text">{{ audio_task.error_message }}</small>{% endif %}
+            </td>
+            <td>
+              {% if task %}
+                <a href="/tasks/{{ task.id }}">查看视频任务</a>
+              {% elif audio_task and audio_task.status == "AWAITING_REVIEW" %}
+                <span class="review-waiting-label">等待试听确认</span>
+              {% elif item.segments %}
+                <span>{{ item.segments|length }} 个子任务</span>
+              {% elif batch.workflow_type == "ltx_lip_sync" and audio_task and audio_task.status == "FAILED" and audio_task.output_path %}
+                <form method="post" enctype="multipart/form-data" action="/batches/{{ batch.id }}/items/{{ item.id }}/replace-video" class="compact-inline-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input name="source_video" type="file" accept=".mp4,.mov,.webm,video/*" required>
+                  <button type="submit">更换视频并继续</button>
+                </form>
+              {% else %}
+                <span class="muted">等待完整音频完成</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% if audio_task and audio_task.status == "AWAITING_REVIEW" %}
+            <tr class="batch-audio-review-row">
+              <td></td>
+              <td colspan="5">
+                <div class="audio-review-card">
+                  <strong>第 {{ audio_task.generation_version }} 版完整语音待审核</strong>
+                  <audio controls preload="metadata" src="/batches/{{ batch.id }}/items/{{ item.id }}/audio"></audio>
+                  <div class="audio-review-actions">
+                    <form method="post" action="/batches/{{ batch.id }}/items/{{ item.id }}/approve-audio">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button type="submit">通过并进入视频队列</button>
+                    </form>
+                    <form method="post" action="/batches/{{ batch.id }}/items/{{ item.id }}/regenerate-audio"
+                      onsubmit="return confirm('重新生成会再次调用 MiniMax，并再次产生文本合成费用。确认继续吗？');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button class="button danger" type="submit">重新生成（再次计费）</button>
+                    </form>
+                  </div>
+                  {% set old_attempts = audio_task.attempts|selectattr("status", "equalto", "REJECTED")|list %}
+                  {% if old_attempts %}
+                    <details class="audio-attempt-history">
+                      <summary>试听以前生成的 {{ old_attempts|length }} 个版本</summary>
+                      {% for attempt in old_attempts %}
+                        <div>
+                          <span>第 {{ attempt.version }} 版</span>
+                          <audio controls preload="none"
+                            src="/batches/{{ batch.id }}/items/{{ item.id }}/audio-attempts/{{ attempt.id }}"></audio>
+                        </div>
+                      {% endfor %}
+                    </details>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+          {% endif %}
+          {% if item.segments %}
+            <tr class="batch-child-row">
+              <td></td>
+              <td colspan="5">
+                <details>
+                  <summary>查看 {{ item.segments|length }} 个分段子任务</summary>
+                  <div class="table-wrap child-task-table">
+                    <table>
+                      <thead><tr><th>分段</th><th>脚本片段</th><th>音频区间</th><th>RunningHub 状态</th><th>操作</th></tr></thead>
+                      <tbody>
+                        {% for segment in item.segments %}
+                          {% set child = segment.generation_task %}
+                          <tr>
+                            <td>{{ segment.segment_index }}</td>
+                            <td class="segment-script-cell">
+                              <div class="segment-script-preview">{{ segment.script_text }}</div>
+                              <details class="segment-text-details">
+                                <summary>查看完整内容</summary>
+                                <strong>原始脚本片段</strong>
+                                <p>{{ segment.script_text }}</p>
+                                {% if segment.prompt %}
+                                  <strong>RunningHub 提示词</strong>
+                                  <p>{{ segment.prompt }}</p>
+                                {% endif %}
+                              </details>
+                            </td>
+                            <td class="segment-time-cell">
+                              <strong>{{ "%.1f"|format(segment.start_seconds) }}–{{ "%.1f"|format(segment.end_seconds) }} 秒</strong>
+                              <span class="segment-alignment-label">
+                                {% if segment.alignment_method == "minimax_sentence_timestamp" %}
+                                  MiniMax 句级时间戳
+                                {% else %}
+                                  本地音频切分
+                                {% endif %}
+                              </span>
+                            </td>
+                            <td class="segment-status-cell">
+                              {% set segment_status = child.status if child else segment.status %}
+                              <span class="segment-status-value" data-segment-status="{{ segment.id }}">{{ status_labels.get(segment_status, segment_status) }}</span>
+                              <span class="segment-remote-label">RunningHub 任务 ID</span>
+                              <span class="segment-remote-id" data-runninghub-id="{{ segment.id }}">{{ child.runninghub_task_id if child and child.runninghub_task_id else "等待提交" }}</span>
+                            </td>
+                            <td class="segment-actions">
+                              <div class="segment-action-links">
+                                <a href="/batches/{{ batch.id }}/segments/{{ segment.id }}/audio">下载音频</a>
+                                {% if child %}<a href="/tasks/{{ child.id }}">查看视频</a>{% endif %}
+                              </div>
+                              {% if child and child.status in retryable_statuses %}
+                                <form method="post" action="/tasks/{{ child.id }}/retry" class="compact-inline-form">
+                                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                  <button type="submit">仅重试本段</button>
+                                </form>
+                              {% endif %}
+                            </td>
+                          </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              </td>
+            </tr>
+          {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel button-row">
+  {% if summary.awaitingReview %}
+    <form method="post" action="/batches/{{ batch.id }}/approve-audio"
+      onsubmit="return confirm('确认通过当前全部待审核语音，并开始创建对应视频任务吗？');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">批量通过全部待审核语音</button>
+    </form>
+  {% endif %}
+  {% if summary.failed %}
+    <form method="post" action="/batches/{{ batch.id }}/retry">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">重试批次中的失败任务</button>
+    </form>
+  {% endif %}
+  {% if summary.finished == summary.total %}
+    <form method="post" action="/batches/{{ batch.id }}/delete" onsubmit="return confirm('确认删除整个批次及全部任务和文件吗？');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button danger" type="submit">删除整个批次</button>
+    </form>
+  {% else %}
+    <span class="muted">批次仍有活动任务，完成后才能整批删除。</span>
+  {% endif %}
+</section>
+
+<script>
+(() => {
+  const batchId = {{ batch.id|tojson }};
+  const renderedChildTotal = {{ summary.childTotal }};
+  const statusLabels = {{ status_labels|tojson }};
+  const summaryKeys = ["total", "childTotal", "queued", "processing", "audioPreparing", "awaitingReview", "success", "failed"];
+  let previousStatus = {{ summary.status|tojson }};
+
+  async function refreshBatchStatus() {
+    try {
+      const response = await fetch(`/api/batches/${batchId}`, {
+        headers: {"Accept": "application/json"},
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      for (const key of summaryKeys) {
+        const target = document.querySelector(`[data-summary-key="${key}"]`);
+        if (target && data[key] !== undefined) target.textContent = data[key];
+      }
+      for (const item of data.items || []) {
+        const itemStatus = document.querySelector(`[data-item-status="${item.id}"]`);
+        if (itemStatus) itemStatus.textContent = statusLabels[item.status] || item.status;
+        for (const segment of item.segments || []) {
+          const status = document.querySelector(`[data-segment-status="${segment.id}"]`);
+          const remoteId = document.querySelector(`[data-runninghub-id="${segment.id}"]`);
+          if (status) status.textContent = statusLabels[segment.status] || segment.status;
+          if (remoteId) remoteId.textContent = segment.runninghubTaskId || "等待提交";
+        }
+      }
+      if (data.childTotal !== renderedChildTotal || data.status !== previousStatus) {
+        document.getElementById("batch-refresh-notice").classList.remove("hidden");
+      }
+      previousStatus = data.status;
+      if (data.status === "ACTIVE") setTimeout(refreshBatchStatus, 5000);
+    } catch (_error) {
+      setTimeout(refreshBatchStatus, 10000);
+    }
+  }
+
+  if (previousStatus === "ACTIVE") setTimeout(refreshBatchStatus, 5000);
+})();
+</script>
+{% endblock %}

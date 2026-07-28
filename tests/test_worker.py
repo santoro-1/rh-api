@@ -5,6 +5,7 @@ import json
 from app.database import SessionLocal
 from app.models import GenerationTask, TaskStatus, WorkflowConfig
 from app.config import get_settings
+from app.services.security import encrypt_secret
 from app.services.storage import to_relative_data_path
 from app.workers import task_worker
 from app.workflows import get_workflow
@@ -176,6 +177,13 @@ def test_worker_submits_ltx_task_to_workflow_endpoint(monkeypatch):
                 instance_type="plus",
                 default_prompt="女人用中文说：你好",
                 is_enabled=True,
+                settings_json=json.dumps(
+                    {
+                        "access_password_encrypted": encrypt_secret(
+                            "private-workflow-password"
+                        )
+                    }
+                ),
             )
         )
         db.add(
@@ -207,3 +215,4 @@ def test_worker_submits_ltx_task_to_workflow_endpoint(monkeypatch):
     assert fake.ai_app_id == "2080551073030434817"
     assert fake.submission_type == "workflow"
     assert fake.last_payload["instanceType"] == "plus"
+    assert fake.last_payload["accessPassword"] == "private-workflow-password"

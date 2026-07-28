@@ -143,6 +143,37 @@ def task_output_dir(settings: Settings, user_id: int, task_id: str) -> Path:
     return settings.outputs_dir / str(user_id) / task_id
 
 
+def staged_asset_dir(settings: Settings, user_id: int, asset_id: str) -> Path:
+    return settings.staged_assets_dir / str(user_id) / asset_id
+
+
+def voice_source_dir(settings: Settings, user_id: int, voice_asset_id: str) -> Path:
+    return settings.voice_sources_dir / str(user_id) / voice_asset_id
+
+
+def voice_creation_dir(settings: Settings, user_id: int, task_id: str) -> Path:
+    return settings.voice_creations_dir / str(user_id) / task_id
+
+
+def materialize_staged_asset(
+    source: Path,
+    destination_dir: Path,
+    *,
+    kind: str,
+) -> Path:
+    """Give each task its own path while allowing efficient same-disk reuse."""
+
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    target = destination_dir / f"{kind}-{uuid.uuid4().hex}{source.suffix.lower()}"
+    try:
+        os.link(source, target)
+    except OSError:
+        # Hard links keep repeated large videos cheap, but copying remains a
+        # portable fallback for filesystems or deployments that disallow them.
+        shutil.copy2(source, target)
+    return target
+
+
 def to_relative_data_path(path: Path, settings: Settings) -> str:
     return str(path.resolve().relative_to(settings.data_dir.resolve())).replace("\\", "/")
 

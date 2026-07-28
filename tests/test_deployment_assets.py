@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
+
+from app.services.processes import hidden_creation_flags
+from scripts.local_services import _process_alive
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +19,79 @@ def test_web_service_is_production_safe():
     assert "--host 127.0.0.1" in service
     assert "--forwarded-allow-ips=127.0.0.1" in service
     assert "EnvironmentFile=/opt/runninghub/.env" in service
+
+
+def test_audio_worker_has_its_own_restartable_service():
+    service = (
+        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-audio-worker.service"
+    ).read_text(encoding="utf-8")
+    assert "-m app.workers.audio_worker" in service
+    assert "Restart=on-failure" in service
+    assert "ReadWritePaths=/opt/runninghub/data" in service
+
+
+def test_windows_one_click_launcher_starts_all_local_services():
+    launcher = (PROJECT_ROOT / "scripts" / "local_services.py").read_text(
+        encoding="utf-8"
+    )
+    start = (PROJECT_ROOT / "启动系统.cmd").read_text(encoding="utf-8")
+    stop = (PROJECT_ROOT / "停止系统.cmd").read_text(encoding="utf-8")
+    web_runner = (PROJECT_ROOT / "scripts" / "serve_web.py").read_text(
+        encoding="utf-8"
+    )
+    assert "app.workers.audio_worker" in launcher
+    assert "app.workers.task_worker" in launcher
+    assert "scripts.serve_web" in launcher
+    assert "uvicorn.run" in web_runner
+    assert "alembic" in launcher
+    assert "scripts.local_services run" in start
+    assert "scripts.local_services stop" in stop
+
+
+def test_local_launcher_detects_live_and_missing_processes():
+    assert _process_alive(os.getpid()) is True
+    assert _process_alive(2_147_483_647) is False
+
+
+def test_media_processes_use_hidden_windows_flag_on_windows():
+    expected = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    assert hidden_creation_flags() == expected
+
+
+def test_live_status_pages_do_not_force_full_page_reload():
+    batch_detail = (PROJECT_ROOT / "app" / "templates" / "batch_detail.html").read_text(
+        encoding="utf-8"
+    )
+    operations = (PROJECT_ROOT / "app" / "templates" / "operations.html").read_text(
+        encoding="utf-8"
+    )
+    operations_script = (
+        PROJECT_ROOT / "app" / "static" / "operations.js"
+    ).read_text(encoding="utf-8")
+    batch_script = (
+        PROJECT_ROOT / "app" / "static" / "batch_generate.js"
+    ).read_text(encoding="utf-8")
+    assert "location.reload()" not in batch_detail
+    assert "location.reload()" not in operations
+    assert "location.reload()" not in operations_script
+    assert "/admin/operations/updates" in operations_script
+    assert "data-log-cursor" in operations
+    assert 'rows="7"' in batch_script
+    assert 'rows="5"' in batch_script
+    assert "MiniMax 句级时间戳" in batch_detail
+    assert "segment-remote-id" in batch_detail
+    assert 'segment.runninghubTaskId || "等待提交"' in batch_detail
+
+
+def test_batch_segment_table_keeps_remote_status_readable():
+    stylesheet = (PROJECT_ROOT / "app" / "static" / "app.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".segment-status-cell" in stylesheet
+    assert "overflow-wrap:anywhere" in stylesheet
+    assert ".segment-action-links" in stylesheet
+    assert ".child-task-table th:nth-child(4) { width:205px; }" in stylesheet
 
 
 def test_nginx_template_supports_current_upload_limit_and_proxy_headers():

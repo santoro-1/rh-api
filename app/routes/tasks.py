@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -25,6 +25,7 @@ from app.services.audio import (
     inspect_audio_duration,
     validate_time_range,
 )
+from app.services.media_segmentation import MAX_SEGMENT_SECONDS
 from app.services.csrf import require_csrf
 from app.services.storage import (
     UploadValidationError,
@@ -32,7 +33,20 @@ from app.services.storage import (
     safe_relative_path,
     save_upload,
     task_upload_dir,
+    task_output_dir,
     to_relative_data_path,
+)
+from app.services.task_creation import (
+    TaskCreationError,
+    create_generation_task,
+    ensure_user_can_create_workflow,
+    validate_task_input,
+)
+from app.services.task_management import (
+    RETRYABLE_TASK_STATUSES,
+    TERMINAL_TASK_STATUSES,
+    TaskManagementError,
+    prepare_task_retry,
 )
 from app.web import templates
 from app.services.workflow_configs import get_user_workflow_config
@@ -56,9 +70,36 @@ STATUS_LABELS = {
     TaskStatus.CANCELLED.value: "已取消",
 }
 
+ACTIVE_TASK_STATUSES = {
+    TaskStatus.PENDING.value,
+    TaskStatus.UPLOADING.value,
+    TaskStatus.SUBMITTED.value,
+    TaskStatus.RUNNING.value,
+}
+
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+
 
 def _task_query():
     return select(GenerationTask).options(selectinload(GenerationTask.user))
+
+
+def _beijing_date_boundary(value: date) -> datetime:
+    return datetime.combine(value, time.min, tzinfo=BEIJING_TIMEZONE).astimezone(
+        timezone.utc
+    )
+
+
+def _tasks_redirect(start_date: str, end_date: str) -> str:
+    query = {
+        key: value
+        for key, value in (
+            ("start_date", start_date),
+            ("end_date", end_date),
+        )
+        if value
+    }
+    return f"/tasks?{urlencode(query)}" if query else "/tasks"
 
 
 def _serialize_task(task: GenerationTask) -> dict:
@@ -150,6 +191,10 @@ def inspect_audio(
         end_text = format_timecode(duration)
         if duration < 1:
             raise AudioInspectionError("音频时长不足 1 秒，无法生成视频")
+        if duration > MAX_SEGMENT_SECONDS + 0.01:
+            raise AudioInspectionError(
+                "音频不能超过 45 秒；请先拆分音频，或使用脚本完整流程自动切分"
+            )
         return {
             "durationSeconds": round(duration, 3),
             "durationText": end_text,
@@ -181,18 +226,10 @@ def create_task(
 ):
     settings = get_settings()
     check_rate_limit(request, f"task-create:{current_user.id}", settings.task_create_rate_limit_per_minute)
-    account_config = current_user.runninghub_config
-    workflow_config = get_user_workflow_config(current_user, DIGITAL_HUMAN_WORKFLOW)
-    workflow = get_workflow(DIGITAL_HUMAN_WORKFLOW)
-    if not account_config or not account_config.api_key_encrypted:
-        raise HTTPException(status_code=400, detail="当前账号尚未配置 RunningHub API Key")
-
-    if not workflow_config.is_enabled:
-        raise HTTPException(status_code=400, detail="当前账号尚未启用数字人工作流")
-
-    prompt = prompt.strip()
-    if not 1 <= len(prompt) <= 5000:
-        raise HTTPException(status_code=400, detail="提示词长度必须在 1 到 5000 个字符之间")
+    try:
+        ensure_user_can_create_workflow(current_user, DIGITAL_HUMAN_WORKFLOW)
+    except TaskCreationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     task_id = str(uuid.uuid4())
     upload_dir = task_upload_dir(settings, current_user.id, task_id)
@@ -200,17 +237,25 @@ def create_task(
         image_path, image_original_name = save_upload(image, upload_dir, "image", settings)
         audio_path, audio_original_name = save_upload(audio, upload_dir, "audio", settings)
         duration = inspect_audio_duration(audio_path)
-        parameters = workflow.validate_parameters(
-            {
-                "prompt": prompt,
-                "start_time": startTime,
-                "end_time": endTime,
-                "resolution": resolution,
-                "person_mode": personMode,
-                "instance_type": instanceType,
-            },
-            {"audio_duration_seconds": duration},
+        if duration > MAX_SEGMENT_SECONDS + 0.01:
+            raise ValueError(
+                "音频不能超过 45 秒；请先拆分音频，或使用脚本完整流程自动切分"
+            )
+        selected_start, selected_end = validate_time_range(
+            startTime,
+            endTime,
+            duration,
         )
+        if selected_end - selected_start > MAX_SEGMENT_SECONDS + 0.01:
+            raise ValueError("单次生成使用的音频区间不能超过 45 秒")
+        parameters = {
+            "prompt": prompt,
+            "start_time": startTime,
+            "end_time": endTime,
+            "resolution": resolution,
+            "person_mode": personMode,
+            "instance_type": instanceType,
+        }
         assets = [
             WorkflowAsset(
                 name="image",
@@ -225,11 +270,15 @@ def create_task(
                 original_name=audio_original_name,
             ),
         ]
-        if parameters["person_mode"] == "0":
+        if str(personMode).strip() == "0":
             if not leftAudio or not leftAudio.filename or not rightAudio or not rightAudio.filename:
                 raise ValueError("双人模式必须上传左边人物音频和右边人物音频")
             for name, upload in (("left_audio", leftAudio), ("right_audio", rightAudio)):
                 path, original_name = save_upload(upload, upload_dir, "audio", settings)
+                auxiliary_duration = inspect_audio_duration(path)
+                if auxiliary_duration > MAX_SEGMENT_SECONDS + 0.01:
+                    label = "左人物音频" if name == "left_audio" else "右人物音频"
+                    raise ValueError(f"{label}不能超过 45 秒，请先拆分音频")
                 assets.append(
                     WorkflowAsset(
                         name=name,
@@ -238,29 +287,26 @@ def create_task(
                         original_name=original_name,
                     )
                 )
-        input_payload = workflow.serialize_input(
+        validated = validate_task_input(
+            current_user,
+            DIGITAL_HUMAN_WORKFLOW,
             assets,
             parameters,
             {"audio_duration_seconds": duration},
         )
-        task = GenerationTask(
-            id=task_id,
-            user_id=current_user.id,
-            workflow_type=workflow.key,
-            input_payload=json.dumps(input_payload, ensure_ascii=False),
-            image_path=assets[0].relative_path,
-            audio_path=assets[1].relative_path,
-            image_original_name=image_original_name,
-            audio_original_name=audio_original_name,
-            audio_duration_seconds=duration,
-            start_seconds=float(parameters["start_seconds"]),
-            end_seconds=float(parameters["end_seconds"]),
-            prompt=str(parameters["prompt"]),
-            status=TaskStatus.PENDING.value,
+        create_generation_task(
+            db,
+            current_user,
+            validated,
+            task_id=task_id,
         )
-        db.add(task)
         db.commit()
-    except (UploadValidationError, AudioInspectionError, ValueError) as exc:
+    except (
+        UploadValidationError,
+        AudioInspectionError,
+        TaskCreationError,
+        ValueError,
+    ) as exc:
         db.rollback()
         remove_directory(upload_dir)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -289,13 +335,10 @@ def create_ltx_lip_sync_task(
         f"task-create:{current_user.id}",
         settings.task_create_rate_limit_per_minute,
     )
-    account_config = current_user.runninghub_config
-    workflow_config = get_user_workflow_config(current_user, LTX_LIP_SYNC_WORKFLOW)
-    workflow = get_workflow(LTX_LIP_SYNC_WORKFLOW)
-    if not account_config or not account_config.api_key_encrypted:
-        raise HTTPException(status_code=400, detail="当前账号尚未配置 RunningHub API Key")
-    if not workflow_config.is_enabled or not workflow_config.ai_app_id:
-        raise HTTPException(status_code=400, detail="当前账号尚未启用视频对口型工作流")
+    try:
+        ensure_user_can_create_workflow(current_user, LTX_LIP_SYNC_WORKFLOW)
+    except TaskCreationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     task_id = str(uuid.uuid4())
     upload_dir = task_upload_dir(settings, current_user.id, task_id)
@@ -314,6 +357,11 @@ def create_ltx_lip_sync_task(
         if not customAudio or not customAudio.filename:
             raise ValueError("必须上传自定义音频")
         audio_path, audio_original_name = save_upload(customAudio, upload_dir, "audio", settings)
+        duration = inspect_audio_duration(audio_path)
+        if duration > MAX_SEGMENT_SECONDS + 0.01:
+            raise ValueError(
+                "音频不能超过 45 秒；请先拆分音频，或使用脚本完整流程自动切分"
+            )
         assets.append(
             WorkflowAsset(
                 name="audio",
@@ -322,35 +370,25 @@ def create_ltx_lip_sync_task(
                 original_name=audio_original_name,
             )
         )
-        parameters = workflow.validate_parameters(
-            {"prompt": prompt, "instance_type": instanceType},
-            {"has_custom_audio": True},
-        )
-        input_payload = workflow.serialize_input(
+        parameters = {"prompt": prompt, "instance_type": instanceType}
+        validated = validate_task_input(
+            current_user,
+            LTX_LIP_SYNC_WORKFLOW,
             assets,
             parameters,
-            {"has_custom_audio": True},
+            {
+                "has_custom_audio": True,
+                "audio_duration_seconds": duration,
+            },
         )
-        video_relative_path = assets[0].relative_path
-        task = GenerationTask(
-            id=task_id,
-            user_id=current_user.id,
-            workflow_type=workflow.key,
-            input_payload=json.dumps(input_payload, ensure_ascii=False),
-            # Legacy columns remain populated for database compatibility.
-            image_path=video_relative_path,
-            audio_path=to_relative_data_path(audio_path, settings),
-            image_original_name=video_original_name,
-            audio_original_name=audio_original_name,
-            audio_duration_seconds=0,
-            start_seconds=0,
-            end_seconds=0,
-            prompt=str(parameters["prompt"]),
-            status=TaskStatus.PENDING.value,
+        create_generation_task(
+            db,
+            current_user,
+            validated,
+            task_id=task_id,
         )
-        db.add(task)
         db.commit()
-    except (UploadValidationError, ValueError) as exc:
+    except (UploadValidationError, TaskCreationError, ValueError) as exc:
         db.rollback()
         remove_directory(upload_dir)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -375,6 +413,113 @@ def task_status(
         raise HTTPException(status_code=404, detail="任务不存在")
     ensure_task_access(task, current_user)
     return _serialize_task(task)
+
+
+@router.post("/tasks/{task_id}/retry")
+def retry_task(
+    task_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    task = db.get(GenerationTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    ensure_task_access(task, current_user)
+    if task.status not in RETRYABLE_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="只有失败任务可以重试")
+
+    try:
+        prepare_task_retry(task, get_settings())
+    except TaskManagementError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    return RedirectResponse(f"/tasks/{task.id}", status_code=303)
+
+
+@router.post("/tasks/{task_id}/delete")
+def delete_task(
+    task_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    task = db.get(GenerationTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    ensure_task_access(task, current_user)
+    if task.status not in TERMINAL_TASK_STATUSES:
+        raise HTTPException(status_code=409, detail="任务处理期间不能删除记录")
+
+    settings = get_settings()
+    upload_dir = task_upload_dir(settings, task.user_id, task.id)
+    output_dir = task_output_dir(settings, task.user_id, task.id)
+    db.delete(task)
+    db.commit()
+    try:
+        remove_directory(upload_dir)
+        remove_directory(output_dir)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="任务记录已删除，但本地文件清理失败",
+        ) from exc
+    return RedirectResponse("/tasks", status_code=303)
+
+
+@router.post("/tasks/bulk-delete")
+def bulk_delete_tasks(
+    task_ids: list[str] | None = Form(None),
+    start_date: str = Form(""),
+    end_date: str = Form(""),
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    selected_ids = list(dict.fromkeys(task_ids or []))
+    if not selected_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个任务")
+
+    tasks: list[GenerationTask] = []
+    for task_id in selected_ids:
+        task = db.get(GenerationTask, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="所选任务不存在")
+        ensure_task_access(task, current_user)
+        tasks.append(task)
+
+    if any(task.status not in TERMINAL_TASK_STATUSES for task in tasks):
+        raise HTTPException(
+            status_code=409,
+            detail="所选任务包含正在排队或处理的任务，请取消选择后再删除",
+        )
+
+    settings = get_settings()
+    directories = [
+        (
+            task_upload_dir(settings, task.user_id, task.id),
+            task_output_dir(settings, task.user_id, task.id),
+        )
+        for task in tasks
+    ]
+    for task in tasks:
+        db.delete(task)
+    db.commit()
+
+    try:
+        for upload_dir, output_dir in directories:
+            remove_directory(upload_dir)
+            remove_directory(output_dir)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="任务记录已删除，但部分本地文件清理失败",
+        ) from exc
+
+    return RedirectResponse(
+        _tasks_redirect(start_date, end_date),
+        status_code=303,
+    )
 
 
 @router.get("/api/tasks/{task_id}/image")
@@ -469,12 +614,32 @@ def preview_task(
 @router.get("/tasks")
 def tasks_page(
     request: Request,
+    start_date: date | None = None,
+    end_date: date | None = None,
     current_user: User = Depends(get_page_user),
     db: Session = Depends(get_db),
 ):
-    statement = _task_query().order_by(GenerationTask.created_at.desc())
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+
+    # Full-flow video calls are shown under their batch parent instead of
+    # flooding the flat single-task history with every cut segment.
+    statement = (
+        _task_query()
+        .where(GenerationTask.segment_id.is_(None))
+        .order_by(GenerationTask.created_at.desc())
+    )
     if not current_user.is_admin:
         statement = statement.where(GenerationTask.user_id == current_user.id)
+    if start_date:
+        statement = statement.where(
+            GenerationTask.created_at >= _beijing_date_boundary(start_date)
+        )
+    if end_date:
+        statement = statement.where(
+            GenerationTask.created_at
+            < _beijing_date_boundary(end_date + timedelta(days=1))
+        )
     tasks = db.scalars(statement).all()
     return templates.TemplateResponse(
         request,
@@ -484,9 +649,15 @@ def tasks_page(
             "current_user": current_user,
             "status_labels": STATUS_LABELS,
             "now": datetime.now(timezone.utc),
+            "start_date": start_date.isoformat() if start_date else "",
+            "end_date": end_date.isoformat() if end_date else "",
+            "has_date_filter": bool(start_date or end_date),
             "workflow_names": {
                 workflow.key: workflow.display_name for workflow in list_workflows()
             },
+            "has_active_tasks": any(
+                task.status in ACTIVE_TASK_STATUSES for task in tasks
+            ),
         },
     )
 

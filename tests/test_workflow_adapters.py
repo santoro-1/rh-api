@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.security import encrypt_secret
+from app.services.workflow_configs import get_user_workflow_config
 from app.workflows import get_workflow, list_workflows
 from app.workflows.base import WorkflowAsset
 
@@ -157,6 +159,8 @@ def test_digital_human_adapter_uses_video_output_and_rejects_bad_parameters():
 def test_ltx_lip_sync_adapter_maps_custom_audio_and_output_node():
     workflow = get_workflow("ltx_lip_sync")
     assert workflow.submission_type == "workflow"
+    assert workflow.default_prompt.startswith("一名人物用中文说")
+    assert "动作" not in workflow.default_prompt
     with pytest.raises(ValueError, match="必须上传自定义音频"):
         workflow.validate_parameters(
             {"prompt": "测试"},
@@ -215,6 +219,23 @@ def test_ltx_lip_sync_adapter_maps_custom_audio_and_output_node():
     assert payload["instanceType"] == "plus"
     assert payload["usePersonalQueue"] is False
     assert "retainSeconds" not in payload
+    assert "accessPassword" not in payload
+    encrypted_payload = workflow.build_payload(
+        task,
+        {
+            "video": "openapi/source.mp4",
+            "audio": "openapi/voice.mp3",
+        },
+        ai_app_id="2080551073030434817",
+        instance_type="plus",
+        settings={
+            "access_password_encrypted": encrypt_secret(
+                "private-workflow-password"
+            )
+        },
+    )
+    assert encrypted_payload["accessPassword"] == "private-workflow-password"
+    assert "access_password_encrypted" not in encrypted_payload
     output = workflow.select_output(
         task,
         {
@@ -232,3 +253,24 @@ def test_ltx_lip_sync_adapter_maps_custom_audio_and_output_node():
         {"has_custom_audio": True},
     )
     assert default_parameters["instance_type"] == "default"
+
+
+def test_ltx_obsolete_builtin_prompt_is_replaced_but_custom_prompt_is_kept():
+    legacy_prompt = (
+        "人物自然地说话，口型与语音一致，保持原视频动作、构图和镜头稳定。"
+    )
+    config = SimpleNamespace(
+        workflow_key="ltx_lip_sync",
+        ai_app_id="workflow-id",
+        instance_type="default",
+        default_prompt=legacy_prompt,
+        is_enabled=True,
+        settings_json="{}",
+    )
+    user = SimpleNamespace(workflow_configs=[config], runninghub_config=None)
+    resolved = get_user_workflow_config(user, "ltx_lip_sync")
+    assert resolved.default_prompt == get_workflow("ltx_lip_sync").default_prompt
+
+    config.default_prompt = "一名男性用英语说：“Hello.”"
+    resolved = get_user_workflow_config(user, "ltx_lip_sync")
+    assert resolved.default_prompt == config.default_prompt

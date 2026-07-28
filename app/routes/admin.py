@@ -7,18 +7,21 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import RunningHubConfig, User
+from app.models import MiniMaxVoiceAsset, RunningHubConfig, User, VoiceAssetStatus
 from app.routes.dependencies import get_page_admin
 from app.services.csrf import require_csrf
 from app.services.security import encrypt_secret, hash_password, mask_secret
+from app.services.speech.accounts import save_minimax_config
 from app.services.workflow_configs import (
     get_user_workflow_config,
     save_workflow_config,
 )
 from app.web import templates
+from app.workflows import get_workflow
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+LTX_DEFAULT_PROMPT = get_workflow("ltx_lip_sync").default_prompt
 
 
 def _validate_config(base_url: str, ai_app_id: str, instance_type: str, max_tasks: int) -> None:
@@ -45,6 +48,13 @@ def _save_config(
     ltx_instance_type: str,
     ltx_default_prompt: str,
     ltx_enabled: bool,
+    ltx_access_password: str,
+    ltx_clear_access_password: bool,
+    minimax_api_key: str,
+    minimax_base_url: str,
+    minimax_requests_per_minute: int,
+    minimax_account_label: str,
+    minimax_new_account: bool,
 ) -> None:
     _validate_config(base_url, ai_app_id, instance_type, max_concurrent_tasks)
     config = user.runninghub_config
@@ -80,6 +90,16 @@ def _save_config(
     ltx_workflow_id = ltx_workflow_id.strip()
     if ltx_enabled and not ltx_workflow_id:
         raise ValueError("启用视频对口型工作流时，Workflow ID 不能为空")
+    if len(ltx_access_password) > 500:
+        raise ValueError("视频对口型工作流访问密码不能超过 500 个字符")
+    existing_ltx_config = get_user_workflow_config(user, "ltx_lip_sync")
+    ltx_settings = dict(existing_ltx_config.settings)
+    if ltx_clear_access_password:
+        ltx_settings.pop("access_password_encrypted", None)
+    elif ltx_access_password:
+        ltx_settings["access_password_encrypted"] = encrypt_secret(
+            ltx_access_password
+        )
     ltx_config = save_workflow_config(
         user,
         "ltx_lip_sync",
@@ -87,11 +107,21 @@ def _save_config(
         instance_type=ltx_instance_type,
         default_prompt=(
             ltx_default_prompt.strip()
-            or "人物自然地说话，口型与语音一致，保持原视频动作、构图和镜头稳定。"
+            or LTX_DEFAULT_PROMPT
         ),
         is_enabled=ltx_enabled,
+        settings=ltx_settings,
     )
     db.add(ltx_config)
+    save_minimax_config(
+        db,
+        user,
+        api_key=minimax_api_key,
+        base_url=minimax_base_url,
+        requests_per_minute=minimax_requests_per_minute,
+        account_label=minimax_account_label,
+        start_new_account_binding=minimax_new_account,
+    )
 
 
 @router.get("/users")
@@ -105,6 +135,7 @@ def users_page(
         .options(
             selectinload(User.runninghub_config),
             selectinload(User.workflow_configs),
+            selectinload(User.minimax_config),
         )
         .order_by(User.id)
     ).all()
@@ -138,9 +169,16 @@ def new_user_page(
             "ltx_config": {
                 "ai_app_id": "2080551073030434817",
                 "instance_type": "plus",
-                "default_prompt": "人物自然地说话，口型与语音一致，保持原视频动作、构图和镜头稳定。",
+                "default_prompt": LTX_DEFAULT_PROMPT,
                 "is_enabled": False,
             },
+            "ltx_has_access_password": False,
+            "minimax_config": {
+                "base_url": settings.minimax_default_base_url,
+                "requests_per_minute": 20,
+                "account_label": "MiniMax 账号",
+            },
+            "active_minimax_voices": [],
         },
     )
 
@@ -162,6 +200,13 @@ def create_user(
     ltx_instance_type: str = Form("plus"),
     ltx_default_prompt: str = Form(""),
     ltx_enabled: bool = Form(False),
+    ltx_access_password: str = Form(""),
+    ltx_clear_access_password: bool = Form(False),
+    minimax_api_key: str = Form(""),
+    minimax_base_url: str = Form("https://api.minimaxi.com"),
+    minimax_requests_per_minute: int = Form(20),
+    minimax_account_label: str = Form("MiniMax 账号"),
+    minimax_new_account: bool = Form(False),
     csrf_ok: None = Depends(require_csrf),
     _: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
@@ -192,6 +237,13 @@ def create_user(
             ltx_instance_type,
             ltx_default_prompt,
             ltx_enabled,
+            ltx_access_password,
+            ltx_clear_access_password,
+            minimax_api_key,
+            minimax_base_url,
+            minimax_requests_per_minute,
+            minimax_account_label,
+            minimax_new_account,
         )
         db.commit()
     except ValueError as exc:
@@ -212,11 +264,14 @@ def edit_user_page(
         .options(
             selectinload(User.runninghub_config),
             selectinload(User.workflow_configs),
+            selectinload(User.minimax_config),
+            selectinload(User.minimax_voices),
         )
         .where(User.id == user_id)
     )
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
+    ltx_config = get_user_workflow_config(user, "ltx_lip_sync")
     return templates.TemplateResponse(
         request,
         "admin_user_form.html",
@@ -226,7 +281,29 @@ def edit_user_page(
             "config": user.runninghub_config,
             "error": None,
             "current_user": current_user,
-            "ltx_config": get_user_workflow_config(user, "ltx_lip_sync"),
+            "ltx_config": ltx_config,
+            "ltx_has_access_password": bool(
+                ltx_config.settings.get("access_password_encrypted")
+            ),
+            "minimax_config": user.minimax_config
+            or {
+                "base_url": get_settings().minimax_default_base_url,
+                "requests_per_minute": 20,
+                "account_label": "MiniMax 账号",
+            },
+            "active_minimax_voices": [
+                voice
+                for voice in user.minimax_voices
+                if voice.is_saved
+                and voice.status
+                in {
+                    VoiceAssetStatus.READY.value,
+                    VoiceAssetStatus.ACTIVE.value,
+                }
+                and user.minimax_config is not None
+                and voice.account_binding_id
+                == user.minimax_config.account_binding_id
+            ],
         },
     )
 
@@ -248,6 +325,13 @@ def update_user(
     ltx_instance_type: str = Form("plus"),
     ltx_default_prompt: str = Form(""),
     ltx_enabled: bool = Form(False),
+    ltx_access_password: str = Form(""),
+    ltx_clear_access_password: bool = Form(False),
+    minimax_api_key: str = Form(""),
+    minimax_base_url: str = Form("https://api.minimaxi.com"),
+    minimax_requests_per_minute: int = Form(20),
+    minimax_account_label: str = Form("MiniMax 账号"),
+    minimax_new_account: bool = Form(False),
     csrf_ok: None = Depends(require_csrf),
     _: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
@@ -257,6 +341,8 @@ def update_user(
         .options(
             selectinload(User.runninghub_config),
             selectinload(User.workflow_configs),
+            selectinload(User.minimax_config),
+            selectinload(User.minimax_voices),
         )
         .where(User.id == user_id)
     )
@@ -285,6 +371,13 @@ def update_user(
             ltx_instance_type,
             ltx_default_prompt,
             ltx_enabled,
+            ltx_access_password,
+            ltx_clear_access_password,
+            minimax_api_key,
+            minimax_base_url,
+            minimax_requests_per_minute,
+            minimax_account_label,
+            minimax_new_account,
         )
         db.commit()
     except ValueError as exc:

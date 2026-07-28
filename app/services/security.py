@@ -29,13 +29,17 @@ def encrypt_secret(value: str) -> str:
     return _fernet().encrypt(value.encode("utf-8")).decode("ascii")
 
 
-def decrypt_secret(value: str | None) -> str:
+def decrypt_secret(
+    value: str | None,
+    *,
+    label: str = "RunningHub API Key",
+) -> str:
     if not value:
-        raise ValueError("该用户尚未配置 RunningHub API Key")
+        raise ValueError(f"尚未配置{label}")
     try:
         return _fernet().decrypt(value.encode("ascii")).decode("utf-8")
     except (InvalidToken, UnicodeDecodeError) as exc:
-        raise ValueError("保存的 RunningHub API Key 无法解密") from exc
+        raise ValueError(f"保存的{label}无法解密") from exc
 
 
 def mask_secret(value: str | None) -> str:
