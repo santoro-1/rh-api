@@ -40,6 +40,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _video_log_context(task: GenerationTask) -> dict[str, object]:
+    return {
+        "user_id": task.user_id,
+        "username": task.user.username if task.user else None,
+        "task_id": task.id,
+    }
+
+
 def _make_client(config: RunningHubConfig) -> RunningHubClient:
     """Build the account-level client; the selected adapter supplies the App ID."""
 
@@ -62,10 +70,10 @@ def _mark_failed(task: GenerationTask, code: str, message: str) -> None:
         "video.failed",
         "视频任务失败",
         level=logging.WARNING,
-        task_id=task.id,
         workflow=task.workflow_type,
         error_code=code,
         error=message,
+        **_video_log_context(task),
     )
 
 
@@ -187,9 +195,9 @@ def _handle_remote_status(
                 "video.query_error",
                 "RunningHub 状态查询失败，将保留远程任务继续查询",
                 level=logging.WARNING,
-                task_id=task.id,
                 runninghub_task_id=task.runninghub_task_id,
                 error=str(exc),
+                **_video_log_context(task),
             )
         return
 
@@ -210,10 +218,10 @@ def _handle_remote_status(
                 logger,
                 "video.remote_status",
                 "RunningHub 任务状态已变化",
-                task_id=task.id,
                 runninghub_task_id=task.runninghub_task_id,
                 previous_status=previous_status,
                 status=task.status,
+                **_video_log_context(task),
             )
         return
     if status == "FAILED":
@@ -241,8 +249,8 @@ def _handle_remote_status(
         logger,
         "video.download_started",
         "RunningHub 已返回结果，开始下载视频",
-        task_id=task.id,
         runninghub_task_id=task.runninghub_task_id,
+        **_video_log_context(task),
     )
     try:
         client.download_result(output.url, destination)
@@ -257,9 +265,9 @@ def _handle_remote_status(
             "video.download_failed",
             "视频结果下载失败",
             level=logging.WARNING,
-            task_id=task.id,
             runninghub_task_id=task.runninghub_task_id,
             error=str(exc),
+            **_video_log_context(task),
         )
         return
     task.result_path = to_relative_data_path(destination, get_settings())
@@ -273,9 +281,9 @@ def _handle_remote_status(
         logger,
         "video.completed",
         "视频任务完成",
-        task_id=task.id,
         runninghub_task_id=task.runninghub_task_id,
         result_path=task.result_path,
+        **_video_log_context(task),
     )
 
 
@@ -327,8 +335,8 @@ def process_task(db: Session, task_id: str) -> None:
             logger,
             "video.upload_started",
             "开始上传视频任务素材",
-            task_id=task.id,
             workflow=task.workflow_type,
+            **_video_log_context(task),
         )
         uploaded_files = {
             asset.name: client.upload_file(resolve_asset_path(asset, settings))
@@ -353,9 +361,9 @@ def process_task(db: Session, task_id: str) -> None:
             logger,
             "video.submitted",
             "视频任务已提交 RunningHub",
-            task_id=task.id,
             workflow=task.workflow_type,
             runninghub_task_id=remote_task_id,
+            **_video_log_context(task),
         )
     except (OSError, ValueError, RunningHubError) as exc:
         _mark_failed(task, "SUBMIT_FAILED", str(exc))

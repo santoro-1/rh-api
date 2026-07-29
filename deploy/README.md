@@ -1,169 +1,115 @@
-# 单服务器生产部署手册
+# `runninghub-video` 生产部署手册
 
-本文档用于把当前 FastAPI + SQLite + 独立 Worker 项目部署到一台 Ubuntu
-24.04 LTS 服务器。部署前先在测试域名完成整套验收，再切换正式域名。
+本目录记录当前生产环境的可复现配置。正式环境使用独立目录、用户、
+systemd 服务、Nginx 配置和证书，不与服务器上的其他项目共用。
 
-## 1. 服务器结构
+## 固定部署结构
 
 ```text
-Internet -> Nginx :443 -> FastAPI :8000 (仅监听 127.0.0.1)
-                              |
-                         SQLite / data
-                              |
-                      MiniMax Audio Worker → RunningHub Video Worker
+/opt/runninghub-video/                 项目代码、虚拟环境、SQLite、上传与输出
+/var/backups/runninghub-video/         独立备份
+/etc/nginx/conf.d/runninghub-video.conf
+/etc/systemd/system/runninghub-video-web.service
+/etc/systemd/system/runninghub-video-audio.service
+/etc/systemd/system/runninghub-video-worker.service
+/etc/letsencrypt/live/video.lanyingjk01.com/
 ```
 
-服务器无需 GPU。Nginx 负责公网入口和 HTTPS；systemd 分别守护 Web、语音
-Worker 与视频 Worker。当前 SQLite 架构只运行一个 Web 进程、一个语音 Worker
-和一个视频 Worker，不要自行增加 Uvicorn `--workers` 或复制 Worker 服务。
+- Linux 用户：`rhvideo`
+- Web 监听：`127.0.0.1:18083`
+- 公网入口：`https://video.lanyingjk01.com`
+- 对外只使用 Nginx 的 80/443，不开放内部端口
+- `.env` 权限必须为 `600`
+- 音频 Worker 固定使用较低 CPU、I/O 优先级及内存上限，避免影响服务器上的
+  24 小时客服项目
 
-## 2. 准备条件
+## 本地发布前要求
 
-- 一台 Ubuntu 24.04 LTS 服务器，建议从 2 核、4GB 内存、80GB SSD 起步。
-- 一个已把 A/AAAA 记录解析到服务器公网 IP 的域名。
-- SSH 管理权限。不要在聊天、工单或 Git 中发送密码、API Key 或 `.env`。
-- 防火墙只对公网开放 SSH、80 和 443；8000 不开放。
+1. 从最新 `origin/main` 创建功能分支。
+2. 本地运行完整 `pytest`。
+3. 本地使用管理员、普通账号 A、普通账号 B 验证权限和数据隔离。
+4. 所有数据库迁移先在测试数据库执行。
+5. 提交并推送确定的 Git commit 后才能发布。
+6. 禁止把 `.env`、SQLite、上传、输出或日志提交到 Git。
 
-安装系统依赖：
+## 服务器发布前只读检查
 
 ```bash
-sudo apt update
-sudo apt install -y python3-venv python3-pip ffmpeg sqlite3 nginx certbot python3-certbot-nginx
+systemctl is-active runninghub-video-web.service
+systemctl is-active runninghub-video-audio.service
+systemctl is-active runninghub-video-worker.service
+curl -fsS -H 'Host: video.lanyingjk01.com' http://127.0.0.1:18083/healthz
 ```
 
-## 3. 创建运行用户和目录
+确认任务队列没有正在执行的任务，并先运行独立备份：
 
 ```bash
-sudo useradd --system --create-home --home-dir /opt/runninghub --shell /usr/sbin/nologin runninghub
-sudo mkdir -p /opt/runninghub /var/backups/runninghub
-sudo chown -R runninghub:runninghub /opt/runninghub /var/backups/runninghub
-sudo chmod 750 /opt/runninghub /var/backups/runninghub
+sudo -u rhvideo /bin/bash /opt/runninghub-video/deploy/scripts/backup.sh
 ```
 
-把项目文件上传或检出到 `/opt/runninghub`，然后：
+备份必须包含 SQLite、上传、输出和 `.env`，并保存到
+`/var/backups/runninghub-video/`。
+
+## 更新代码
+
+只发布已确认的 Git commit，不在服务器上直接编辑应用代码。
 
 ```bash
-sudo -u runninghub python3 -m venv /opt/runninghub/.venv
-sudo -u runninghub /opt/runninghub/.venv/bin/pip install --upgrade pip
-sudo -u runninghub /opt/runninghub/.venv/bin/pip install -r /opt/runninghub/requirements.txt
-sudo -u runninghub mkdir -p /opt/runninghub/data/uploads /opt/runninghub/data/outputs
+cd /opt/runninghub-video
+sudo -u rhvideo /opt/runninghub-video/.venv/bin/pip install \
+  -r /opt/runninghub-video/requirements.txt
+sudo -u rhvideo /bin/bash /opt/runninghub-video/deploy/scripts/preflight.sh
+sudo -u rhvideo /opt/runninghub-video/.venv/bin/python \
+  -m alembic -c /opt/runninghub-video/alembic.ini upgrade head
 ```
 
-## 4. 创建生产环境配置
+只重启本项目三个服务：
 
 ```bash
-sudo -u runninghub cp /opt/runninghub/.env.production.example /opt/runninghub/.env
-sudo chmod 600 /opt/runninghub/.env
+systemctl restart runninghub-video-web.service
+systemctl restart runninghub-video-audio.service
+systemctl restart runninghub-video-worker.service
 ```
 
-生成两个不同的密钥：
+不得停止、重启或修改服务器上的其他项目。
+
+## Nginx
+
+只有反向代理配置确实变化时才更新
+`/etc/nginx/conf.d/runninghub-video.conf`。更新后必须先验证：
 
 ```bash
-/opt/runninghub/.venv/bin/python -c "import secrets; print(secrets.token_urlsafe(48))"
-/opt/runninghub/.venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+nginx -t
 ```
 
-分别填入 `APP_SECRET_KEY` 和 `APP_ENCRYPTION_KEY`，并把
-`ALLOWED_HOSTS` 改成真实域名。`APP_ENCRYPTION_KEY` 一旦丢失，数据库里已有的
-RunningHub API Key 将无法解密，所以必须连同 `.env` 安全备份。
-
-执行预检和迁移：
+验证通过后只能 reload：
 
 ```bash
-sudo -u runninghub /bin/bash /opt/runninghub/deploy/scripts/preflight.sh
-sudo -u runninghub /opt/runninghub/.venv/bin/python -m alembic -c /opt/runninghub/alembic.ini upgrade head
-sudo -u runninghub /opt/runninghub/.venv/bin/python -m scripts.create_admin admin
+systemctl reload nginx
 ```
 
-## 5. 安装 systemd 服务
+不得 restart Nginx，也不得覆盖其他项目的 Nginx 配置或证书。
+
+## 发布后验收
+
+1. 三个 `runninghub-video` 服务均为 active。
+2. `/healthz` 返回 `{"status":"ok"}`。
+3. HTTPS 登录、管理员页面和普通用户页面正常。
+4. 用户 A、B 的音色、任务、上传和输出互相不可见。
+5. 使用官方音色完成一条最小真实任务。
+6. 管理员资源面板可看到 CPU、内存、磁盘、FFmpeg 和队列状态。
+7. Web、语音和视频日志均写入 `data/logs/`，且敏感信息已脱敏。
+8. 同时验证服务器上的关键客服服务仍然正常。
+
+## 回滚与恢复
+
+代码异常优先回滚到发布前确认的 Git commit。涉及数据恢复时，必须先停止
+本项目三个服务，再显式执行：
 
 ```bash
-sudo cp /opt/runninghub/deploy/systemd/runninghub-*.service /etc/systemd/system/
-sudo cp /opt/runninghub/deploy/systemd/runninghub-*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now runninghub-web runninghub-audio-worker runninghub-worker
-sudo systemctl enable --now runninghub-backup.timer runninghub-cleanup.timer
+/bin/bash /opt/runninghub-video/deploy/scripts/restore.sh \
+  /var/backups/runninghub-video/runninghub-video-YYYYmmddTHHMMSSZ.tar.gz \
+  --confirm
 ```
 
-检查：
-
-```bash
-sudo systemctl status runninghub-web runninghub-audio-worker runninghub-worker
-sudo journalctl -u runninghub-web -u runninghub-audio-worker -u runninghub-worker -n 100 --no-pager
-curl -H "Host: video.example.com" http://127.0.0.1:8000/healthz
-```
-
-## 6. 配置 Nginx 和 HTTPS
-
-把模板中的 `__DOMAIN__` 替换为真实域名：
-
-```bash
-sudo sed 's/__DOMAIN__/video.example.com/g' /opt/runninghub/deploy/nginx/runninghub.conf.template \
-  | sudo tee /etc/nginx/sites-available/runninghub >/dev/null
-sudo ln -s /etc/nginx/sites-available/runninghub /etc/nginx/sites-enabled/runninghub
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-确认域名 HTTP 可访问后签发证书：
-
-```bash
-sudo certbot --nginx -d video.example.com --redirect
-sudo certbot renew --dry-run
-```
-
-Nginx 模板已把请求体上限设为 550MB，以覆盖应用当前 500MB 的视频上限。
-如果以后修改 `MAX_VIDEO_SIZE_MB`，必须同步调整 `client_max_body_size`。
-
-## 7. 上线验收
-
-至少完成以下验证：
-
-1. 只能通过 HTTPS 登录，HTTP 自动跳转 HTTPS。
-2. 管理员可创建、禁用用户；普通用户无法进入用户管理。
-3. 数字人固定使用 Stand 24G，视频对口型可以切换 Stand/Plus。
-4. 并发数设为 2 后连续提交 8 个任务：2 个进入远程处理，其余保持等待。
-5. 重启 Worker 后，已有远程任务不会重复提交。
-6. 上传接近上限的视频，确认不会出现 Nginx 413。
-7. 手动执行一次备份，确认生成的归档不为空，并在隔离目录演练恢复。
-8. 确认 `journalctl` 不输出 API Key、密码或素材内容。
-
-## 8. 日常维护
-
-查看日志：
-
-```bash
-sudo journalctl -u runninghub-web -u runninghub-audio-worker -u runninghub-worker -f
-```
-
-管理员也可以在站内“运行状态”页面查看服务心跳、两级队列和近期脱敏日志。
-
-发布新版本：
-
-```bash
-sudo systemctl stop runninghub-audio-worker runninghub-worker runninghub-web
-sudo -u runninghub /opt/runninghub/.venv/bin/pip install -r /opt/runninghub/requirements.txt
-sudo -u runninghub /opt/runninghub/.venv/bin/python -m alembic -c /opt/runninghub/alembic.ini upgrade head
-sudo systemctl start runninghub-web runninghub-audio-worker runninghub-worker
-```
-
-更新前先运行备份。不要删除或重建 `data/app.db` 来处理迁移问题。
-
-手动备份：
-
-```bash
-sudo -u runninghub /bin/bash /opt/runninghub/deploy/scripts/backup.sh
-```
-
-备份归档包含数据库、上传、输出和 `.env`，因此属于敏感文件。应定期复制到
-另一台机器或对象存储，并限制读取权限。
-
-恢复会覆盖当前数据，必须先停止服务并显式确认：
-
-```bash
-sudo systemctl stop runninghub-audio-worker runninghub-worker runninghub-web
-sudo /bin/bash /opt/runninghub/deploy/scripts/restore.sh \
-  /var/backups/runninghub/runninghub-YYYYmmddTHHMMSSZ.tar.gz --confirm
-sudo systemctl start runninghub-web runninghub-audio-worker runninghub-worker
-```
+恢复操作会替换当前数据，只能在确认备份路径和影响范围后执行。

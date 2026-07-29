@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${RUNNINGHUB_APP_DIR:-/opt/runninghub}"
-BACKUP_DIR="${RUNNINGHUB_BACKUP_DIR:-/var/backups/runninghub}"
+APP_DIR="${RUNNINGHUB_APP_DIR:-/opt/runninghub-video}"
+BACKUP_DIR="${RUNNINGHUB_BACKUP_DIR:-/var/backups/runninghub-video}"
 DATA_DIR="$APP_DIR/data"
 DATABASE="$DATA_DIR/app.db"
 
@@ -35,7 +35,7 @@ cp "$APP_DIR/.env" "$TEMP_DIR/.env"
 chmod 600 "$TEMP_DIR/.env" "$TEMP_DIR/data/app.db"
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-ARCHIVE="$BACKUP_DIR/runninghub-$TIMESTAMP.tar.gz"
+ARCHIVE="$BACKUP_DIR/runninghub-video-$TIMESTAMP.tar.gz"
 tar -C "$TEMP_DIR" -czf "$ARCHIVE" .env data
 chmod 600 "$ARCHIVE"
 

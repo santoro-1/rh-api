@@ -13,21 +13,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 def test_web_service_is_production_safe():
     service = (
-        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-web.service"
+        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-video-web.service"
     ).read_text(encoding="utf-8")
     assert "--reload" not in service
     assert "--host 127.0.0.1" in service
     assert "--forwarded-allow-ips=127.0.0.1" in service
-    assert "EnvironmentFile=/opt/runninghub/.env" in service
+    assert "--port 18083" in service
+    assert "EnvironmentFile=/opt/runninghub-video/.env" in service
 
 
 def test_audio_worker_has_its_own_restartable_service():
     service = (
-        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-audio-worker.service"
+        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-video-audio.service"
     ).read_text(encoding="utf-8")
     assert "-m app.workers.audio_worker" in service
     assert "Restart=on-failure" in service
-    assert "ReadWritePaths=/opt/runninghub/data" in service
+    assert "ReadWritePaths=/opt/runninghub-video/data" in service
+    assert "CPUQuota=50%" in service
+    assert "MemoryMax=1536M" in service
 
 
 def test_windows_one_click_launcher_starts_all_local_services():
@@ -96,17 +99,17 @@ def test_batch_segment_table_keeps_remote_status_readable():
 
 def test_nginx_template_supports_current_upload_limit_and_proxy_headers():
     config = (
-        PROJECT_ROOT / "deploy" / "nginx" / "runninghub.conf.template"
+        PROJECT_ROOT / "deploy" / "nginx" / "runninghub-video.conf.template"
     ).read_text(encoding="utf-8")
     assert "client_max_body_size 550M;" in config
-    assert "proxy_pass http://127.0.0.1:8000;" in config
+    assert "proxy_pass http://127.0.0.1:18083;" in config
     assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in config
     assert "Content-Security-Policy" in config
 
 
 def test_backup_timer_and_restore_confirmation_are_present():
     timer = (
-        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-backup.timer"
+        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-video-backup.timer"
     ).read_text(encoding="utf-8")
     restore = (
         PROJECT_ROOT / "deploy" / "scripts" / "restore.sh"

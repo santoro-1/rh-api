@@ -1,7 +1,13 @@
 {% extends "base.html" %}
-{% block title %}任务历史{% endblock %}
+{% block title %}单次任务{% endblock %}
 {% block content %}
-<section class="page-heading"><div><h1>任务历史</h1><p class="muted">{% if current_user.is_admin %}管理员视图：显示全部用户的任务。{% else %}这里只显示你的任务。{% endif %}</p></div><a class="button secondary" href="/generate">创建任务</a></section>
+<section class="page-heading">
+  <div><h1>单次任务</h1><p class="muted">{% if current_user.is_admin %}管理员视图：显示全部用户的单次任务。{% else %}这里只显示你的单次任务。{% endif %}</p></div>
+  <div class="button-row">
+    <a class="button secondary" href="/batches">查看批次任务</a>
+    <a class="button" href="/generate/batch">生成视频</a>
+  </div>
+</section>
 <section class="panel task-tools">
   <form class="date-filter" method="get" action="/tasks">
     <label>开始日期

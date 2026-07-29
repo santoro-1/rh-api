@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+import uuid
+import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TypedDict
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from app.config import get_settings
 from app.database import get_db
 from app.models import AudioGenerationTask, AudioTaskStatus, GenerationTask, TaskStatus, User
 from app.routes.dependencies import get_page_admin
+from app.services.resource_monitor import resource_snapshot
 from app.web import templates
 
 
@@ -156,6 +161,80 @@ def _tail(path: Path, maximum_lines: int = 120) -> list[str]:
     )["lines"]
 
 
+def _history_log_paths(path: Path, days: int) -> list[Path]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
+    candidates = [path, *path.parent.glob(f"{path.name}.*")]
+    available: list[Path] = []
+    for candidate in candidates:
+        try:
+            modified = datetime.fromtimestamp(
+                candidate.stat().st_mtime,
+                tz=timezone.utc,
+            )
+        except OSError:
+            continue
+        if candidate.is_file() and modified >= cutoff:
+            available.append(candidate)
+    return sorted(
+        available,
+        key=lambda candidate: candidate.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _download_log_paths(days: int) -> list[tuple[Path, str]]:
+    """Collect only known service logs within the configured retention window."""
+
+    logs_dir = get_settings().logs_dir
+    files: list[tuple[Path, str]] = []
+    for service, filename in LOG_FILES.items():
+        for path in _history_log_paths(logs_dir / filename, days):
+            if path.is_symlink():
+                continue
+            files.append((path, f"{service}/{path.name}"))
+    return files
+
+
+def _search_log_history(
+    *,
+    service: str,
+    account_tokens: tuple[str, ...],
+    task_query: str,
+    level: str,
+    days: int,
+    maximum_lines: int = 300,
+) -> list[str]:
+    selected_services = (
+        [service] if service in LOG_FILES else list(LOG_FILES)
+    )
+    task_query = task_query.strip().lower()
+    level = level.strip().upper()
+    results: list[str] = []
+    for service_key in selected_services:
+        path = get_settings().logs_dir / LOG_FILES[service_key]
+        for history_path in _history_log_paths(path, days):
+            chunk = _read_log_chunk(
+                history_path,
+                None,
+                maximum_lines=maximum_lines,
+                maximum_bytes=min(get_settings().log_max_bytes, 1024 * 1024),
+            )
+            for line in reversed(chunk["lines"]):
+                lowered = line.lower()
+                if account_tokens and not any(
+                    token.lower() in lowered for token in account_tokens
+                ):
+                    continue
+                if task_query and task_query not in lowered:
+                    continue
+                if level and f" {level} " not in line:
+                    continue
+                results.append(f"[{service_key}] {line}")
+                if len(results) >= maximum_lines:
+                    return results
+    return results
+
+
 def _service_snapshot() -> dict[str, dict[str, object]]:
     return {
         "web": {
@@ -220,6 +299,11 @@ def _queue_snapshot(db: Session) -> dict[str, object]:
 @router.get("/operations")
 def operations_page(
     request: Request,
+    account_id: int | None = Query(None, ge=1),
+    task: str = Query("", max_length=100),
+    service: str = Query("all", max_length=30),
+    level: str = Query("", max_length=10),
+    days: int = Query(7, ge=1, le=7),
     current_user: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
 ):
@@ -232,6 +316,27 @@ def operations_page(
         )
         for name, filename in LOG_FILES.items()
     }
+    users = db.scalars(select(User).order_by(User.username)).all()
+    selected_user = db.get(User, account_id) if account_id else None
+    account_tokens = (
+        (
+            f'"user_id":{selected_user.id}',
+            f'"username":"{selected_user.username}"',
+        )
+        if selected_user
+        else ()
+    )
+    history_lines = (
+        _search_log_history(
+            service=service,
+            account_tokens=account_tokens,
+            task_query=task,
+            level=level,
+            days=days,
+        )
+        if account_id or task.strip() or service != "all" or level
+        else []
+    )
     return templates.TemplateResponse(
         request,
         "operations.html",
@@ -243,6 +348,19 @@ def operations_page(
             "video_active": queue["videoActive"],
             "audio_active": queue["audioActive"],
             "logs": logs,
+            "resources": resource_snapshot(get_settings()),
+            "users": users,
+            "filters": {
+                "accountId": account_id,
+                "task": task,
+                "service": service,
+                "level": level,
+                "days": days,
+            },
+            "history_lines": history_lines,
+            "history_searched": bool(
+                account_id or task.strip() or service != "all" or level
+            ),
         },
     )
 
@@ -268,6 +386,7 @@ def operations_updates(
     return {
         "services": _service_snapshot(),
         "queue": _queue_snapshot(db),
+        "resources": resource_snapshot(get_settings()),
         "logs": {
             service: _read_log_chunk(
                 get_settings().logs_dir / filename,
@@ -276,3 +395,41 @@ def operations_updates(
             for service, filename in LOG_FILES.items()
         },
     }
+
+
+@router.get("/operations/logs/download")
+def download_operations_logs(
+    days: int = Query(7, ge=1, le=7),
+    current_user: User = Depends(get_page_admin),
+):
+    """Download retained raw service logs for offline administrator diagnosis."""
+
+    del current_user
+    log_files = _download_log_paths(days)
+    if not log_files:
+        raise HTTPException(status_code=404, detail="最近没有可下载的日志")
+
+    archive_dir = get_settings().runtime_dir / "log-downloads"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"logs-{uuid.uuid4().hex}.zip"
+    try:
+        with zipfile.ZipFile(
+            archive_path,
+            mode="w",
+            compression=zipfile.ZIP_STORED,
+            allowZip64=True,
+        ) as archive:
+            for path, archive_name in log_files:
+                archive.write(path, arcname=archive_name)
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=f"runninghub-video-logs-{timestamp}.zip",
+        content_disposition_type="attachment",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )

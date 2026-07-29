@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any, Iterable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,6 +16,8 @@ def sync_system_voices(
     user: User,
     client: MiniMaxClient,
     selections: dict[str, str],
+    *,
+    available_voices: Iterable[dict[str, Any]] | None = None,
 ) -> list[MiniMaxVoiceAsset]:
     """Verify and save selected provider-owned voices without cloning them."""
 
@@ -27,8 +30,15 @@ def sync_system_voices(
     ):
         raise ValueError("当前账号尚未配置 MiniMax API Key")
 
+    available_items = (
+        list(available_voices)
+        if available_voices is not None
+        else client.list_voices("system")
+    )
     available = {
-        str(item["voice_id"]): item for item in client.list_voices("system")
+        str(item["voice_id"]): item
+        for item in available_items
+        if item.get("voice_id")
     }
     missing = [voice_id for voice_id in selections if voice_id not in available]
     if missing:

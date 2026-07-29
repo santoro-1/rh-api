@@ -1,0 +1,19 @@
+[Unit]
+Description=Clean expired RunningHub uploads and outputs
+After=runninghub-video-web.service
+
+[Service]
+Type=oneshot
+User=rhvideo
+Group=rhvideo
+WorkingDirectory=/opt/runninghub-video
+EnvironmentFile=/opt/runninghub-video/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/runninghub-video/.venv/bin/python -m scripts.cleanup_files
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/runninghub-video/data

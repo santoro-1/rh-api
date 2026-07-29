@@ -34,3 +34,5 @@ def test_production_settings_accept_explicit_domain(monkeypatch):
     assert settings.app_env == "production"
     assert settings.cookie_secure is True
     assert settings.allowed_hosts == ("video.example.com",)
+    assert settings.log_retention_days == 7
+    assert settings.log_max_bytes == 10 * 1024 * 1024

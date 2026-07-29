@@ -24,9 +24,11 @@ class DigitalHumanWorkflow:
         "audio": ("339", "audio", None, "总参考音频"),
         "start_time": ("341", "start_time", None, "音频开始时间"),
         "end_time": ("341", "end_time", None, "音频结束时间"),
-        "left_audio": ("739", "audio", "None", "左边人物音频"),
-        "right_audio": ("738", "audio", "None", "右边人物音频"),
         "prompt": ("422", "text", None, "提示词"),
+    }
+    _DUAL_PERSON_AUDIO_NODES = {
+        "left_audio": ("739", "audio", "左边人物音频"),
+        "right_audio": ("738", "audio", "右边人物音频"),
     }
 
     def validate_parameters(
@@ -164,8 +166,6 @@ class DigitalHumanWorkflow:
             **values,
             "image": uploaded_files["image"],
             "audio": uploaded_files["audio"],
-            "left_audio": uploaded_files.get("left_audio", "None"),
-            "right_audio": uploaded_files.get("right_audio", "None"),
             "start_time": str(values.get("start_time") or format_timecode(task.start_seconds)),
             "end_time": str(values.get("end_time") or format_timecode(task.end_seconds)),
             "prompt": str(values.get("prompt") or task.prompt),
@@ -179,6 +179,20 @@ class DigitalHumanWorkflow:
             }
             for name, (node_id, field_name, default_value, description) in self._NODES.items()
         ]
+        if str(values.get("person_mode", "1")) == "0":
+            nodes.extend(
+                {
+                    "nodeId": node_id,
+                    "fieldName": field_name,
+                    "fieldValue": uploaded_files[name],
+                    "description": description,
+                }
+                for name, (
+                    node_id,
+                    field_name,
+                    description,
+                ) in self._DUAL_PERSON_AUDIO_NODES.items()
+            )
         return {
             "nodeInfoList": nodes,
             "instanceType": "default",

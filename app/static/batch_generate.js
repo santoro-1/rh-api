@@ -21,6 +21,8 @@
     rightAudio: [],
     advancedPrimary: [],
     advancedAudio: [],
+    advancedLeftAudio: [],
+    advancedRightAudio: [],
   };
   // Arrays use the same zero-based index as the visible row so reordering a
   // primary file also identifies which prompt/script belongs to that row.
@@ -44,19 +46,11 @@
   const advancedColumns = {
     digital_human: [
       ["row_id", "任务编号"],
-      ["image_file", "图片文件"],
-      ["audio_file", "总参考音频"],
-      ["speech_script", "口播脚本"],
       ["prompt", "提示词"],
-      ["left_audio_file", "左人物音频"],
-      ["right_audio_file", "右人物音频"],
     ],
     ltx_lip_sync: [
       ["row_id", "任务编号"],
-      ["source_video_file", "源视频文件"],
-      ["audio_file", "音频文件"],
       ["speech_script", "口播脚本"],
-      ["positive_prompt", "视频正向提示词"],
     ],
   };
 
@@ -102,9 +96,7 @@
     }
     return {
       instance_type: instanceTypeSelect.value,
-      ...(isSpeechMode()
-        ? {prompt_prefix: document.getElementById("speech-ltx-prompt-prefix").value}
-        : {}),
+      prompt_prefix: document.getElementById("speech-ltx-prompt-prefix").value,
     };
   }
 
@@ -137,6 +129,13 @@
     } else {
       groups = ["advancedPrimary"];
       if (!isSpeechMode()) groups.push("advancedAudio");
+      if (
+        !isSpeechMode()
+        && workflowSelect.value === "digital_human"
+        && personModeSelect.value === "双人"
+      ) {
+        groups.push("advancedLeftAudio", "advancedRightAudio");
+      }
     }
     return groups.flatMap((group) => assetGroups[group].map((asset) => asset.assetId));
   }
@@ -152,7 +151,7 @@
     const [asset] = assets.splice(fromIndex, 1);
     assets.splice(toIndex, 0, asset);
     resetConfirmation();
-    renderQuick();
+    group.startsWith("advanced") ? renderAdvancedAssets() : renderQuick();
   }
 
   function renderOrderedGroup(group) {
@@ -182,46 +181,21 @@
     );
   }
 
-  function quickPromptPlaceholder() {
-    return workflowSelect.value === "ltx_lip_sync"
-      ? (
-        isSpeechMode()
-          ? "例如：一名女性用中文说（系统自动追加当前分段台词）"
-          : "例如：一名女性用中文说：“今天给大家介绍这款产品。”"
-      )
-      : "填写本条数字人任务的提示词";
-  }
-
   function renderQuickPairing() {
     const digital = workflowSelect.value === "digital_human";
     const dual = digital && personModeSelect.value === "双人";
+    const needsScript = isSpeechMode() || !digital;
     const headers = ["序号", digital ? "参考图片" : "源视频"];
     if (!isSpeechMode()) headers.push(digital ? "总参考音频" : "音频");
     if (dual) headers.push("左人物音频", "右人物音频");
-    if (isSpeechMode()) headers.push("口播脚本（生成语音）");
-    headers.push(
-      digital
-        ? "提示词"
-        : (
-          isSpeechMode()
-            ? "人物与语言（自动追加分段台词）"
-            : "视频正向提示词（人物 + 语言 + 完整台词）"
-        )
-    );
+    if (needsScript) headers.push("口播脚本");
+    if (digital) headers.push("提示词");
     document.getElementById("quick-pairing-head").innerHTML =
       headers.map((label) => `<th>${label}</th>`).join("");
 
     const count = quickRowCount();
     while (quickPrompts.length < count) {
-      quickPrompts.push(
-        digital
-          ? config.digitalDefaultPrompt
-          : (
-            isSpeechMode()
-              ? document.getElementById("speech-ltx-prompt-prefix").value
-              : ""
-          )
-      );
+      quickPrompts.push(config.digitalDefaultPrompt);
     }
     while (quickScripts.length < count) quickScripts.push("");
     if (!count) {
@@ -245,12 +219,14 @@
             `<td>${assetNameOrMissing(assetGroups.rightAudio[index])}</td>`,
           );
         }
-        if (isSpeechMode()) {
+        if (needsScript) {
           cells.push(`<td><textarea class="batch-script-input" data-index="${index}" rows="7"
-            maxlength="9999" placeholder="填写本条任务要朗读的完整口播脚本">${escapeHtml(quickScripts[index] || "")}</textarea></td>`);
+            maxlength="4990" placeholder="填写音频中的完整口播内容，只需填写一次">${escapeHtml(quickScripts[index] || "")}</textarea></td>`);
         }
-        cells.push(`<td><textarea class="batch-prompt-input" data-index="${index}" rows="5"
-          maxlength="5000" placeholder="${escapeHtml(quickPromptPlaceholder())}">${escapeHtml(quickPrompts[index] || "")}</textarea></td>`);
+        if (digital) {
+          cells.push(`<td><textarea class="batch-prompt-input" data-index="${index}" rows="5"
+            maxlength="5000" placeholder="填写本条数字人任务的提示词">${escapeHtml(quickPrompts[index] || "")}</textarea></td>`);
+        }
         return `<tr>${cells.join("")}</tr>`;
       }).join("");
   }
@@ -280,10 +256,16 @@
       }
     }
     for (let index = 0; index < count; index += 1) {
-      if (isSpeechMode() && !String(quickScripts[index] || "").trim()) {
+      if (
+        (isSpeechMode() || workflowSelect.value === "ltx_lip_sync")
+        && !String(quickScripts[index] || "").trim()
+      ) {
         errors.push({rowNumber: index + 1, message: "口播脚本不能为空"});
       }
-      if (!String(quickPrompts[index] || "").trim()) {
+      if (
+        workflowSelect.value === "digital_human"
+        && !String(quickPrompts[index] || "").trim()
+      ) {
         errors.push({rowNumber: index + 1, message: "提示词不能为空"});
       }
     }
@@ -325,12 +307,140 @@
         : {
             source_video_file: primary.originalName,
             audio_file: isSpeechMode() ? "" : assetGroups.audio[index].originalName,
-            speech_script: isSpeechMode() ? quickScripts[index].trim() : "",
-            ...(isSpeechMode()
-              ? {prompt_prefix: quickPrompts[index].trim()}
-              : {positive_prompt: quickPrompts[index].trim()}),
+            speech_script: quickScripts[index].trim(),
           }),
     }));
+  }
+
+  function buildAdvancedRows() {
+    const digital = workflowSelect.value === "digital_human";
+    const dual = digital && personModeSelect.value === "双人";
+    return advancedRows.map((row, index) => ({
+      ...row,
+      ...(digital
+        ? {
+            image_asset_id: assetGroups.advancedPrimary[index]?.assetId || "",
+            image_file:
+              row.image_file
+              || assetGroups.advancedPrimary[index]?.originalName
+              || "",
+            audio_asset_id: isSpeechMode()
+              ? ""
+              : assetGroups.advancedAudio[index]?.assetId || "",
+            audio_file: isSpeechMode()
+              ? ""
+              : (
+                row.audio_file
+                || assetGroups.advancedAudio[index]?.originalName
+                || ""
+              ),
+            ...(dual && !isSpeechMode()
+              ? {
+                  left_audio_asset_id:
+                    assetGroups.advancedLeftAudio[index]?.assetId || "",
+                  left_audio_file:
+                    row.left_audio_file
+                    || assetGroups.advancedLeftAudio[index]?.originalName
+                    || "",
+                  right_audio_asset_id:
+                    assetGroups.advancedRightAudio[index]?.assetId || "",
+                  right_audio_file:
+                    row.right_audio_file
+                    || assetGroups.advancedRightAudio[index]?.originalName
+                    || "",
+                }
+              : {}),
+          }
+        : {
+            source_video_asset_id:
+              assetGroups.advancedPrimary[index]?.assetId || "",
+            source_video_file:
+              row.source_video_file
+              || assetGroups.advancedPrimary[index]?.originalName
+              || "",
+            audio_asset_id: isSpeechMode()
+              ? ""
+              : assetGroups.advancedAudio[index]?.assetId || "",
+            audio_file: isSpeechMode()
+              ? ""
+              : (
+                row.audio_file
+                || assetGroups.advancedAudio[index]?.originalName
+                || ""
+              ),
+          }),
+    }));
+  }
+
+  function advancedValidationErrors() {
+    const errors = [];
+    const count = advancedRows.length;
+    if (!count) {
+      errors.push({message: "请先导入任务清单"});
+      return errors;
+    }
+    const expectedGroups = [
+      {
+        group: "advancedPrimary",
+        label: workflowSelect.value === "digital_human" ? "参考图片" : "源视频",
+      },
+      ...(!isSpeechMode()
+        ? [{
+            group: "advancedAudio",
+            label: workflowSelect.value === "digital_human" ? "总参考音频" : "音频",
+          }]
+        : []),
+      ...(
+        !isSpeechMode()
+        && workflowSelect.value === "digital_human"
+        && personModeSelect.value === "双人"
+          ? [
+              {group: "advancedLeftAudio", label: "左人物音频"},
+              {group: "advancedRightAudio", label: "右人物音频"},
+            ]
+          : []
+      ),
+    ];
+    expectedGroups.forEach(({group, label}) => {
+      if (assetGroups[group].length !== count) {
+        errors.push({
+          message: `${label}需要上传 ${count} 个，当前为 ${assetGroups[group].length} 个`,
+        });
+      }
+    });
+    advancedRows.forEach((row, index) => {
+      if (!String(row.row_id || "").trim()) {
+        errors.push({rowNumber: index + 1, message: "任务编号不能为空"});
+      }
+      if (
+        workflowSelect.value === "digital_human"
+        && !isSpeechMode()
+        && !String(row.prompt || "").trim()
+      ) {
+        errors.push({rowNumber: index + 1, message: "提示词不能为空"});
+      }
+      if (
+        (isSpeechMode() || workflowSelect.value === "ltx_lip_sync")
+        && !String(row.speech_script || "").trim()
+      ) {
+        errors.push({rowNumber: index + 1, message: "口播脚本不能为空"});
+      }
+    });
+    if (isSpeechMode()) {
+      if (!config.minimaxConfigured) {
+        errors.push({message: "当前账号尚未配置 MiniMax API Key"});
+      }
+      if (!document.getElementById("speech-voice").value) {
+        errors.push({message: "请先选择声音管理中已经保存的音色"});
+      }
+      if (!document.getElementById("speech-cost-confirm").checked) {
+        errors.push({message: "请先确认语音文本生成及可能的音色费用"});
+      }
+    }
+    if (!advancedConfirm.checked) {
+      errors.push({message: "请先确认每类素材序号与表格行序号一致"});
+    }
+    return errors;
   }
 
   function renderQuick() {
@@ -342,27 +452,20 @@
     document.getElementById("quick-ready-summary").textContent =
       count
         ? `准备创建 ${count} 条独立任务。`
-        : `请先上传画面素材${isSpeechMode() ? "并填写脚本" : "和对应音频"}。`;
+        : (
+          isSpeechMode() || workflowSelect.value === "ltx_lip_sync"
+            ? "请先上传画面素材并填写口播脚本。"
+            : "请先上传画面素材和对应音频。"
+        );
   }
 
   function renderAdvancedRows() {
     const columns = isSpeechMode()
-      ? (
-        workflowSelect.value === "digital_human"
-          ? [
-            ["row_id", "脚本编号"],
-            ["speech_script", "脚本内容"],
-            ["prompt", "数字人提示词"],
-          ]
-          : [
-            ["row_id", "脚本编号"],
-            ["speech_script", "脚本内容"],
-            ["prompt_prefix", "人物与语言"],
-          ]
-      )
-      : advancedColumns[workflowSelect.value].filter(
-        ([key]) => key !== "speech_script"
-      );
+      ? [
+        ["row_id", "任务编号"],
+        ["speech_script", "口播脚本"],
+      ]
+      : advancedColumns[workflowSelect.value];
     document.getElementById("advanced-preview-head").innerHTML =
       columns.map(([, label]) => `<th>${label}</th>`).join("");
     const body = document.getElementById("advanced-preview-body");
@@ -376,7 +479,6 @@
             "speech_script",
             "prompt",
             "prompt_prefix",
-            "positive_prompt",
           ].includes(key);
           return longText
             ? `<td><textarea class="batch-cell-input batch-long-text-input"
@@ -395,16 +497,16 @@
     if (workflowSelect.value === "digital_human") {
       return String(row.prompt || "").trim();
     }
-    if (!isSpeechMode()) {
-      return String(row.positive_prompt || "").trim();
-    }
-    const prefix = String(row.prompt_prefix || "").trim().replace(/[：:]$/, "");
+    const prefix = String(
+      row.prompt_prefix
+      || document.getElementById("speech-ltx-prompt-prefix").value
+    ).trim().replace(/[：:]$/, "");
     const script = String(row.speech_script || "").trim();
     return `${prefix}：“${script}”`;
   }
 
   function openCopyPreview(entry) {
-    const rows = entry === "quick" ? buildQuickRows() : advancedRows;
+    const rows = entry === "quick" ? buildQuickRows() : buildAdvancedRows();
     const content = document.getElementById("copy-preview-content");
     const pronunciation = isSpeechMode()
       ? document.getElementById("speech-pronunciation-tones").value.trim()
@@ -420,7 +522,7 @@
       const prompt = finalVideoPrompt(row);
       return `<article class="copy-preview-card">
         <h3>${index + 1}. ${escapeHtml(row.row_id || `TASK-${index + 1}`)}</h3>
-        ${isSpeechMode()
+        ${(isSpeechMode() || workflowSelect.value === "ltx_lip_sync")
           ? `<h4>完整口播脚本</h4><p>${escapeHtml(script) || "（空）"}</p>`
           : ""}
         <h4>${workflowSelect.value === "ltx_lip_sync" ? "最终视频正向提示词" : "数字人提示词"}</h4>
@@ -434,19 +536,45 @@
   }
 
   function renderAdvancedAssets() {
-    const assets = [...assetGroups.advancedPrimary, ...assetGroups.advancedAudio];
-    document.getElementById("advanced-asset-list").innerHTML = [
-      ...assetGroups.advancedPrimary.map((asset, index) => ({asset, group: "advancedPrimary", index})),
-      ...assetGroups.advancedAudio.map((asset, index) => ({asset, group: "advancedAudio", index})),
-    ].map(({asset, group, index}) =>
-      `<span class="asset-chip"><strong>${index + 1}.</strong> ${escapeHtml(asset.originalName)} · ${asset.kind}
-        <button type="button" class="advanced-order-asset" data-action="up" data-group="${group}" data-index="${index}" aria-label="上移">↑</button>
-        <button type="button" class="advanced-order-asset" data-action="down" data-group="${group}" data-index="${index}" aria-label="下移">↓</button>
-        <button type="button" class="advanced-order-asset" data-action="remove" data-group="${group}" data-index="${index}" aria-label="移除">×</button>
-      </span>`
-    ).join("");
+    const digital = workflowSelect.value === "digital_human";
+    const dual = digital && personModeSelect.value === "双人" && !isSpeechMode();
+    const visibleGroups = [
+      {
+        group: "advancedPrimary",
+        title: digital ? "参考图片" : "源视频",
+      },
+      ...(!isSpeechMode()
+        ? [{
+            group: "advancedAudio",
+            title: digital ? "总参考音频" : "音频",
+          }]
+        : []),
+      ...(dual
+        ? [
+            {group: "advancedLeftAudio", title: "左人物音频"},
+            {group: "advancedRightAudio", title: "右人物音频"},
+          ]
+        : []),
+    ];
+    document.getElementById("advanced-asset-list").innerHTML = visibleGroups
+      .map(({group, title}) => {
+        const items = assetGroups[group].map((asset, index) =>
+          `<span class="asset-chip"><strong>${index + 1}.</strong> ${escapeHtml(asset.originalName)}
+            <button type="button" class="advanced-order-asset" data-action="up" data-group="${group}" data-index="${index}" aria-label="上移">↑</button>
+            <button type="button" class="advanced-order-asset" data-action="down" data-group="${group}" data-index="${index}" aria-label="下移">↓</button>
+            <button type="button" class="advanced-order-asset" data-action="remove" data-group="${group}" data-index="${index}" aria-label="移除">×</button>
+          </span>`
+        ).join("");
+        return `<section class="advanced-asset-group">
+          <strong>${title}</strong>
+          <div class="compact-list">${items || '<span class="muted">尚未上传</span>'}</div>
+        </section>`;
+      }).join("");
+    const assets = visibleGroups.flatMap(
+      ({group}) => assetGroups[group],
+    );
     document.getElementById("advanced-upload-progress").textContent = assets.length
-      ? `已暂存 ${assets.length} 个文件。`
+      ? `已暂存 ${assets.length} 个文件；请核对每一组内的序号。`
       : "尚未上传素材。";
     renderAdvancedRows();
   }
@@ -510,6 +638,8 @@
     document.getElementById("primary-upload-title").textContent = digital ? "参考图片" : "源视频";
     document.getElementById("main-audio-upload-title").textContent = digital ? "总参考音频" : "音频";
     document.getElementById("advanced-primary-upload-title").textContent = digital ? "全部参考图片" : "全部源视频";
+    document.getElementById("advanced-audio-upload-title").textContent =
+      digital ? "全部总参考音频" : "全部音频";
     const primaryAccept = digital
       ? ".jpg,.jpeg,.png,.webp,image/*"
       : ".mp4,.mov,.webm,video/*";
@@ -521,7 +651,11 @@
       `/api/batch-templates/${isSpeechMode() ? "script" : workflowSelect.value}.csv`;
     document.getElementById("quick-prompt-help").textContent = digital
       ? `${isSpeechMode() ? "每行分别填写口播脚本和提示词；" : "每条任务只需要单独修改提示词；"}分辨率、模式和时间无需重复填写。`
-      : `${isSpeechMode() ? "口播脚本用于生成语音；" : ""}正向提示词只填写什么人、使用什么语言、音频中的完整说话内容，不需要动作或画面描述。`;
+      : (
+        isSpeechMode()
+          ? "同一份口播脚本会同时用于生成语音和视频正向提示词，只需填写一次。"
+          : "口播脚本会自动写入视频正向提示词；音频直接使用上传文件。"
+      );
     updateAudioModeUi();
     updateDualAudioUi();
     if (resetData) resetWorkflowData();
@@ -541,11 +675,6 @@
     document.getElementById("minimax-speech-settings").classList.toggle("hidden", !speech);
     document.getElementById("quick-direct-audio-group").classList.toggle("hidden", speech);
     document.getElementById("advanced-direct-audio-group").classList.toggle("hidden", speech);
-    document.getElementById("speech-ltx-prompt-prefix-row").classList.toggle(
-      "hidden",
-      !(speech && workflowSelect.value === "ltx_lip_sync"),
-    );
-    document.getElementById("advanced-confirm-row").classList.toggle("hidden", !speech);
     document.getElementById("manifest-step-title").textContent = speech
       ? "1. 导入脚本清单"
       : "1. 导入高级任务清单";
@@ -553,14 +682,21 @@
       ? "Excel / CSV 脚本导入"
       : "Excel / CSV 高级导入";
     document.getElementById("manifest-step-help").textContent = speech
-      ? "Excel 和 CSV 使用同一个两列模板：脚本编号、脚本内容。"
-      : "适合已经由运营表格整理好文件对应关系的批次。";
-    document.getElementById("advanced-upload-help").textContent = speech
-      ? "按表格第 1、2、3……行的顺序上传图片或视频；上传后可用箭头调整顺序。"
-      : "高级导入按清单中的完整文件名匹配，不依赖上传顺序。";
+      ? "Excel 和 CSV 使用同一个两列模板：任务编号、口播脚本。"
+      : (
+        workflowSelect.value === "digital_human"
+          ? "表格只有“任务编号、提示词”两列；图片和音频按页面序号对应。"
+          : "表格只有“任务编号、口播脚本”两列；视频和音频按页面序号对应。"
+      );
+    document.getElementById("advanced-upload-help").textContent =
+      "每类素材都按第 1、2、3……项与表格第 1、2、3……行对应；可用箭头调整顺序。";
     document.getElementById("quick-upload-help").textContent = speech
       ? "按最终任务顺序上传图片或视频，再在下方逐行填写对应口播脚本。"
-      : "先上传图片或视频，再按完全相同的顺序上传对应音频；每条音频不能超过 45 秒。";
+      : (
+        workflowSelect.value === "digital_human"
+          ? "先上传图片，再按完全相同的顺序上传对应音频；无需填写口播脚本。"
+          : "先上传视频，再按完全相同的顺序上传对应音频；每条任务只填写一次口播脚本。"
+      );
     document.getElementById("quick-order-guidance").textContent = speech
       ? "系统按照页面显示的第 1、2、3……项创建任务。建议画面文件名带 01、02、03 序号；上传后可拖动或使用箭头调整顺序。"
       : "系统按照页面显示的第 1、2、3……项逐一配对。建议文件名加上 01、02、03 序号；上传后可拖动或使用箭头调整顺序。";
@@ -577,8 +713,11 @@
     const show = !isSpeechMode() && workflowSelect.value === "digital_human" && personModeSelect.value === "双人";
     document.getElementById("left-audio-group").classList.toggle("hidden", !show);
     document.getElementById("right-audio-group").classList.toggle("hidden", !show);
+    document.getElementById("advanced-left-audio-group").classList.toggle("hidden", !show);
+    document.getElementById("advanced-right-audio-group").classList.toggle("hidden", !show);
     resetConfirmation();
     renderQuick();
+    renderAdvancedAssets();
   }
 
   function setEntry(entry) {
@@ -673,6 +812,20 @@
     "advanced-upload-progress",
     "advanced-errors",
   );
+  bindUpload(
+    "advanced-left-audio-files",
+    "audio",
+    "advancedLeftAudio",
+    "advanced-upload-progress",
+    "advanced-errors",
+  );
+  bindUpload(
+    "advanced-right-audio-files",
+    "audio",
+    "advancedRightAudio",
+    "advanced-upload-progress",
+    "advanced-errors",
+  );
 
   document.querySelectorAll(".ordered-upload-list").forEach((list) => {
     list.addEventListener("click", (event) => {
@@ -742,6 +895,7 @@
     const input = event.target.closest(".batch-cell-input");
     if (!input) return;
     advancedRows[Number(input.dataset.rowIndex)][input.dataset.key] = input.value;
+    resetConfirmation();
   });
 
   document.getElementById("manifest-file").addEventListener("change", async (event) => {
@@ -798,17 +952,17 @@
     () => openCopyPreview("quick"),
   );
   document.getElementById("advanced-create-button").addEventListener("click", () => {
-    const errors = [];
-    if (!advancedRows.length) errors.push({message: "请先导入任务清单"});
-    if (!allAssetIds("advanced").length) errors.push({message: "请先上传清单引用的素材"});
-    if (isSpeechMode() && !advancedConfirm.checked) {
-      errors.push({message: "请先确认素材顺序与脚本表格行顺序一致"});
-    }
+    const errors = advancedValidationErrors();
     if (errors.length) {
       showErrors("advanced-errors", errors);
       return;
     }
-    submitBatch(advancedRows, "advanced", "advanced-create-button", "advanced-errors");
+    submitBatch(
+      buildAdvancedRows(),
+      "advanced",
+      "advanced-create-button",
+      "advanced-errors",
+    );
   });
   document.getElementById("advanced-copy-preview-button").addEventListener(
     "click",

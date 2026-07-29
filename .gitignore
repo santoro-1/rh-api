@@ -1,6 +1,7 @@
 .env
 .pytest_cache/
 tests/.runtime/
+tests/.template-preview/
 __pycache__/
 *.py[cod]
 data/

@@ -61,8 +61,9 @@ def test_digital_human_adapter_is_registered_and_owns_payload_mapping():
     }
     assert expected_nodes["503"] == "1024"
     assert expected_nodes["753"] == "1"
-    assert expected_nodes["739"] == "None"
-    assert expected_nodes["738"] == "None"
+    assert "739" not in expected_nodes
+    assert "738" not in expected_nodes
+    assert all(node["fieldValue"] != "None" for node in payload["nodeInfoList"])
     assert "752" not in expected_nodes
 
 

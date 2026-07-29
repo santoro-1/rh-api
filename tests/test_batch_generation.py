@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZipFile
 
+from openpyxl import load_workbook
+
+from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     AudioGenerationTask,
@@ -17,6 +22,7 @@ from app.models import (
 from app.services.security import encrypt_secret
 from app.services.speech.accounts import credential_fingerprint
 from app.services.batch_manifests import parse_manifest
+from app.services.storage import to_relative_data_path
 from app.services.workflow_configs import save_workflow_config
 from tests.conftest import create_user, login
 
@@ -84,14 +90,18 @@ def test_batch_page_and_templates_support_excel_and_csv(client):
     assert page.status_code == 200
     assert "下载 Excel 模板" in page.text
     assert ".xlsx / .csv" in page.text
-    assert "快速批量生成" in page.text
+    assert "快速创建" in page.text
+    assert "Excel / CSV 表格导入" in page.text
     assert "请注意上传顺序" in page.text
     assert "音频时间由系统自动计算" in page.text
-    assert "完整流程：脚本生成语音和视频" in page.text
+    assert "输入文案并选择音色" in page.text
     script = client.get("/static/batch_generate.js")
     assert script.status_code == 200
     assert "batchParameters" in script.text
     assert "moveAsset" in script.text
+    assert "buildAdvancedRows" in script.text
+    assert "advancedLeftAudio" in script.text
+    assert "每类素材序号与表格行序号一致" in script.text
     assert "speechOptions" in script.text
     assert 'id="speech-pronunciation-tones"' in page.text
     assert 'id="quick-copy-preview-button"' in page.text
@@ -99,23 +109,47 @@ def test_batch_page_and_templates_support_excel_and_csv(client):
     assert 'id="copy-preview-dialog"' in page.text
     assert "pronunciationTones" in script.text
     assert "openCopyPreview" in script.text
-    assert "脚本编号" in client.get("/api/batch-templates/script.csv").content.decode(
-        "utf-8-sig"
-    )
+    assert "任务编号,口播脚本" in client.get(
+        "/api/batch-templates/script.csv"
+    ).content.decode("utf-8-sig")
     assert page.text.index('id="primary-upload-title"') < page.text.index(
         'id="quick-direct-audio-group"'
     )
     assert page.text.index('id="quick-direct-audio-group"') < page.text.index(
         'id="main-audio-upload-title"'
     )
+    assert page.text.index('<option value="upload">') < page.text.index(
+        '<option value="minimax">'
+    )
 
     xlsx = client.get("/api/batch-templates/digital_human.xlsx")
     csv = client.get("/api/batch-templates/digital_human.csv")
     assert xlsx.status_code == 200
     assert xlsx.content.startswith(b"PK")
+    workbook = load_workbook(BytesIO(xlsx.content), read_only=True, data_only=True)
+    try:
+        sheet = workbook["批量任务"]
+        headers = [cell.value for cell in sheet[1]]
+        assert headers == ["任务编号", "提示词"]
+        assert sheet["B2"].value
+        assert "口播脚本" not in headers
+    finally:
+        workbook.close()
+    parsed_digital = parse_manifest(
+        "digital.xlsx",
+        xlsx.content,
+        "digital_human",
+        "upload",
+    )
+    assert parsed_digital.rows[0]["row_id"] == "TASK-001"
+    assert parsed_digital.rows[0]["prompt"]
+    assert "image_file" not in parsed_digital.rows[0]
+    assert "audio_file" not in parsed_digital.rows[0]
     assert csv.status_code == 200
     csv_text = csv.content.decode("utf-8-sig")
-    assert "提示词" in csv_text
+    assert csv_text.startswith("任务编号,提示词")
+    assert "口播脚本" not in csv_text
+    assert "口播脚本（语音生成模式填写）" not in csv_text
     assert "单双人模式" not in csv_text
     assert "开始时间" not in csv_text
 
@@ -205,8 +239,9 @@ def test_xlsx_template_can_be_parsed():
     assert parsed.source_format == "xlsx"
     assert parsed.rows[0]["row_id"] == "TASK-001"
     assert parsed.rows[0]["speech_script"].startswith("今天给大家")
-    assert parsed.rows[0]["positive_prompt"].startswith("一名女性用中文说")
-    assert "动作" not in parsed.rows[0]["positive_prompt"]
+    assert "positive_prompt" not in parsed.rows[0]
+    assert "source_video_file" not in parsed.rows[0]
+    assert "audio_file" not in parsed.rows[0]
 
     script_path = path.with_name("script-batch-template.xlsx")
     script_manifest = parse_manifest(
@@ -220,6 +255,20 @@ def test_xlsx_template_can_be_parsed():
         "speech_script",
     }
     assert script_manifest.rows[0]["row_id"] == "SCRIPT-001"
+
+
+def test_legacy_ltx_upload_template_with_positive_prompt_still_parses():
+    content = (
+        "\ufeff任务编号,源视频文件,音频文件,视频正向提示词\r\n"
+        "TASK-001,source.mp4,voice.mp3,一名女性用中文说：“旧模板内容。”\r\n"
+    ).encode("utf-8")
+    parsed = parse_manifest(
+        "legacy.csv",
+        content,
+        "ltx_lip_sync",
+        "upload",
+    )
+    assert parsed.rows[0]["positive_prompt"] == "一名女性用中文说：“旧模板内容。”"
 
 
 def test_digital_batch_applies_uniform_dual_settings_and_full_audio_duration(
@@ -295,6 +344,61 @@ def test_digital_batch_applies_uniform_dual_settings_and_full_audio_duration(
         }
 
 
+def test_sequence_asset_ids_allow_same_audio_filename_in_separate_groups(
+    client, monkeypatch
+):
+    create_user("sequence-binding-user")
+    login(client, "sequence-binding-user")
+    monkeypatch.setattr(
+        "app.services.batch_generation.inspect_audio_duration",
+        lambda path: 8.0,
+    )
+    image_id = _stage(
+        client,
+        "image",
+        "person.png",
+        b"\x89PNG\r\n\x1a\npayload",
+        "image/png",
+    )
+    total_audio_id = _stage(
+        client, "audio", "voice.mp3", b"ID3total", "audio/mpeg"
+    )
+    left_audio_id = _stage(
+        client, "audio", "voice.mp3", b"ID3left", "audio/mpeg"
+    )
+    right_audio_id = _stage(
+        client, "audio", "voice.mp3", b"ID3right", "audio/mpeg"
+    )
+    payload = {
+        "name": "序号绑定批次",
+        "workflowType": "digital_human",
+        "audioMode": "upload",
+        "requestKey": "sequence-binding-request",
+        "assetIds": [
+            image_id,
+            total_audio_id,
+            left_audio_id,
+            right_audio_id,
+        ],
+        "batchParameters": {
+            "person_mode": "双人",
+            "resolution": "1024",
+        },
+        "rows": [
+            {
+                "row_id": "TASK-001",
+                "prompt": "双人自然对话",
+                "image_asset_id": image_id,
+                "audio_asset_id": total_audio_id,
+                "left_audio_asset_id": left_audio_id,
+                "right_audio_asset_id": right_audio_id,
+            }
+        ],
+    }
+    response = client.post("/api/batches", json=payload)
+    assert response.status_code == 201, response.text
+
+
 def test_batch_validation_is_atomic(client, monkeypatch):
     create_user("invalid-batch-user")
     login(client, "invalid-batch-user")
@@ -332,7 +436,7 @@ def test_batch_validation_is_atomic(client, monkeypatch):
         assert db.query(GenerationTask).count() == 0
 
 
-def test_ltx_batch_keeps_script_separate_from_positive_prompt(client, monkeypatch):
+def test_ltx_upload_derives_positive_prompt_from_script(client, monkeypatch):
     create_user("ltx-batch-user")
     with SessionLocal() as db:
         user = db.query(User).filter_by(username="ltx-batch-user").one()
@@ -376,12 +480,14 @@ def test_ltx_batch_keeps_script_separate_from_positive_prompt(client, monkeypatc
                 "row_id": "ltx-001",
                 "source_video_file": "source.mp4",
                 "audio_file": "voice.mp3",
-                "speech_script": "这是生成语音时使用的口播脚本。",
-                "positive_prompt": "一名女性用中文说：“这是音频中的完整内容。”",
+                "speech_script": "这是音频中的完整内容。",
                 "instance_type": "plus",
             }
         ],
-        "batchParameters": {"instance_type": "default"},
+        "batchParameters": {
+            "instance_type": "default",
+            "prompt_prefix": "一名女性用中文说",
+        },
     }
     response = client.post("/api/batches", json=payload)
     assert response.status_code == 201, response.text
@@ -389,7 +495,10 @@ def test_ltx_batch_keeps_script_separate_from_positive_prompt(client, monkeypatc
         task = db.query(GenerationTask).one()
         manifest = json.loads(task.batch_item.manifest_json)
         task_input = json.loads(task.input_payload)
-        assert manifest["speech_script"].startswith("这是生成语音")
+        assert manifest["speech_script"] == "这是音频中的完整内容。"
+        assert manifest["positive_prompt"] == (
+            "一名女性用中文说：“这是音频中的完整内容。”"
+        )
         assert task_input["parameters"]["prompt"] == (
             "一名女性用中文说：“这是音频中的完整内容。”"
         )
@@ -498,3 +607,70 @@ def test_batch_retry_and_terminal_delete(client, monkeypatch):
     with SessionLocal() as db:
         assert db.query(GenerationBatch).count() == 0
         assert db.query(GenerationTask).count() == 0
+
+
+def test_batch_navigation_detail_return_and_zip_download(client, monkeypatch):
+    create_user("batch-download-user")
+    login(client, "batch-download-user")
+    monkeypatch.setattr(
+        "app.services.batch_generation.inspect_audio_duration",
+        lambda path: 10.0,
+    )
+    asset_ids = _digital_assets(client)
+    payload = {
+        "name": "可下载批次",
+        "workflowType": "digital_human",
+        "audioMode": "upload",
+        "requestKey": "batch-download-request",
+        "assetIds": asset_ids,
+        "rows": [
+            {
+                "row_id": "row-1",
+                "image_file": "person.png",
+                "audio_file": "voice.mp3",
+                "prompt": "批次下载测试",
+            }
+        ],
+    }
+    created = client.post("/api/batches", json=payload)
+    assert created.status_code == 201
+    batch_id = created.json()["batchId"]
+    settings = get_settings()
+    result = settings.data_dir / "outputs" / "batch-download-result.mp4"
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_bytes(b"batch video")
+    with SessionLocal() as db:
+        task = db.query(GenerationTask).one()
+        task_id = task.id
+        task.status = TaskStatus.SUCCESS.value
+        task.result_path = to_relative_data_path(result, settings)
+        db.commit()
+
+    batch_list = client.get("/batches")
+    assert "查看单次任务" in batch_list.text
+    assert "旧版" not in batch_list.text
+    single_list = client.get("/tasks")
+    assert "查看批次任务" in single_list.text
+
+    detail = client.get(f"/batches/{batch_id}")
+    assert detail.status_code == 200
+    assert "下载当前批次（1 个视频）" in detail.text
+    task_detail = client.get(f"/tasks/{task_id}")
+    assert f'href="/batches/{batch_id}"' in task_detail.text
+    assert "返回所属批次" in task_detail.text
+
+    client.post("/logout")
+    create_user("batch-download-other-user")
+    login(client, "batch-download-other-user")
+    assert client.get(f"/batches/{batch_id}/download").status_code == 404
+    client.post("/logout")
+    login(client, "batch-download-user")
+
+    archive_response = client.get(f"/batches/{batch_id}/download")
+    assert archive_response.status_code == 200
+    assert archive_response.headers["content-type"] == "application/zip"
+    with ZipFile(BytesIO(archive_response.content)) as archive:
+        names = archive.namelist()
+        assert len(names) == 1
+        assert names[0].startswith("001-row-1-")
+        assert archive.read(names[0]) == b"batch video"

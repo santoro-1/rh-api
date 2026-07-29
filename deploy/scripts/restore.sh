@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${RUNNINGHUB_APP_DIR:-/opt/runninghub}"
+APP_DIR="${RUNNINGHUB_APP_DIR:-/opt/runninghub-video}"
 ARCHIVE="${1:-}"
 CONFIRM="${2:-}"
 
 if [[ -z "$ARCHIVE" || "$CONFIRM" != "--confirm" ]]; then
-    echo "用法：restore.sh /absolute/path/runninghub-*.tar.gz --confirm" >&2
+    echo "用法：restore.sh /absolute/path/runninghub-video-*.tar.gz --confirm" >&2
     exit 2
 fi
 if [[ "$APP_DIR" != /* || "$ARCHIVE" != /* || ! -f "$ARCHIVE" ]]; then
     echo "应用目录和备份文件必须是有效的绝对路径" >&2
     exit 1
 fi
-if systemctl is-active --quiet runninghub-web.service ||
-   systemctl is-active --quiet runninghub-worker.service; then
-    echo "恢复前必须停止 runninghub-web 和 runninghub-worker" >&2
+if systemctl is-active --quiet runninghub-video-web.service ||
+   systemctl is-active --quiet runninghub-video-audio.service ||
+   systemctl is-active --quiet runninghub-video-worker.service; then
+    echo "恢复前必须停止 runninghub-video 的三个服务" >&2
     exit 1
 fi
 
@@ -57,7 +58,7 @@ fi
 
 mv "$TEMP_DIR/data" "$APP_DIR/data"
 mv "$TEMP_DIR/.env" "$APP_DIR/.env"
-chown -R runninghub:runninghub "$APP_DIR/data" "$APP_DIR/.env" "$SAFETY_DIR"
+chown -R rhvideo:rhvideo "$APP_DIR/data" "$APP_DIR/.env" "$SAFETY_DIR"
 chmod 600 "$APP_DIR/.env"
 
 echo "恢复完成。原数据保存在：$SAFETY_DIR"

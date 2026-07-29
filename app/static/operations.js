@@ -64,6 +64,55 @@
     }
   }
 
+  function formatBytes(value) {
+    const bytes = Number(value || 0);
+    if (!bytes) return "0 MB";
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+    return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
+  }
+
+  function resourceSeverity(percent) {
+    if (percent == null) return "";
+    if (percent >= 90) return "danger";
+    if (percent >= 70) return "review";
+    return "success";
+  }
+
+  function updateResources(resources) {
+    const values = {
+      "resource-cpu":
+        resources.cpuPercent == null ? "采集中" : `${resources.cpuPercent}%`,
+      "resource-memory":
+        resources.memory.usedPercent == null
+          ? "未知"
+          : `${resources.memory.usedPercent}%`,
+      "resource-disk": `${resources.disk.usedPercent}%`,
+      "resource-ffmpeg": `${resources.ffmpeg.processCount} 个`,
+      "resource-memory-detail":
+        `${formatBytes(resources.memory.usedBytes)} / ${formatBytes(resources.memory.totalBytes)}`,
+      "resource-disk-detail":
+        `${formatBytes(resources.disk.usedBytes)} / ${formatBytes(resources.disk.totalBytes)}`,
+      "resource-project-memory":
+        `项目进程约 ${formatBytes(resources.project.rssBytes)}`,
+    };
+    for (const [id, value] of Object.entries(values)) {
+      const element = document.getElementById(id);
+      if (element) element.textContent = value;
+    }
+    const percents = {
+      cpu: resources.cpuPercent,
+      memory: resources.memory.usedPercent,
+      disk: resources.disk.usedPercent,
+      ffmpeg: resources.ffmpeg.processCount ? 75 : 0,
+    };
+    for (const [key, percent] of Object.entries(percents)) {
+      const card = document.querySelector(`[data-resource-card="${key}"]`);
+      if (!card) continue;
+      card.classList.remove("success", "review", "danger");
+      card.classList.add(resourceSeverity(percent));
+    }
+  }
+
   async function pollOperations() {
     if (requestInFlight) return;
     requestInFlight = true;
@@ -82,6 +131,7 @@
       const payload = await response.json();
       updateServiceCards(payload.services);
       updateQueue(payload.queue);
+      updateResources(payload.resources);
       for (const [key, chunk] of Object.entries(payload.logs)) {
         const element = logElements.get(key);
         if (element) appendLogLines(element, chunk.lines, chunk.cursor);
@@ -93,7 +143,7 @@
       requestInFlight = false;
       nextPollTimer = window.setTimeout(
         pollOperations,
-        document.hidden ? 5000 : 2000,
+        document.hidden ? 15000 : 5000,
       );
     }
   }

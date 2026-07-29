@@ -42,6 +42,7 @@ _HEADER_ALIASES = {
         "speech_script",
         "口播脚本",
         "口播脚本（语音生成模式填写）",
+        "口播脚本（上传音频无需填写）",
         "脚本内容",
     },
     "resolution": {"resolution", "最长分辨率"},
@@ -53,20 +54,12 @@ _HEADER_ALIASES = {
 
 _DIGITAL_HEADERS = [
     "row_id",
-    "image_file",
-    "audio_file",
-    "speech_script",
     "prompt",
-    "left_audio_file",
-    "right_audio_file",
 ]
 
 _LTX_HEADERS = [
     "row_id",
-    "source_video_file",
-    "audio_file",
     "speech_script",
-    "positive_prompt",
 ]
 
 _SCRIPT_HEADERS = ["row_id", "speech_script"]
@@ -179,16 +172,21 @@ def parse_manifest(
         required = set(_SCRIPT_HEADERS)
     else:
         required = (
-            {"row_id", "image_file", "prompt"}
+            {"row_id", "prompt"}
             if workflow_type == DIGITAL_HUMAN_WORKFLOW
-            else {"row_id", "source_video_file", "positive_prompt"}
+            else {"row_id"}
         )
-        required.add("audio_file")
     missing = required - set(normalized_headers)
     if missing:
         raise ManifestError(
             "任务清单缺少必填列：" + "、".join(sorted(missing))
         )
+    if (
+        audio_mode == "upload"
+        and workflow_type == LTX_LIP_SYNC_WORKFLOW
+        and not {"speech_script", "positive_prompt"} & set(normalized_headers)
+    ):
+        raise ManifestError("任务清单缺少必填列：口播脚本")
 
     rows: list[dict[str, str]] = []
     for source_row_number, raw_row in enumerate(nonempty_rows[1:], start=2):
@@ -212,7 +210,7 @@ def csv_template(workflow_type: str) -> str:
     output = io.StringIO()
     writer = csv.writer(output, lineterminator="\r\n")
     if workflow_type == "script":
-        writer.writerow(["脚本编号", "脚本内容"])
+        writer.writerow(["任务编号", "口播脚本"])
         writer.writerow(
             [
                 "SCRIPT-001",
@@ -220,45 +218,19 @@ def csv_template(workflow_type: str) -> str:
             ]
         )
     elif workflow_type == DIGITAL_HUMAN_WORKFLOW:
-        writer.writerow(
-            [
-                "任务编号",
-                "图片文件",
-                "总参考音频",
-                "口播脚本（语音生成模式填写）",
-                "提示词",
-                "左人物音频",
-                "右人物音频",
-            ]
-        )
+        writer.writerow(["任务编号", "提示词"])
         writer.writerow(
             [
                 "TASK-001",
-                "person-001.png",
-                "voice-001.mp3",
-                "",
                 "人物自然地说话，镜头保持稳定。",
-                "",
-                "",
             ]
         )
     elif workflow_type == LTX_LIP_SYNC_WORKFLOW:
-        writer.writerow(
-            [
-                "任务编号",
-                "源视频文件",
-                "音频文件",
-                "口播脚本（语音生成模式填写）",
-                "视频正向提示词",
-            ]
-        )
+        writer.writerow(["任务编号", "口播脚本"])
         writer.writerow(
             [
                 "TASK-001",
-                "source-001.mp4",
-                "voice-001.mp3",
-                "",
-                "一名女性用中文说：“今天给大家介绍这款产品。”",
+                "今天给大家介绍这款产品。",
             ]
         )
     else:

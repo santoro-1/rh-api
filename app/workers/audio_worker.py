@@ -80,6 +80,17 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
+def _audio_log_context(task: AudioGenerationTask) -> dict[str, object]:
+    batch = task.batch_item.batch if task.batch_item else None
+    return {
+        "user_id": task.user_id,
+        "username": task.user.username if task.user else None,
+        "batch_id": batch.id if batch else None,
+        "batch_item_id": task.batch_item_id,
+        "task_id": task.id,
+    }
+
+
 def _mark_failed(
     db: Session,
     task: AudioGenerationTask,
@@ -100,10 +111,9 @@ def _mark_failed(
         "audio.failed",
         "语音任务失败",
         level=logging.WARNING,
-        task_id=task.id,
-        batch_item_id=task.batch_item_id,
         error_code=code,
         error=message,
+        **_audio_log_context(task),
     )
 
 
@@ -423,10 +433,9 @@ def _complete_async_speech(
             if review_required
             else "完整语音已生成，准备切分"
         ),
-        task_id=task.id,
-        batch_item_id=task.batch_item_id,
         generation_version=task.generation_version,
         provider_task_id=task.provider_task_id,
+        **_audio_log_context(task),
     )
     return not review_required
 
@@ -477,10 +486,9 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
         logger,
         "audio.segmentation_started",
         "开始按音频时间轴创建视频子任务",
-        task_id=task.id,
-        batch_item_id=task.batch_item_id,
         segment_count=len(plans),
         alignment_method=task.alignment_method,
+        **_audio_log_context(task),
     )
 
     settings = get_settings()
@@ -608,9 +616,8 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
         logger,
         "audio.handoff_completed",
         "语音切分完成，视频子任务已进入本地队列",
-        task_id=task.id,
-        batch_item_id=task.batch_item_id,
         segment_count=len(plans),
+        **_audio_log_context(task),
     )
 
 
@@ -702,10 +709,9 @@ def process_task(db: Session, task_id: str) -> None:
                     logger,
                     "audio.submitted",
                     "脚本已提交 MiniMax 异步语音生成",
-                    task_id=task.id,
-                    batch_item_id=task.batch_item_id,
                     generation_version=task.generation_version,
                     provider_task_id=provider_task_id,
+                    **_audio_log_context(task),
                 )
                 return
             else:

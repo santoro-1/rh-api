@@ -1,0 +1,17 @@
+[Unit]
+Description=Back up RunningHub data
+
+[Service]
+Type=oneshot
+User=rhvideo
+Group=rhvideo
+WorkingDirectory=/opt/runninghub-video
+Environment=RUNNINGHUB_APP_DIR=/opt/runninghub-video
+Environment=RUNNINGHUB_BACKUP_DIR=/var/backups/runninghub-video
+ExecStart=/bin/bash /opt/runninghub-video/deploy/scripts/backup.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/runninghub-video/data /var/backups/runninghub-video

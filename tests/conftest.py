@@ -15,6 +15,7 @@ TEST_DATABASE = TEST_RUNTIME_ROOT / "test_app.db"
 TEST_DATA_DIR = TEST_RUNTIME_ROOT / "data"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE.as_posix()}"
 os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
+os.environ["APP_ENV"] = "test"
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${RUNNINGHUB_APP_DIR:-/opt/runninghub}"
+APP_DIR="${RUNNINGHUB_APP_DIR:-/opt/runninghub-video}"
 
 if [[ ! -d "$APP_DIR" || ! -f "$APP_DIR/.env" ]]; then
     echo "缺少项目目录或 $APP_DIR/.env" >&2

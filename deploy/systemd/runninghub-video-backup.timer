@@ -5,7 +5,7 @@ Description=Daily RunningHub backup
 OnCalendar=*-*-* 03:30:00
 Persistent=true
 RandomizedDelaySec=15m
-Unit=runninghub-backup.service
+Unit=runninghub-video-backup.service
 
 [Install]
 WantedBy=timers.target

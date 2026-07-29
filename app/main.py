@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,6 +16,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.config import get_settings
 from app.database import engine
 from app.routes import admin, auth, batches, operations, tasks, voices
+from app.services.logging_config import configure_logging, log_event
+
+
+logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
@@ -22,6 +27,9 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if settings.app_env != "test":
+            configure_logging("web")
+            log_event(logger, "web.started", "Web 服务已启动")
         settings.uploads_dir.mkdir(parents=True, exist_ok=True)
         settings.outputs_dir.mkdir(parents=True, exist_ok=True)
         settings.staged_assets_dir.mkdir(parents=True, exist_ok=True)
