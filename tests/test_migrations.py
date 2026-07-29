@@ -26,6 +26,36 @@ def _run_alembic(database: Path, revision: str) -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
+    database = tmp_path / "external-cwd.db"
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = f"sqlite:///{database.as_posix()}"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "alembic",
+            "-c",
+            str(PROJECT_ROOT / "alembic.ini"),
+            "upgrade",
+            "head",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+    assert revision == "0011_system_voice_categories"
+
+
 def test_audio_review_migration_preserves_existing_batch_items():
     runtime = PROJECT_ROOT / "tests" / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)

@@ -348,6 +348,20 @@ sudo -u '$LinuxUser' env \
   PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
   RUNNINGHUB_APP_DIR='$script:RemoteTemp/stage' \
   /bin/bash '$script:RemoteTemp/stage/deploy/scripts/preflight.sh'
+migration_check='$script:RemoteTemp/migration-check.db'
+sqlite3 -readonly '$AppDir/data/app.db' \
+  '.timeout 30000' ".backup '`$migration_check'"
+chown '${LinuxUser}:${LinuxUser}' "`$migration_check"
+chmod 600 "`$migration_check"
+(
+  cd '$script:RemoteTemp/stage'
+  sudo -u '$LinuxUser' env \
+    PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
+    DATABASE_URL="sqlite:///`$migration_check" \
+    '$AppDir/.venv/bin/python' -m alembic -c alembic.ini upgrade head
+)
+sqlite3 -readonly "`$migration_check" 'PRAGMA quick_check;' | grep -qx 'ok'
+echo '数据库迁移已在临时副本验证通过'
 echo '发布包校验和预检通过'
 "@
     Write-Host (Invoke-RemoteScript -Script $stageScript -Description "校验发布包")
@@ -363,8 +377,26 @@ set -euo pipefail
 services='$($script:Services -join " ")'
 old_revision='$deployedRevision'
 rollback_code='$BackupDir/runninghub-video-code-pre-$shortCommit-$timestamp.tar.gz'
+pre_deploy_db='$script:RemoteTemp/pre-deploy-app.db'
+pre_deploy_db_partial='$script:RemoteTemp/pre-deploy-app.db.partial'
 rollback() {
-  echo '发布失败，正在恢复发布前代码；不会自动覆盖数据库。' >&2
+  exit_code="`$1"
+  trap - ERR
+  set +e
+  echo '发布失败，正在恢复发布前代码和数据库。' >&2
+  systemctl stop `$services
+  if [ -f "`$pre_deploy_db" ]; then
+    if [ -f '$AppDir/data/app.db' ]; then
+      sqlite3 -readonly '$AppDir/data/app.db' \
+        ".backup '$script:RemoteTemp/failed-app.db'" >/dev/null 2>&1 || true
+    fi
+    rm -f -- \
+      '$AppDir/data/app.db' \
+      '$AppDir/data/app.db-wal' \
+      '$AppDir/data/app.db-shm'
+    install -m 600 -o '$LinuxUser' -g '$LinuxUser' \
+      "`$pre_deploy_db" '$AppDir/data/app.db'
+  fi
   if [ -f '$script:RemoteTemp/added-files.txt' ]; then
     while IFS= read -r relative_path; do
       [ -n "`$relative_path" ] || continue
@@ -380,11 +412,23 @@ rollback() {
   tar -C '$AppDir' -xzf "`$rollback_code"
   printf '%s\n' "`$old_revision" > '$AppDir/.deployed-revision'
   chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
-  systemctl start `$services || true
+  systemctl daemon-reload
+  systemctl start `$services
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    curl --connect-timeout 2 --max-time 5 -fsS \
+      -H 'Host: $Domain' http://127.0.0.1:18083/healthz >/dev/null && break
+    sleep 1
+  done
+  exit "`$exit_code"
 }
-trap rollback ERR
+trap 'rollback `$?' ERR
 
 systemctl stop `$services
+sqlite3 -readonly '$AppDir/data/app.db' \
+  '.timeout 30000' ".backup '`$pre_deploy_db_partial'"
+sqlite3 -readonly "`$pre_deploy_db_partial" 'PRAGMA quick_check;' | grep -qx 'ok'
+mv -f -- "`$pre_deploy_db_partial" "`$pre_deploy_db"
+chmod 600 "`$pre_deploy_db"
 sudo -u '$LinuxUser' tar -C '$AppDir' -xf '$script:RemoteTemp/release.tar'
 printf '%s\n' '$commit' > '$AppDir/.deployed-revision'
 chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
@@ -392,13 +436,17 @@ chmod 600 '$AppDir/.env'
 sudo -u '$LinuxUser' env \
   PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
   /bin/bash '$AppDir/deploy/scripts/preflight.sh'
-sudo -u '$LinuxUser' env \
-  PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
-  '$AppDir/.venv/bin/python' \
-  -m alembic -c '$AppDir/alembic.ini' upgrade head
+(
+  cd '$AppDir'
+  sudo -u '$LinuxUser' env \
+    PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
+    '$AppDir/.venv/bin/python' -m alembic -c alembic.ini upgrade head
+)
+systemctl daemon-reload
 systemctl start `$services
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  if curl -fsS -H 'Host: $Domain' http://127.0.0.1:18083/healthz >/dev/null; then
+  if curl --connect-timeout 2 --max-time 5 -fsS \
+    -H 'Host: $Domain' http://127.0.0.1:18083/healthz >/dev/null; then
     break
   fi
   if [ "`$attempt" -eq 10 ]; then
@@ -418,14 +466,18 @@ trap - ERR
 set -euo pipefail
 systemctl is-active $($script:Services -join " ")
 test "`$(tr -d '\r\n' < '$AppDir/.deployed-revision')" = '$commit'
-sudo -u '$LinuxUser' '$AppDir/.venv/bin/python' \
-  -m alembic -c '$AppDir/alembic.ini' current
+(
+  cd '$AppDir'
+  sudo -u '$LinuxUser' '$AppDir/.venv/bin/python' \
+    -m alembic -c alembic.ini current
+)
 sqlite3 -readonly '$AppDir/data/app.db' 'PRAGMA quick_check;'
-curl -fsS -H 'Host: $Domain' http://127.0.0.1:18083/healthz
+curl --connect-timeout 3 --max-time 8 -fsS \
+  -H 'Host: $Domain' http://127.0.0.1:18083/healthz
 echo
-curl -fsS 'https://$Domain/healthz'
+curl --connect-timeout 3 --max-time 10 -fsS 'https://$Domain/healthz'
 echo
-nginx -t
+timeout 15 nginx -t
 for port in 18080 18081 18082; do
   ss -ltn | awk -v expected=":`$port" '
     `$1 == "LISTEN" && substr(`$4, length(`$4) - length(expected) + 1) == expected {

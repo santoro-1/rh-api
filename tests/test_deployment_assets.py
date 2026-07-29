@@ -140,6 +140,13 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert "chown '${LinuxUser}:$LinuxUser'" in updater
     assert "chmod 600" in updater
     assert "sudo -u '$LinuxUser' env" in updater
+    assert "migration-check.db" in updater
+    assert "pre-deploy-app.db" in updater
+    assert "pre-deploy-app.db.partial" in updater
+    assert "failed-app.db" in updater
+    assert "正在恢复发布前代码和数据库" in updater
+    assert "systemctl daemon-reload" in updater
+    assert "cd '$AppDir'" in updater
     assert "requirements.txt 有变化" in updater
     assert "systemctl restart" not in updater
     assert "systemctl reload" not in updater
