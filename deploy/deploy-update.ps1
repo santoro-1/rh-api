@@ -45,10 +45,24 @@ function Invoke-RemoteScript {
         [Parameter(Mandatory = $true)][string]$Script,
         [Parameter(Mandatory = $true)][string]$Description
     )
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script))
-    $output = & ssh -i $SshKey -o BatchMode=yes -o ConnectTimeout=10 `
-        $Server "printf %s $encoded | base64 -d | bash" 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    # PowerShell here-strings use CRLF on Windows. Normalize before passing the
+    # script to Linux; otherwise Bash reads options such as "pipefail\r".
+    $normalizedScript = $Script.Replace("`r`n", "`n").Replace("`r", "`n")
+    $encoded = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($normalizedScript)
+    )
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & ssh -i $SshKey -o BatchMode=yes -o ConnectTimeout=10 `
+            -o ConnectionAttempts=1 -o ServerAliveInterval=5 `
+            -o ServerAliveCountMax=3 `
+            $Server "printf %s $encoded | base64 -d | bash" 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($exitCode -ne 0) {
         throw "$Description 失败：`n$($output -join [Environment]::NewLine)"
     }
     return (($output | ForEach-Object { "$_" }) -join "`n").Trim()
@@ -170,16 +184,17 @@ else
   echo 'MISSING'
 fi
 echo '本项目服务：'
-systemctl is-active $($script:Services -join " ")
-echo '本项目健康检查：'
-curl -fsS -H 'Host: $Domain' http://127.0.0.1:18083/healthz
+  systemctl --no-pager is-active $($script:Services -join " ")
+  echo '本项目健康检查：'
+  curl --connect-timeout 3 --max-time 8 -fsS \
+    -H 'Host: $Domain' http://127.0.0.1:18083/healthz
 echo
 echo '.env 权限：'
 stat -c '%a %U:%G %n' '$AppDir/.env'
 echo '磁盘：'
 df -h '$AppDir' | tail -n 1
 echo 'Nginx 语法：'
-nginx -t
+  timeout 15 nginx -t
 echo '现有关键服务监听端口：'
 for port in 18080 18081 18082; do
   ss -ltn | awk -v expected=":`$port" '
@@ -289,12 +304,16 @@ echo "代码备份：`$code_backup"
     Write-Host (Invoke-RemoteScript -Script $backupScript -Description "创建生产备份")
 
     Write-Step "上传并校验发布包（服务器写操作 2，仅写临时目录）"
-    & scp -i $SshKey -o BatchMode=yes $archive `
+    & scp -i $SshKey -o BatchMode=yes -o ConnectTimeout=10 `
+        -o ConnectionAttempts=1 -o ServerAliveInterval=5 `
+        -o ServerAliveCountMax=3 $archive `
         "${Server}:$script:RemoteTemp/release.tar"
     if ($LASTEXITCODE -ne 0) {
         throw "上传发布包失败。"
     }
-    & scp -i $SshKey -o BatchMode=yes $addedFilesManifest `
+    & scp -i $SshKey -o BatchMode=yes -o ConnectTimeout=10 `
+        -o ConnectionAttempts=1 -o ServerAliveInterval=5 `
+        -o ServerAliveCountMax=3 $addedFilesManifest `
         "${Server}:$script:RemoteTemp/added-files.txt"
     if ($LASTEXITCODE -ne 0) {
         throw "上传回滚清单失败。"
