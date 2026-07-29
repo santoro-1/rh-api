@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from app.config import get_settings
 from app.database import get_db
@@ -77,6 +81,54 @@ router = APIRouter(tags=["batches"])
 def _ensure_batch_access(batch: GenerationBatch, user: User) -> None:
     if batch.user_id != user.id and not user.is_admin:
         raise HTTPException(status_code=404, detail="批次不存在")
+
+
+def _archive_name(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^\w.-]+", "_", value.strip(), flags=re.UNICODE).strip("._")
+    return cleaned[:80] or fallback
+
+
+def _batch_video_files(batch: GenerationBatch) -> list[tuple[Path, str]]:
+    settings = get_settings()
+    videos: list[tuple[Path, str]] = []
+    for item in batch.items:
+        candidates = (
+            [(item.generation_task, None)]
+            if item.generation_task
+            else [
+                (segment.generation_task, segment.segment_index)
+                for segment in item.segments
+                if segment.generation_task
+            ]
+        )
+        for task, segment_index in candidates:
+            if (
+                task.status != "SUCCESS"
+                or not task.result_path
+            ):
+                continue
+            try:
+                path = safe_relative_path(task.result_path, settings.data_dir)
+            except ValueError:
+                continue
+            if not path.is_file():
+                continue
+            row_key = _archive_name(item.row_key, f"row-{item.row_number:03d}")
+            segment_suffix = (
+                f"-segment-{segment_index:03d}"
+                if segment_index is not None
+                else ""
+            )
+            videos.append(
+                (
+                    path,
+                    (
+                        f"{item.row_number:03d}-{row_key}"
+                        f"{segment_suffix}-{task.id[:8]}{path.suffix or '.mp4'}"
+                    ),
+                )
+            )
+    return videos
 
 
 @router.get("/generate/batch")
@@ -470,6 +522,45 @@ def batch_detail_page(
             "retryable_statuses": RETRYABLE_TASK_STATUSES,
             "status_labels": STATUS_LABELS,
         },
+    )
+
+
+@router.get("/batches/{batch_id}/download")
+def download_batch_videos(
+    batch_id: str,
+    current_user: User = Depends(get_page_user),
+    db: Session = Depends(get_db),
+):
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    videos = _batch_video_files(batch)
+    if not videos:
+        raise HTTPException(status_code=404, detail="当前批次还没有可下载的视频")
+
+    archive_dir = get_settings().data_dir / "runtime" / "batch-downloads"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"{batch.id}-{uuid.uuid4().hex}.zip"
+    try:
+        with zipfile.ZipFile(
+            archive_path,
+            mode="w",
+            compression=zipfile.ZIP_STORED,
+            allowZip64=True,
+        ) as archive:
+            for path, archive_name in videos:
+                archive.write(path, arcname=archive_name)
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=f"batch-{batch.id}-videos.zip",
+        content_disposition_type="attachment",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
     )
 
 

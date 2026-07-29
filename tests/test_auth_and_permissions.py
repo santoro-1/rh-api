@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
+from zipfile import ZipFile
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -63,6 +65,7 @@ def test_login_and_admin_permission(client):
     assert client.get("/admin/users").status_code == 403
     assert client.get("/admin/operations").status_code == 403
     assert client.get("/admin/operations/updates").status_code == 403
+    assert client.get("/admin/operations/logs/download").status_code == 403
 
 
 def test_admin_can_view_operations_without_terminal(client):
@@ -75,6 +78,7 @@ def test_admin_can_view_operations_without_terminal(client):
     assert "运行状态与日志" in response.text
     assert "语音 Worker" in response.text
     assert "视频 Worker" in response.text
+    assert "下载最近 7 天日志" in response.text
 
     update = client.get(
         "/admin/operations/updates",
@@ -87,13 +91,52 @@ def test_admin_can_view_operations_without_terminal(client):
     )
     assert update.status_code == 200
     payload = update.json()
-    assert set(payload) == {"services", "queue", "logs"}
+    assert set(payload) == {"services", "queue", "resources", "logs"}
+    assert {"cpuPercent", "memory", "disk", "project", "ffmpeg"} <= set(
+        payload["resources"]
+    )
     assert set(payload["logs"]) == {
         "web",
         "audio_worker",
         "video_worker",
         "launcher",
     }
+
+
+def test_admin_can_download_retained_service_logs(client):
+    create_user("log-download-admin", is_admin=True)
+    login(client, "log-download-admin")
+    logs_dir = get_settings().logs_dir
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "web.log").write_text(
+        "2026-07-29 INFO web: started\n",
+        encoding="utf-8",
+    )
+    (logs_dir / "audio_worker.log.2026-07-28").write_text(
+        "2026-07-28 ERROR audio: failed\n",
+        encoding="utf-8",
+    )
+    (logs_dir / "unrelated.log").write_text(
+        "must not be exported\n",
+        encoding="utf-8",
+    )
+
+    response = client.get("/admin/operations/logs/download")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert "runninghub-video-logs-" in response.headers["content-disposition"]
+    with ZipFile(BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == {
+            "web/web.log",
+            "audio_worker/audio_worker.log.2026-07-28",
+        }
+        assert archive.read("web/web.log").decode("utf-8").splitlines()[-1].endswith(
+            "started"
+        )
+        assert archive.read(
+            "audio_worker/audio_worker.log.2026-07-28"
+        ).decode("utf-8").splitlines()[-1].endswith("failed")
 
 
 def test_task_list_auto_refreshes_only_while_tasks_are_active(client):

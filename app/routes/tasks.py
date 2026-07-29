@@ -673,12 +673,19 @@ def task_detail_page(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     ensure_task_access(task, current_user)
+    batch_id = None
+    if task.batch_item is not None:
+        batch_id = task.batch_item.batch_id
+    elif task.segment is not None:
+        batch_id = task.segment.batch_item.batch_id
     return templates.TemplateResponse(
         request,
         "task_detail.html",
         {
             "task": task,
             "current_user": current_user,
+            "return_url": f"/batches/{batch_id}" if batch_id else "/tasks",
+            "return_label": "返回所属批次" if batch_id else "返回单次任务",
             "status_labels": STATUS_LABELS,
             "workflow_names": {
                 workflow.key: workflow.display_name for workflow in list_workflows()

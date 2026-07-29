@@ -5,7 +5,7 @@ Description=Daily RunningHub expired-file cleanup
 OnCalendar=*-*-* 04:15:00
 Persistent=true
 RandomizedDelaySec=15m
-Unit=runninghub-cleanup.service
+Unit=runninghub-video-cleanup.service
 
 [Install]
 WantedBy=timers.target

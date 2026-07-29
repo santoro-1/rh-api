@@ -166,6 +166,32 @@ def _resolve_asset(
     return asset
 
 
+def _resolve_asset_reference(
+    assets_by_id: dict[str, StagedAsset],
+    index: dict[tuple[str, str], StagedAsset],
+    *,
+    asset_id: str,
+    filename: str,
+    kind: str,
+    label: str,
+) -> StagedAsset:
+    """Prefer the page's explicit sequence binding; fall back for old manifests."""
+
+    if asset_id.strip():
+        asset = assets_by_id.get(asset_id.strip())
+        if asset is None:
+            raise ValueError(f"{label}序号对应的素材不存在")
+        if asset.kind != kind:
+            raise ValueError(f"{label}序号对应的素材类型不正确")
+        return asset
+    return _resolve_asset(
+        index,
+        filename=filename,
+        kind=kind,
+        label=label,
+    )
+
+
 def _number(value: Any, label: str, cast: type[int] | type[float]):
     try:
         return cast(value)
@@ -288,7 +314,8 @@ def validate_batch(
     try:
         ensure_user_can_create_workflow(user, workflow_type)
         assets = load_available_assets(db, user, asset_ids)
-        index = _asset_index(assets) if audio_mode == "upload" else {}
+        assets_by_id = {asset.id: asset for asset in assets}
+        index: dict[tuple[str, str], StagedAsset] = {}
         resolved_speech_options = (
             _validate_speech_options(db, user, speech_options)
             if audio_mode == "minimax"
@@ -357,6 +384,25 @@ def validate_batch(
         raise BatchValidationError(
             [{"rowNumber": 0, "rowId": "", "message": str(exc)}]
         ) from exc
+    if audio_mode == "upload":
+        required_asset_id_keys = (
+            ["image_asset_id", "audio_asset_id"]
+            if workflow_type == DIGITAL_HUMAN_WORKFLOW
+            else ["source_video_asset_id", "audio_asset_id"]
+        )
+        if (
+            workflow_type == DIGITAL_HUMAN_WORKFLOW
+            and batch_person_mode == "0"
+        ):
+            required_asset_id_keys.extend(
+                ["left_audio_asset_id", "right_audio_asset_id"]
+            )
+        uses_sequence_bindings = all(
+            all(str(row.get(key) or "").strip() for key in required_asset_id_keys)
+            for row in rows
+        )
+        if not uses_sequence_bindings:
+            index = _asset_index(assets)
 
     for position, row in enumerate(rows, start=1):
         row_key = str(row.get("row_id") or "").strip()
@@ -375,8 +421,10 @@ def validate_batch(
                     "image": (
                         ordered_primary_assets[position - 1]
                         if audio_mode == "minimax"
-                        else _resolve_asset(
+                        else _resolve_asset_reference(
+                            assets_by_id,
                             index,
+                            asset_id=str(row.get("image_asset_id") or ""),
                             filename=str(row.get("image_file") or ""),
                             kind="image",
                             label="参考图片",
@@ -384,21 +432,27 @@ def validate_batch(
                     ),
                 }
                 if audio_mode == "upload":
-                    staged["audio"] = _resolve_asset(
+                    staged["audio"] = _resolve_asset_reference(
+                        assets_by_id,
                         index,
+                        asset_id=str(row.get("audio_asset_id") or ""),
                         filename=str(row.get("audio_file") or ""),
                         kind="audio",
                         label="总参考音频",
                     )
                 if audio_mode == "upload" and batch_person_mode == "0":
-                    staged["left_audio"] = _resolve_asset(
+                    staged["left_audio"] = _resolve_asset_reference(
+                        assets_by_id,
                         index,
+                        asset_id=str(row.get("left_audio_asset_id") or ""),
                         filename=str(row.get("left_audio_file") or ""),
                         kind="audio",
                         label="左人物音频",
                     )
-                    staged["right_audio"] = _resolve_asset(
+                    staged["right_audio"] = _resolve_asset_reference(
+                        assets_by_id,
                         index,
+                        asset_id=str(row.get("right_audio_asset_id") or ""),
                         filename=str(row.get("right_audio_file") or ""),
                         kind="audio",
                         label="右人物音频",
@@ -448,8 +502,12 @@ def validate_batch(
                     "video": (
                         ordered_primary_assets[position - 1]
                         if audio_mode == "minimax"
-                        else _resolve_asset(
+                        else _resolve_asset_reference(
+                            assets_by_id,
                             index,
+                            asset_id=str(
+                                row.get("source_video_asset_id") or ""
+                            ),
                             filename=str(row.get("source_video_file") or ""),
                             kind="video",
                             label="源视频",
@@ -457,8 +515,10 @@ def validate_batch(
                     ),
                 }
                 if audio_mode == "upload":
-                    staged["audio"] = _resolve_asset(
+                    staged["audio"] = _resolve_asset_reference(
+                        assets_by_id,
                         index,
+                        asset_id=str(row.get("audio_asset_id") or ""),
                         filename=str(row.get("audio_file") or ""),
                         kind="audio",
                         label="自定义音频",
@@ -476,10 +536,21 @@ def validate_batch(
                     or batch_parameters.get("prompt_prefix")
                     or "一名人物用中文说"
                 ).strip().rstrip("：:")
+                script = str(row.get("speech_script") or "").strip()
+                legacy_positive_prompt = str(
+                    row.get("positive_prompt") or ""
+                ).strip()
+                if not script and not legacy_positive_prompt:
+                    raise ValueError("口播脚本不能为空")
                 parameters = {
-                    # Future TTS metadata may contain speech_script, but V2V
-                    # always receives the independently editable positive prompt.
-                    "prompt": str(row.get("positive_prompt") or ""),
+                    # Users enter one script. LTX receives the derived positive
+                    # prompt; legacy manifests with a completed positive prompt
+                    # remain accepted during the transition.
+                    "prompt": (
+                        f"{prompt_prefix}：“{script}”"
+                        if script
+                        else legacy_positive_prompt
+                    ),
                     "prompt_prefix": prompt_prefix,
                     "instance_type": batch_instance_type,
                 }
@@ -504,9 +575,7 @@ def validate_batch(
                 if workflow_type == LTX_LIP_SYNC_WORKFLOW:
                     if not parameters["prompt_prefix"]:
                         raise ValueError("请填写对口型人物和语言")
-                    parameters["prompt"] = (
-                        f"{parameters['prompt_prefix']}：“{script}”"
-                    )
+                    parameters["prompt"] = f"{parameters['prompt_prefix']}：“{script}”"
                 # Adapter validation still sees the future generated audio,
                 # while no video task is written until the real file exists.
                 preview_audio = WorkflowAsset(

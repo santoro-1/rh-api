@@ -9,7 +9,9 @@
     <label>{{ "新密码（留空不改）" if editing else "密码" }}<input name="password" type="password" {% if not editing %}required{% endif %} minlength="8"></label>
   </div>
   <div class="check-row"><label><input type="checkbox" name="is_admin" {% if user and user.is_admin %}checked{% endif %}> 管理员</label><label><input type="checkbox" name="is_active" {% if not user or user.is_active %}checked{% endif %}> 启用账号</label></div>
-  <hr><h2>RunningHub 配置</h2>
+  <details class="admin-config-section" open>
+  <summary>RunningHub 配置</summary>
+  <div class="admin-config-body stack-form">
   <label>RunningHub API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="{{ '已加密保存，留空不修改' if editing else '可稍后配置' }}"></label>
   <div class="two-columns">
     <label>Base URL<input name="base_url" value="{{ config.base_url }}" required></label>
@@ -21,7 +23,11 @@
   </div>
   <p class="field-help">运行实例已移到用户创建任务页面，由每个任务单独选择。</p>
   <label>默认提示词<textarea name="default_prompt" rows="4">{{ config.default_prompt }}</textarea></label>
-  <hr><h2>视频对口型工作流</h2>
+  </div>
+  </details>
+  <details class="admin-config-section">
+  <summary>视频对口型工作流</summary>
+  <div class="admin-config-body stack-form">
   <label class="check-row"><span><input type="checkbox" name="ltx_enabled" {% if ltx_config.is_enabled %}checked{% endif %}> 为该账号启用</span></label>
   <div class="two-columns">
     <label>Workflow ID<input name="ltx_workflow_id" value="{{ ltx_config.ai_app_id }}" required></label>
@@ -43,8 +49,15 @@
     <textarea name="ltx_default_prompt" rows="5">{{ ltx_config.default_prompt }}</textarea>
     <span class="field-help">填写人物、语言和与音频一致的台词模板，不需要动作或画面描述。</span>
   </label>
-  <hr><h2>MiniMax 语音账号</h2>
+  </div>
+  </details>
+  <details class="admin-config-section" open>
+  <summary>MiniMax 语音账号</summary>
+  <div class="admin-config-body stack-form">
   <p class="field-help">这里绑定实际承担调用费用的 MiniMax 账号。声音克隆、融合和语音任务会同时记录本地用户、账号绑定与当时使用的 API 凭证。</p>
+  {% if request.query_params.get("system_voice_count") %}
+    <p class="success-notice">已同步 {{ request.query_params.get("system_voice_count") }} 个当前 MiniMax 账号可用的官方音色。</p>
+  {% endif %}
   <label>账号备注名称
     <input name="minimax_account_label" maxlength="100" value="{{ minimax_config.account_label or 'MiniMax 账号' }}" placeholder="例如：公司主账号">
   </label>
@@ -62,6 +75,20 @@
     <input name="minimax_requests_per_minute" type="number" min="1" max="60" value="{{ minimax_config.requests_per_minute }}" required>
     <span class="field-help">用于本地语音 Worker 节流，请按该 MiniMax 账号的实际额度填写。</span>
   </label>
+  {% if editing %}
+    <div class="system-voice-sync">
+      <div>
+        <strong>官方系统音色</strong>
+        <p class="field-help">先保存上面的 MiniMax Key，再从 MiniMax 实时同步。系统音色不收克隆音色费，文本合成仍按用量计费。</p>
+      </div>
+      <button
+        class="button secondary"
+        type="submit"
+        formmethod="post"
+        formaction="/admin/users/{{ user.id }}/system-voices/sync"
+      >同步官方音色</button>
+    </div>
+  {% endif %}
   {% if active_minimax_voices %}
     <h3>该账号已保存音色</h3>
     <div class="compact-list">
@@ -69,8 +96,10 @@
         <span class="asset-chip">{{ voice.name }} · {{ voice.activated_at|beijing_datetime if voice.activated_at else "已激活" }}</span>
       {% endfor %}
     </div>
-    <p class="field-help">这些音色由用户在“声音管理”页面完成克隆或融合后保存；声音参考原文件不会作为长期资料保存。</p>
+    <p class="field-help">包含管理员同步的官方音色，以及用户明确保存的克隆或融合音色。</p>
   {% endif %}
+  </div>
+  </details>
   <button type="submit">保存</button>
 </form>
 {% endblock %}

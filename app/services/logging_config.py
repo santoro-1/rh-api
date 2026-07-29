@@ -34,6 +34,84 @@ _HEARTBEAT_WRITE_LOCK = threading.Lock()
 EVENT_PREFIX = "[EVENT"
 
 
+class BoundedTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """Rotate at midnight or at a size limit and bound archive count.
+
+    Each service owns its own file, so the handler does not need cross-process
+    locking. Size-triggered archives use a timestamp suffix while the normal
+    midnight archive keeps the standard date suffix.
+    """
+
+    def __init__(
+        self,
+        filename: Path,
+        *,
+        retention_days: int,
+        max_bytes: int,
+        encoding: str = "utf-8",
+    ) -> None:
+        self.max_bytes = max(int(max_bytes), 1024)
+        self._size_rollover = False
+        super().__init__(
+            filename,
+            when="midnight",
+            backupCount=max(int(retention_days), 1),
+            encoding=encoding,
+        )
+
+    def shouldRollover(self, record: logging.LogRecord) -> int:
+        if super().shouldRollover(record):
+            self._size_rollover = False
+            return 1
+        if self.stream is None:
+            self.stream = self._open()
+        message = f"{self.format(record)}\n".encode(
+            self.encoding or "utf-8",
+            errors="replace",
+        )
+        self.stream.seek(0, 2)
+        self._size_rollover = self.stream.tell() + len(message) >= self.max_bytes
+        return int(self._size_rollover)
+
+    def getFilesToDelete(self) -> list[str]:
+        path = Path(self.baseFilename)
+        archives = sorted(
+            (
+                candidate
+                for candidate in path.parent.glob(f"{path.name}.*")
+                if candidate.is_file()
+            ),
+            key=lambda candidate: candidate.stat().st_mtime,
+        )
+        excess = max(len(archives) - self.backupCount, 0)
+        return [str(candidate) for candidate in archives[:excess]]
+
+    def doRollover(self) -> None:
+        if not self._size_rollover:
+            super().doRollover()
+            return
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        path = Path(self.baseFilename)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        sequence = 1
+        archive = path.with_name(f"{path.name}.{stamp}.{sequence:03d}")
+        while archive.exists():
+            sequence += 1
+            archive = path.with_name(f"{path.name}.{stamp}.{sequence:03d}")
+        if path.exists():
+            path.replace(archive)
+        for old_path in self.getFilesToDelete():
+            try:
+                Path(old_path).unlink()
+            except OSError:
+                pass
+        self._size_rollover = False
+        if not self.delay:
+            self.stream = self._open()
+
+
 def log_event(
     target_logger: logging.Logger,
     event_code: str,
@@ -97,10 +175,10 @@ def configure_logging(service_name: str, *, console: bool = True) -> Path:
         formatter = logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s: %(message)s"
         )
-        file_handler = TimedRotatingFileHandler(
+        file_handler = BoundedTimedRotatingFileHandler(
             log_path,
-            when="midnight",
-            backupCount=max(settings.log_retention_days, 1),
+            retention_days=settings.log_retention_days,
+            max_bytes=settings.log_max_bytes,
             encoding="utf-8",
         )
         file_handler.setFormatter(formatter)

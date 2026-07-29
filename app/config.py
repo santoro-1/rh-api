@@ -84,6 +84,7 @@ class Settings:
     minimax_request_timeout_seconds: int
     temporary_voice_retention_hours: int
     log_retention_days: int
+    log_max_bytes: int
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -175,7 +176,8 @@ class Settings:
             temporary_voice_retention_hours=_as_int(
                 "TEMPORARY_VOICE_RETENTION_HOURS", 48
             ),
-            log_retention_days=_as_int("LOG_RETENTION_DAYS", 14),
+            log_retention_days=_as_int("LOG_RETENTION_DAYS", 7),
+            log_max_bytes=_as_int("LOG_MAX_BYTES", 10 * 1024 * 1024),
         )
 
     @property

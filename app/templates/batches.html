@@ -1,9 +1,12 @@
 {% extends "base.html" %}
-{% block title %}批次历史{% endblock %}
+{% block title %}批次任务{% endblock %}
 {% block content %}
 <section class="page-heading">
-  <div><h1>批次历史</h1><p class="muted">查看批次及其独立任务的整体进度。</p></div>
-  <a class="button secondary" href="/generate/batch">创建批次</a>
+  <div><h1>批次任务</h1><p class="muted">查看每个生成批次的整体进度和结果。</p></div>
+  <div class="button-row">
+    <a class="button secondary" href="/tasks">查看单次任务</a>
+    <a class="button" href="/generate/batch">生成视频</a>
+  </div>
 </section>
 <section class="panel">
   <div class="table-wrap">

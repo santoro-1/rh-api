@@ -3,16 +3,40 @@
 {% block content %}
 <section class="page-heading">
   <div>
-    <h1>声音管理</h1>
-    <p class="muted">先完成声音克隆或音色融合并保存，批量生成时只选择已经保存的音色。</p>
+    <h1>声音</h1>
+    <p class="muted">优先使用管理员同步的官方音色；需要自定义声音时再使用高级制作工具。</p>
   </div>
-  <a class="button secondary" href="/generate/batch">返回批量生成</a>
+  <a class="button secondary" href="/generate/batch">返回生成视频</a>
 </section>
 
 {% if not minimax_configured %}
-  <div class="error">当前账号尚未配置 MiniMax API Key，请联系管理员配置后再制作声音。</div>
+  <div class="error">当前账号尚未配置 MiniMax API Key，请联系管理员配置。</div>
 {% endif %}
 
+<section class="panel">
+  <div class="panel-heading">
+    <h2>可用音色</h2>
+    <p class="muted">官方音色由管理员从当前 MiniMax 账号实时同步，自定义音色需要制作并保存。</p>
+  </div>
+  <div class="voice-library-grid">
+    {% for voice in voices %}
+      <article class="summary-card">
+        <strong>{{ voice.name }}</strong>
+        <span>{% if voice.method == "system" %}官方系统音色{% elif voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</span>
+        <small>{% if voice.method == "system" %}无克隆音色费，文本合成仍计费{% elif voice.status == "ACTIVE" %}已完成首次正式使用{% else %}首次正式使用可能收费{% endif %}</small>
+      </article>
+    {% else %}
+      <p class="muted">还没有可用音色。请联系管理员同步官方音色，或使用下方高级工具制作自定义音色。</p>
+    {% endfor %}
+  </div>
+</section>
+
+<details class="panel voice-advanced-wrapper">
+  <summary>
+    <strong>高级音色制作</strong>
+    <span class="field-help">声音克隆与音色融合可能产生额外费用</span>
+  </summary>
+  <div class="voice-advanced-body">
 <div class="workflow-switch voice-method-switch" role="tablist" aria-label="声音制作方式">
   <button id="voice-clone-tab" class="workflow-tab active" type="button">声音克隆</button>
   <button id="voice-mix-tab" class="workflow-tab" type="button">音色融合</button>
@@ -113,6 +137,8 @@
     <button type="submit" {% if not minimax_configured %}disabled{% endif %}>生成融合试听</button>
   </form>
 </section>
+</div>
+</details>
 
 <div id="voice-form-message" class="error hidden"></div>
 
@@ -152,24 +178,6 @@
       </article>
     {% else %}
       <p class="muted">还没有声音制作记录。</p>
-    {% endfor %}
-  </div>
-</section>
-
-<section class="panel">
-  <div class="panel-heading">
-    <h2>已保存音色</h2>
-    <p class="muted">只有这里的音色可以在批量语音生成中选择。</p>
-  </div>
-  <div class="voice-library-grid">
-    {% for voice in voices %}
-      <article class="summary-card">
-        <strong>{{ voice.name }}</strong>
-        <span>{% if voice.method == "system" %}官方系统音色{% elif voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</span>
-        <small>{% if voice.method == "system" %}无 ¥9.90 克隆音色费，文本合成仍计费{% elif voice.status == "ACTIVE" %}已完成首次正式使用{% else %}首次正式使用可能收费{% endif %}</small>
-      </article>
-    {% else %}
-      <p class="muted">还没有已保存音色。请先完成上方克隆或融合流程。</p>
     {% endfor %}
   </div>
 </section>

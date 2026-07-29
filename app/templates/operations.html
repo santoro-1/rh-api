@@ -11,8 +11,32 @@
     </p>
   </div>
   <div class="button-row">
+    <a class="button" href="/admin/operations/logs/download?days=7">下载最近 7 天日志</a>
     <a class="button secondary" id="refresh-operations" href="/admin/operations">立即同步</a>
     <a class="button secondary" href="/generate/batch">返回批量生成</a>
+  </div>
+</section>
+
+<section class="resource-grid" aria-label="服务器资源">
+  <div class="summary-card" data-resource-card="cpu">
+    <span>整机 CPU</span>
+    <strong id="resource-cpu">{{ resources.cpuPercent if resources.cpuPercent is not none else "采集中" }}{% if resources.cpuPercent is not none %}%{% endif %}</strong>
+    <small>持续偏高时会变为黄色或红色</small>
+  </div>
+  <div class="summary-card" data-resource-card="memory">
+    <span>整机内存</span>
+    <strong id="resource-memory">{{ resources.memory.usedPercent if resources.memory.usedPercent is not none else "未知" }}{% if resources.memory.usedPercent is not none %}%{% endif %}</strong>
+    <small id="resource-memory-detail"></small>
+  </div>
+  <div class="summary-card" data-resource-card="disk">
+    <span>项目磁盘</span>
+    <strong id="resource-disk">{{ resources.disk.usedPercent }}%</strong>
+    <small id="resource-disk-detail"></small>
+  </div>
+  <div class="summary-card" data-resource-card="ffmpeg">
+    <span>FFmpeg</span>
+    <strong id="resource-ffmpeg">{{ resources.ffmpeg.processCount }} 个</strong>
+    <small id="resource-project-memory"></small>
   </div>
 </section>
 
@@ -25,6 +49,50 @@
     </div>
   {% endfor %}
 </section>
+
+<details class="panel operations-filter-panel">
+  <summary>按账号、任务或错误筛选日志</summary>
+  <form method="get" action="/admin/operations" class="operations-filter-form">
+    <label>账号
+      <select name="account_id">
+        <option value="">全部账号</option>
+        {% for user in users %}
+          <option value="{{ user.id }}" {% if filters.accountId == user.id %}selected{% endif %}>{{ user.username }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>任务或批次 ID
+      <input name="task" value="{{ filters.task }}" maxlength="100" placeholder="粘贴任务 ID">
+    </label>
+    <label>服务
+      <select name="service">
+        <option value="all">全部服务</option>
+        {% for key, label in [("web", "Web"), ("audio_worker", "语音 Worker"), ("video_worker", "视频 Worker"), ("launcher", "本地总控")] %}
+          <option value="{{ key }}" {% if filters.service == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>等级
+      <select name="level">
+        <option value="">全部</option>
+        {% for value in ["WARNING", "ERROR", "CRITICAL"] %}
+          <option value="{{ value }}" {% if filters.level == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <input type="hidden" name="days" value="7">
+    <div class="button-row">
+      <button type="submit">查询最近 7 天</button>
+      <a class="button secondary" href="/admin/operations">清除筛选</a>
+    </div>
+  </form>
+  {% if history_searched %}
+    <div class="history-log-results">
+      <h3>筛选结果</h3>
+      <pre>{% if history_lines %}{{ history_lines|join("\n") }}{% else %}没有找到匹配的日志。{% endif %}</pre>
+    </div>
+  {% endif %}
+</details>
 
 <section class="panel">
   <div class="panel-heading"><h2>队列概况</h2><p class="muted">只显示数据库中的任务数量。</p></div>
@@ -50,6 +118,6 @@
   </details>
 {% endfor %}
 
-<p class="field-help">页面每 2 秒增量读取新事件，不会整页刷新或打断滚动位置。原始日志仍按天轮转；API Key、Bearer Token 和工作流访问密码会在写入前脱敏。</p>
+<p class="field-help">页面每 5 秒更新资源与事件，不会整页刷新或打断滚动位置。管理员可下载最近 7 天的原始服务日志；日志设置单文件大小上限，API Key、Bearer Token 和工作流访问密码会在写入前脱敏。</p>
 <script src="/static/operations.js" defer></script>
 {% endblock %}

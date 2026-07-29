@@ -7,8 +7,11 @@
     <p class="muted">{{ "数字人视频" if batch.workflow_type == "digital_human" else "视频对口型" }} · {{ "脚本生成语音" if batch.audio_mode == "minimax" else "上传音频" }} · {{ batch.created_at|beijing_datetime }}</p>
   </div>
   <div class="button-row">
+    {% if summary.success %}
+      <a class="button" href="/batches/{{ batch.id }}/download">下载当前批次（{{ summary.success }} 个视频）</a>
+    {% endif %}
     <a class="button secondary" href="/batches/{{ batch.id }}">刷新状态</a>
-    <a class="button secondary" href="/batches">返回批次历史</a>
+    <a class="button secondary" href="/batches">返回批次任务</a>
   </div>
 </section>
 

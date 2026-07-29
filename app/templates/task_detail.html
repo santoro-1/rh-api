@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}任务详情{% endblock %}
 {% block content %}
-<section class="page-heading"><div><h1>任务详情</h1><p id="status-text" class="status">{{ status_labels.get(task.status, task.status) }}</p></div><a class="button secondary" href="/tasks">返回列表</a></section>
+<section class="page-heading"><div><h1>任务详情</h1><p id="status-text" class="status">{{ status_labels.get(task.status, task.status) }}</p></div><a class="button secondary" href="{{ return_url }}">{{ return_label }}</a></section>
 <div class="detail-grid">
   <section class="panel">
     {% if task.workflow_type == "digital_human" %}

@@ -10,8 +10,15 @@ from app.database import get_db
 from app.models import MiniMaxVoiceAsset, RunningHubConfig, User, VoiceAssetStatus
 from app.routes.dependencies import get_page_admin
 from app.services.csrf import require_csrf
-from app.services.security import encrypt_secret, hash_password, mask_secret
+from app.services.security import (
+    decrypt_secret,
+    encrypt_secret,
+    hash_password,
+    mask_secret,
+)
 from app.services.speech.accounts import save_minimax_config
+from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient
+from app.services.speech.system_voices import sync_system_voices
 from app.services.workflow_configs import (
     get_user_workflow_config,
     save_workflow_config,
@@ -384,3 +391,60 @@ def update_user(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse("/admin/users", status_code=303)
+
+
+@router.post("/users/{user_id}/system-voices/sync")
+def sync_user_system_voices(
+    user_id: int,
+    csrf_ok: None = Depends(require_csrf),
+    _: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    user = db.scalar(
+        select(User)
+        .options(selectinload(User.minimax_config))
+        .where(User.id == user_id)
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    config = user.minimax_config
+    if not config or not config.api_key_encrypted:
+        raise HTTPException(
+            status_code=409,
+            detail="请先保存该用户的 MiniMax API Key",
+        )
+    try:
+        client = MiniMaxClient(
+            decrypt_secret(config.api_key_encrypted, label="MiniMax API Key"),
+            base_url=config.base_url,
+            timeout=get_settings().minimax_request_timeout_seconds,
+        )
+        available = client.list_voices("system")
+        selections: dict[str, str] = {}
+        for item in available[:100]:
+            voice_id = str(item.get("voice_id") or "").strip()
+            if not voice_id:
+                continue
+            provider_name = str(
+                item.get("voice_name")
+                or item.get("name")
+                or voice_id
+            ).strip()
+            selections[voice_id] = provider_name[:100]
+        if not selections:
+            raise ValueError("MiniMax 当前没有返回可用的官方音色")
+        saved = sync_system_voices(
+            db,
+            user,
+            client,
+            selections,
+            available_voices=available,
+        )
+        db.commit()
+    except (MiniMaxAPIError, OSError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return RedirectResponse(
+        f"/admin/users/{user_id}?system_voice_count={len(saved)}",
+        status_code=303,
+    )
