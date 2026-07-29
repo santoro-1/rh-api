@@ -62,7 +62,7 @@ from app.services.batch_status import (
     summarize_batch,
 )
 from app.services.csrf import require_csrf
-from app.services.speech.system_voices import group_available_voice_assets
+from app.services.speech.system_voices import group_system_voice_assets
 from app.services.storage import (
     UploadValidationError,
     remove_directory,
@@ -163,6 +163,12 @@ def batch_generate_page(
         )
         .order_by(MiniMaxVoiceAsset.name, MiniMaxVoiceAsset.created_at)
     ).all()
+    custom_voices = [
+        voice for voice in active_voices if voice.method != "system"
+    ]
+    system_voice_groups = group_system_voice_assets(
+        voice for voice in active_voices if voice.method == "system"
+    )
     return templates.TemplateResponse(
         request,
         "batch_generate.html",
@@ -178,7 +184,11 @@ def batch_generate_page(
                 and current_user.minimax_config.account_binding_id
             ),
             "minimax_voices": active_voices,
-            "minimax_voice_groups": group_available_voice_assets(active_voices),
+            "minimax_custom_voices": custom_voices,
+            "minimax_system_voice_groups": system_voice_groups,
+            "minimax_system_voice_count": sum(
+                len(group["voices"]) for group in system_voice_groups
+            ),
         },
     )
 

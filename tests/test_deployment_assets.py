@@ -86,6 +86,24 @@ def test_live_status_pages_do_not_force_full_page_reload():
     assert 'segment.runninghubTaskId || "等待提交"' in batch_detail
 
 
+def test_batch_voice_picker_keeps_custom_and_system_voices_separate():
+    template = (
+        PROJECT_ROOT / "app" / "templates" / "batch_generate.html"
+    ).read_text(encoding="utf-8")
+    script = (
+        PROJECT_ROOT / "app" / "static" / "batch_generate.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'data-voice-source="custom"' in template
+    assert 'data-voice-source="system"' in template
+    assert 'id="speech-custom-voice"' in template
+    assert 'id="speech-system-category"' in template
+    assert 'class="speech-system-voice' in template
+    assert "<optgroup" not in template
+    assert "initializeVoicePicker" in script
+    assert 'method === "system"' in script
+
+
 def test_batch_segment_table_keeps_remote_status_readable():
     stylesheet = (PROJECT_ROOT / "app" / "static" / "app.css").read_text(
         encoding="utf-8"

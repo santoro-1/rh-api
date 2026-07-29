@@ -10,6 +10,16 @@
   const resolutionInput = document.getElementById("batch-resolution");
   const quickConfirm = document.getElementById("quick-confirm");
   const advancedConfirm = document.getElementById("advanced-confirm");
+  const voicePicker = document.getElementById("speech-voice-picker");
+  const voiceValueInput = document.getElementById("speech-voice");
+  const voiceSourceButtons = Array.from(
+    document.querySelectorAll("[data-voice-source]"),
+  );
+  const customVoiceSelect = document.getElementById("speech-custom-voice");
+  const systemVoiceCategory = document.getElementById("speech-system-category");
+  const systemVoiceSelects = Array.from(
+    document.querySelectorAll(".speech-system-voice"),
+  );
 
   // Browser-only staged asset state. Each array preserves the visible upload
   // order; the backend receives opaque asset IDs and performs authoritative
@@ -661,13 +671,78 @@
     if (resetData) resetWorkflowData();
   }
 
+  function activeSystemVoiceSelect() {
+    return systemVoiceSelects.find(
+      (select) => select.dataset.categoryIndex === systemVoiceCategory?.value,
+    ) || null;
+  }
+
+  function selectedVoiceControl() {
+    return voicePicker?.dataset.activeSource === "custom"
+      ? customVoiceSelect
+      : activeSystemVoiceSelect();
+  }
+
   function updateSpeechCostText() {
-    const selected = document.getElementById("speech-voice").selectedOptions[0];
-    const activated = selected?.dataset.activated === "true";
-    document.getElementById("speech-cost-confirm-text").textContent = activated
-      ? "所选音色已完成首次正式使用；我已了解本批文本生成仍会计费。"
-      : "所选音色首次正式使用可能产生 ¥9.90 音色费用；我已了解文本生成仍会另外计费。";
+    const costText = document.getElementById("speech-cost-confirm-text");
+    const method = voiceValueInput.dataset.method;
+    const activated = voiceValueInput.dataset.activated === "true";
+    if (!voiceValueInput.value) {
+      costText.textContent = "请先选择音色；文本生成会按实际用量计费。";
+    } else if (method === "system") {
+      costText.textContent = "官方系统音色不收取克隆音色费；我已了解本批文本生成仍会按用量计费。";
+    } else if (activated) {
+      costText.textContent = "所选音色已完成首次正式使用；我已了解本批文本生成仍会计费。";
+    } else {
+      costText.textContent = "所选音色首次正式使用可能产生 ¥9.90 音色费用；我已了解文本生成仍会另外计费。";
+    }
     resetConfirmation();
+  }
+
+  function syncVoiceSelection() {
+    const control = selectedVoiceControl();
+    const option = control?.selectedOptions[0];
+    voiceValueInput.value = control?.value || "";
+    voiceValueInput.dataset.method = option?.dataset.method || "";
+    voiceValueInput.dataset.activated = option?.dataset.activated || "false";
+    updateSpeechCostText();
+  }
+
+  function updateSystemVoiceCategory() {
+    systemVoiceSelects.forEach((select) => {
+      select.classList.toggle(
+        "hidden",
+        select.dataset.categoryIndex !== systemVoiceCategory?.value,
+      );
+    });
+    if (voicePicker?.dataset.activeSource === "system") syncVoiceSelection();
+  }
+
+  function setVoiceSource(source) {
+    const targetButton = voiceSourceButtons.find(
+      (button) => button.dataset.voiceSource === source,
+    );
+    if (!targetButton || targetButton.disabled) return;
+    voicePicker.dataset.activeSource = source;
+    voiceSourceButtons.forEach((button) => {
+      const active = button.dataset.voiceSource === source;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    document.getElementById("speech-custom-voice-panel").classList.toggle(
+      "hidden",
+      source !== "custom",
+    );
+    document.getElementById("speech-system-voice-panel").classList.toggle(
+      "hidden",
+      source !== "system",
+    );
+    syncVoiceSelection();
+  }
+
+  function initializeVoicePicker() {
+    updateSystemVoiceCategory();
+    setVoiceSource(voicePicker.dataset.defaultSource);
   }
 
   function updateAudioModeUi() {
@@ -990,13 +1065,21 @@
   instanceTypeSelect.addEventListener("change", resetConfirmation);
   document.getElementById("quick-entry-button").addEventListener("click", () => setEntry("quick"));
   document.getElementById("manifest-entry-button").addEventListener("click", () => setEntry("manifest"));
-  document.getElementById("speech-voice").addEventListener("change", updateSpeechCostText);
+  voiceSourceButtons.forEach((button) => {
+    button.addEventListener("click", () => setVoiceSource(button.dataset.voiceSource));
+  });
+  customVoiceSelect?.addEventListener("change", syncVoiceSelection);
+  systemVoiceCategory?.addEventListener("change", updateSystemVoiceCategory);
+  systemVoiceSelects.forEach((select) => {
+    select.addEventListener("change", syncVoiceSelection);
+  });
   document.getElementById("speech-ltx-prompt-prefix").addEventListener("input", resetConfirmation);
   document.querySelectorAll("#minimax-speech-settings input, #minimax-speech-settings select")
     .forEach((input) => input.addEventListener("change", resetConfirmation));
 
   workflowSelect.value = config.initialWorkflow;
   instanceTypeSelect.value = config.ltxDefaultInstance === "plus" ? "plus" : "default";
+  initializeVoicePicker();
   updateWorkflowUi(false);
   renderQuick();
   renderAdvancedAssets();

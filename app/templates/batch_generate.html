@@ -77,19 +77,90 @@
     <strong>费用提醒</strong>
     <span>官方系统音色不收取 ¥9.90 克隆音色费，但生成语音仍按文本用量计费。克隆、融合或设计音色首次正式使用时可能另收音色费，最终以 MiniMax 账单为准。</span>
   </div>
-  <label>已保存音色
-    <select id="speech-voice" {% if not minimax_voices %}disabled{% endif %}>
-      <option value="">请选择音色</option>
-      {% for group in minimax_voice_groups %}
-        <optgroup label="{{ group.label }}">
-          {% for voice in group.voices %}
-            <option value="{{ voice.id }}" data-method="{{ voice.method }}" data-activated="{{ 'true' if voice.status == 'ACTIVE' else 'false' }}">{{ voice.name }} · {% if voice.method == "system" %}官方系统音色（无克隆费）{% elif voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</option>
-          {% endfor %}
-        </optgroup>
-      {% endfor %}
-    </select>
-    <span class="field-help">没有合适音色？前往<a href="/voices">声音管理</a>制作并试听。</span>
-  </label>
+  <div
+    id="speech-voice-picker"
+    class="voice-picker"
+    data-default-source="{{ 'custom' if minimax_custom_voices else 'system' }}"
+  >
+    <input id="speech-voice" type="hidden" value="">
+    <div class="workflow-switch voice-source-switch" role="tablist" aria-label="音色来源">
+      <button
+        class="workflow-tab{% if minimax_custom_voices %} active{% endif %}"
+        type="button"
+        data-voice-source="custom"
+        aria-selected="{{ 'true' if minimax_custom_voices else 'false' }}"
+        {% if not minimax_custom_voices %}disabled{% endif %}
+      >我的音色 <span>{{ minimax_custom_voices|length }}</span></button>
+      <button
+        class="workflow-tab{% if not minimax_custom_voices %} active{% endif %}"
+        type="button"
+        data-voice-source="system"
+        aria-selected="{{ 'false' if minimax_custom_voices else 'true' }}"
+        {% if not minimax_system_voice_groups %}disabled{% endif %}
+      >官方音色 <span>{{ minimax_system_voice_count }}</span></button>
+    </div>
+
+    <div
+      id="speech-custom-voice-panel"
+      class="voice-picker-panel{% if not minimax_custom_voices %} hidden{% endif %}"
+    >
+      {% if minimax_custom_voices %}
+        <label>我的克隆/融合音色
+          <select id="speech-custom-voice">
+            <option value="">请选择我的音色</option>
+            {% for voice in minimax_custom_voices %}
+              <option
+                value="{{ voice.id }}"
+                data-method="{{ voice.method }}"
+                data-activated="{{ 'true' if voice.status == 'ACTIVE' else 'false' }}"
+              >{{ voice.name }} · {% if voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</option>
+            {% endfor %}
+          </select>
+        </label>
+      {% else %}
+        <p class="muted">还没有保存克隆或融合音色，可前往<a href="/voices">声音管理</a>制作。</p>
+      {% endif %}
+    </div>
+
+    <div
+      id="speech-system-voice-panel"
+      class="voice-picker-panel{% if minimax_custom_voices %} hidden{% endif %}"
+    >
+      {% if minimax_system_voice_groups %}
+        <div class="voice-official-controls">
+          <label>语言分类
+            <select id="speech-system-category">
+              {% for group in minimax_system_voice_groups %}
+                <option value="{{ loop.index0 }}">{{ group.label }}（{{ group.voices|length }}）</option>
+              {% endfor %}
+            </select>
+          </label>
+          <div class="voice-picker-field">
+            <span class="voice-picker-label">官方音色</span>
+            {% for group in minimax_system_voice_groups %}
+              <select
+                class="speech-system-voice{% if not loop.first %} hidden{% endif %}"
+                data-category-index="{{ loop.index0 }}"
+                aria-label="{{ group.label }}官方音色"
+              >
+                <option value="">请选择{{ group.label }}音色</option>
+                {% for voice in group.voices %}
+                  <option
+                    value="{{ voice.id }}"
+                    data-method="system"
+                    data-activated="true"
+                  >{{ voice.name }}</option>
+                {% endfor %}
+              </select>
+            {% endfor %}
+          </div>
+        </div>
+      {% else %}
+        <p class="muted">管理员尚未同步官方音色。</p>
+      {% endif %}
+    </div>
+    <span class="field-help">优先显示你保存的克隆/融合音色；官方音色按语言分类查找。没有合适音色可前往<a href="/voices">声音管理</a>制作并试听。</span>
+  </div>
   <label class="inline-check batch-confirm">
     <input id="speech-review-required" type="checkbox">
     <span>
