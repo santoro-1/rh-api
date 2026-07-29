@@ -153,6 +153,15 @@
 .managed-voice-item strong,
 .managed-voice-item small { display:block; overflow-wrap:anywhere; }
 .managed-voice-item small { margin-top:.2rem; color:#64748b; }
+.voice-picker { display:grid; gap:.75rem; padding:14px; border:1px solid #d7e2f0; border-radius:10px; background:#f8fbff; }
+.voice-source-switch { margin:0; grid-template-columns:repeat(2,minmax(0,220px)); justify-content:start; }
+.voice-source-switch .workflow-tab { display:flex; justify-content:center; align-items:center; gap:.45rem; }
+.voice-source-switch .workflow-tab span { min-width:1.7rem; padding:.1rem .4rem; border-radius:999px; background:#dbe8f8; color:#365878; font-size:.8rem; }
+.voice-source-switch .workflow-tab.active span { background:#ffffff33; color:white; }
+.voice-picker-panel { display:grid; gap:.75rem; }
+.voice-official-controls { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(240px,1.3fr); gap:12px; align-items:end; }
+.voice-picker-field { display:grid; gap:7px; min-width:0; }
+.voice-picker-label { font-weight:600; }
 .compact-button { flex:0 0 auto; padding:.45rem .7rem; }
 .removed-voice-group { margin-top:.8rem; background:#fff9f8; border-color:#f2cbc7; }
 .admin-config-section { border:1px solid #dbe4ef; border-radius:10px; background:#f8fafc; }
@@ -163,3 +172,4 @@
 @media (max-width: 760px) { .batch-upload-grid { grid-template-columns:1fr; } .batch-order-warning { display:grid; } }
 @media (max-width: 760px) { .three-columns, .service-status-grid, .resource-grid, .operations-filter-form { grid-template-columns:1fr; } }
 @media (max-width: 760px) { .voice-weight-row { grid-template-columns:1fr 1fr; } .voice-task-card { grid-template-columns:minmax(0,1fr); } }
+@media (max-width: 760px) { .voice-source-switch, .voice-official-controls { grid-template-columns:1fr; } }

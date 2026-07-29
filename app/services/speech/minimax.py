@@ -62,11 +62,31 @@ def parse_pronunciation_tones(value: str | None) -> list[str]:
 
 
 def validate_voice_id(voice_id: str) -> None:
+    """Validate a caller-defined ID used when creating a custom voice."""
+
     if not VOICE_ID_PATTERN.fullmatch(voice_id):
         raise ValueError(
             "voice_id 必须为 8–256 位，以英文字母开头，只含字母、数字、"
             "连字符或下划线，且不能以连字符或下划线结尾"
         )
+
+
+def validate_synthesis_voice_id(voice_id: str) -> None:
+    """Validate an existing provider voice ID before speech synthesis.
+
+    MiniMax's official catalogue includes IDs such as
+    ``Chinese (Mandarin)_Mature_Woman``. Those provider-owned IDs are valid
+    synthesis inputs even though they do not follow the stricter naming rules
+    required when a caller creates a custom cloned voice.
+    """
+
+    if (
+        not voice_id
+        or voice_id != voice_id.strip()
+        or len(voice_id) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in voice_id)
+    ):
+        raise ValueError("已选择音色的 voice_id 无效")
 
 
 def validate_clone_audio(path: Path) -> None:
@@ -327,7 +347,7 @@ class MiniMaxClient:
         sample_rate: int = 32000,
         bitrate: int = 128000,
     ) -> tuple[bytes, dict[str, Any]]:
-        validate_voice_id(voice_id)
+        validate_synthesis_voice_id(voice_id)
         validate_synthesis_options(
             text=text,
             speed=speed,
@@ -373,7 +393,7 @@ class MiniMaxClient:
     ) -> tuple[str, str | None, dict[str, Any]]:
         """Submit one long-form TTS job and return its durable provider IDs."""
 
-        validate_voice_id(voice_id)
+        validate_synthesis_voice_id(voice_id)
         validate_synthesis_options(
             text=text,
             speed=speed,
@@ -506,8 +526,8 @@ class MiniMaxClient:
         sample_rate: int = 32000,
         bitrate: int = 128000,
     ) -> tuple[bytes, dict[str, Any]]:
-        validate_voice_id(voice_id_a)
-        validate_voice_id(voice_id_b)
+        validate_synthesis_voice_id(voice_id_a)
+        validate_synthesis_voice_id(voice_id_b)
         validate_synthesis_options(
             text=text,
             weight_a=weight_a,

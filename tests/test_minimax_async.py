@@ -12,7 +12,12 @@ from app.services.speech.async_outputs import (
     SubtitleCue,
     decode_async_speech_output,
 )
-from app.services.speech.minimax import MiniMaxClient, parse_pronunciation_tones
+from app.services.speech.minimax import (
+    MiniMaxClient,
+    parse_pronunciation_tones,
+    validate_synthesis_voice_id,
+    validate_voice_id,
+)
 from tests.async_speech_fakes import make_async_speech_bundle
 
 
@@ -41,6 +46,16 @@ class _Session:
     def get(self, url, **kwargs):
         self.calls.append(("GET", url, kwargs))
         return self.responses.pop(0)
+
+
+def test_system_voice_ids_do_not_use_custom_voice_naming_rules():
+    system_voice_id = "Chinese (Mandarin)_Mature_Woman"
+
+    validate_synthesis_voice_id(system_voice_id)
+    with pytest.raises(ValueError, match="voice_id 必须为"):
+        validate_voice_id(system_voice_id)
+    with pytest.raises(ValueError, match="voice_id 无效"):
+        validate_synthesis_voice_id("official-voice\n")
 
 
 def test_minimax_async_client_submits_queries_and_downloads():
@@ -72,7 +87,7 @@ def test_minimax_async_client_submits_queries_and_downloads():
 
     task_id, file_id, _ = client.create_async_speech_task(
         text="这是一段需要生成的口播脚本。",
-        voice_id="audiobook_male_1",
+        voice_id="Chinese (Mandarin)_Mature_Woman",
         model="speech-2.8-hd",
         speed=1.0,
         volume=1.0,
@@ -92,7 +107,10 @@ def test_minimax_async_client_submits_queries_and_downloads():
     assert content == b"result-bundle"
     submit_body = session.calls[0][2]["json"]
     assert submit_body["audio_setting"]["audio_sample_rate"] == 32000
-    assert submit_body["voice_setting"]["voice_id"] == "audiobook_male_1"
+    assert (
+        submit_body["voice_setting"]["voice_id"]
+        == "Chinese (Mandarin)_Mature_Woman"
+    )
     assert submit_body["pronunciation_dict"] == {
         "tone": [
             "燕少飞/(yan4)(shao3)(fei1)",

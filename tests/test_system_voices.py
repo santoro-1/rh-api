@@ -282,11 +282,16 @@ def test_admin_can_sync_provider_system_voices_for_one_user(
     assert "英语" in voices_page.text
     batch_page = client.get("/generate/batch")
     assert batch_page.status_code == 200
-    assert batch_page.text.index('optgroup label="我的自定义音色"') < (
-        batch_page.text.index('optgroup label="中文普通话"')
+    assert batch_page.text.index('data-voice-source="custom"') < (
+        batch_page.text.index('data-voice-source="system"')
     )
-    assert '<optgroup label="中文普通话">' in batch_page.text
-    assert '<optgroup label="英语">' in batch_page.text
+    assert 'data-default-source="custom"' in batch_page.text
+    assert 'id="speech-custom-voice"' in batch_page.text
+    assert 'value="target-custom-clone"' in batch_page.text
+    assert 'id="speech-system-category"' in batch_page.text
+    assert "中文普通话（2）" in batch_page.text
+    assert "英语（1）" in batch_page.text
+    assert "<optgroup" not in batch_page.text
     forbidden = client.post(
         f"/admin/users/{target.id}/system-voices/{santa_id}/delete",
         follow_redirects=False,
