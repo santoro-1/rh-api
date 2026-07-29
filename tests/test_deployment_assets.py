@@ -139,6 +139,12 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert "install -d -m 700 -o '$LinuxUser' -g '$LinuxUser'" in updater
     assert "chown '${LinuxUser}:$LinuxUser'" in updater
     assert "chmod 600" in updater
+    assert "sudo -u '$LinuxUser' env" in updater
     assert "requirements.txt 有变化" in updater
     assert "systemctl restart" not in updater
     assert "systemctl reload" not in updater
+
+    preflight = (
+        PROJECT_ROOT / "deploy" / "scripts" / "preflight.sh"
+    ).read_text(encoding="utf-8")
+    assert 'export PATH="$APP_DIR/tools/ffmpeg/bin:$PATH"' in preflight

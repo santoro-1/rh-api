@@ -344,9 +344,10 @@ cmp -s '$AppDir/requirements.txt' '$script:RemoteTemp/stage/requirements.txt' ||
   echo 'requirements.txt 有变化，必须先单独审查依赖更新。' >&2
   exit 1
 }
-PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
+sudo -u '$LinuxUser' env \
+  PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
   RUNNINGHUB_APP_DIR='$script:RemoteTemp/stage' \
-  sudo -u '$LinuxUser' /bin/bash '$script:RemoteTemp/stage/deploy/scripts/preflight.sh'
+  /bin/bash '$script:RemoteTemp/stage/deploy/scripts/preflight.sh'
 echo '发布包校验和预检通过'
 "@
     Write-Host (Invoke-RemoteScript -Script $stageScript -Description "校验发布包")
@@ -388,10 +389,12 @@ sudo -u '$LinuxUser' tar -C '$AppDir' -xf '$script:RemoteTemp/release.tar'
 printf '%s\n' '$commit' > '$AppDir/.deployed-revision'
 chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
 chmod 600 '$AppDir/.env'
-PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
-  sudo -u '$LinuxUser' /bin/bash '$AppDir/deploy/scripts/preflight.sh'
-PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
-  sudo -u '$LinuxUser' '$AppDir/.venv/bin/python' \
+sudo -u '$LinuxUser' env \
+  PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
+  /bin/bash '$AppDir/deploy/scripts/preflight.sh'
+sudo -u '$LinuxUser' env \
+  PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
+  '$AppDir/.venv/bin/python' \
   -m alembic -c '$AppDir/alembic.ini' upgrade head
 systemctl start `$services
 for attempt in 1 2 3 4 5 6 7 8 9 10; do

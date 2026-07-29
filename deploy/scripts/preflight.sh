@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APP_DIR="${RUNNINGHUB_APP_DIR:-/opt/runninghub-video}"
+export PATH="$APP_DIR/tools/ffmpeg/bin:$PATH"
 
 if [[ ! -d "$APP_DIR" || ! -f "$APP_DIR/.env" ]]; then
     echo "缺少项目目录或 $APP_DIR/.env" >&2
