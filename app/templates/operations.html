@@ -41,7 +41,7 @@
 </section>
 
 <section class="service-status-grid">
-  {% for key, label in [("web", "Web"), ("audio_worker", "语音 Worker"), ("video_worker", "视频 Worker"), ("launcher", "本地总控")] %}
+  {% for key, label in service_options %}
     {% set service = services[key] %}
     <div class="summary-card {{ 'success' if service.online else 'danger' }}" data-service-card="{{ key }}">
       <strong data-service-state="{{ key }}">{{ "正常" if service.online else "离线" }}</strong>
@@ -67,7 +67,7 @@
     <label>服务
       <select name="service">
         <option value="all">全部服务</option>
-        {% for key, label in [("web", "Web"), ("audio_worker", "语音 Worker"), ("video_worker", "视频 Worker"), ("launcher", "本地总控")] %}
+        {% for key, label in service_options %}
           <option value="{{ key }}" {% if filters.service == key %}selected{% endif %}>{{ label }}</option>
         {% endfor %}
       </select>
@@ -110,7 +110,7 @@
   </div>
 </section>
 
-{% for key, label in [("web", "Web"), ("audio_worker", "语音 Worker"), ("video_worker", "视频 Worker"), ("launcher", "本地总控")] %}
+{% for key, label in service_options %}
   <details class="panel log-panel" {% if key == "audio_worker" %}open{% endif %}>
     <summary>{{ label }} 事件日志</summary>
     <pre data-log-service="{{ key }}" data-log-cursor="{{ logs[key].cursor }}"

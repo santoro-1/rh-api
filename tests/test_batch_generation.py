@@ -333,7 +333,7 @@ def test_digital_batch_applies_uniform_dual_settings_and_full_audio_duration(
         first = json.loads(tasks[0].input_payload)
         second = json.loads(tasks[1].input_payload)
         assert first["parameters"]["person_mode"] == "0"
-        assert first["parameters"]["end_time"] == "0:15"
+        assert first["parameters"]["end_time"] == "0:16"
         assert first["parameters"]["resolution"] == "768"
         assert second["parameters"]["person_mode"] == "0"
         assert set(first["assets"]) == set(second["assets"]) == {

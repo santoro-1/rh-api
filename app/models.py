@@ -66,6 +66,7 @@ class VoiceCreationStatus(str, Enum):
     SAVE_PENDING = "SAVE_PENDING"
     SAVING = "SAVING"
     SAVED = "SAVED"
+    EXPIRED = "EXPIRED"
     FAILED = "FAILED"
 
 
@@ -88,7 +89,9 @@ class User(Base):
     workflow_configs: Mapped[list["WorkflowConfig"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-    tasks: Mapped[list["GenerationTask"]] = relationship(back_populates="user")
+    tasks: Mapped[list["GenerationTask"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     batches: Mapped[list["GenerationBatch"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )

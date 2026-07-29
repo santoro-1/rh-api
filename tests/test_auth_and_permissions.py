@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from io import BytesIO
 from zipfile import ZipFile
 
+from app.routes import operations
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
@@ -100,6 +102,34 @@ def test_admin_can_view_operations_without_terminal(client):
         "audio_worker",
         "video_worker",
         "launcher",
+    }
+
+
+def test_production_operations_hide_local_launcher(client, monkeypatch):
+    create_user("production-operations-admin", is_admin=True)
+    login(client, "production-operations-admin")
+    production_settings = replace(get_settings(), app_env="production")
+    monkeypatch.setattr(
+        operations,
+        "get_settings",
+        lambda: production_settings,
+    )
+
+    page = client.get("/admin/operations")
+    assert page.status_code == 200
+    assert "本地总控" not in page.text
+
+    update = client.get("/admin/operations/updates")
+    assert update.status_code == 200
+    assert set(update.json()["services"]) == {
+        "web",
+        "audio_worker",
+        "video_worker",
+    }
+    assert set(update.json()["logs"]) == {
+        "web",
+        "audio_worker",
+        "video_worker",
     }
 
 
@@ -203,6 +233,68 @@ def test_admin_can_create_a_user_with_legacy_default_instance(client):
             == "new-minimax-key"
         )
         assert len(minimax_config.credential_fingerprint or "") == 64
+
+
+def test_admin_can_delete_another_account_and_only_its_files(client):
+    admin = create_user("delete-admin", is_admin=True)
+    target = create_user("delete-target")
+    survivor = create_user("delete-survivor")
+    _make_task(target.id, "delete-target-terminal-task")
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "delete-target-terminal-task")
+        task.status = TaskStatus.FAILED.value
+        db.commit()
+    settings = get_settings()
+    target_directories = (
+        settings.uploads_dir / str(target.id),
+        settings.outputs_dir / str(target.id),
+        settings.staged_assets_dir / str(target.id),
+        settings.voice_sources_dir / str(target.id),
+        settings.voice_creations_dir / str(target.id),
+    )
+    survivor_directory = settings.uploads_dir / str(survivor.id)
+    for directory in target_directories:
+        directory.mkdir(parents=True)
+        (directory / "owned.txt").write_text("target", encoding="utf-8")
+    survivor_directory.mkdir(parents=True)
+    (survivor_directory / "keep.txt").write_text("survivor", encoding="utf-8")
+
+    login(client, admin.username)
+    response = client.post(
+        f"/admin/users/{target.id}/delete",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        assert db.get(User, target.id) is None
+        assert db.get(User, survivor.id) is not None
+    assert all(not directory.exists() for directory in target_directories)
+    assert (survivor_directory / "keep.txt").read_text(encoding="utf-8") == "survivor"
+
+
+def test_admin_cannot_delete_self_or_account_with_active_task(client):
+    admin = create_user("protected-admin", is_admin=True)
+    target = create_user("busy-target")
+    _make_task(target.id, "busy-target-task")
+    login(client, admin.username)
+
+    self_delete = client.post(
+        f"/admin/users/{admin.id}/delete",
+        follow_redirects=False,
+    )
+    busy_delete = client.post(
+        f"/admin/users/{target.id}/delete",
+        follow_redirects=False,
+    )
+
+    assert self_delete.status_code == 409
+    assert "不能删除当前登录" in self_delete.text
+    assert busy_delete.status_code == 409
+    assert "运行中任务" in busy_delete.text
+    with SessionLocal() as db:
+        assert db.get(User, admin.id) is not None
+        assert db.get(User, target.id) is not None
 
 
 def test_admin_encrypts_preserves_and_clears_ltx_access_password(client):
