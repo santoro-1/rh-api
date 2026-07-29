@@ -52,15 +52,19 @@ function Invoke-RemoteScript {
         [Text.Encoding]::UTF8.GetBytes($normalizedScript)
     )
     $previousErrorAction = $ErrorActionPreference
+    $previousOutputEncoding = [Console]::OutputEncoding
     $ErrorActionPreference = "Continue"
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
     try {
-        $output = & ssh -i $SshKey -o BatchMode=yes -o ConnectTimeout=10 `
+        $output = & ssh -n -T -i $SshKey `
+            -o BatchMode=yes -o ConnectTimeout=10 `
             -o ConnectionAttempts=1 -o ServerAliveInterval=5 `
             -o ServerAliveCountMax=3 `
             $Server "printf %s $encoded | base64 -d | bash" 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorAction
+        [Console]::OutputEncoding = $previousOutputEncoding
     }
     if ($exitCode -ne 0) {
         throw "$Description 失败：`n$($output -join [Environment]::NewLine)"

@@ -132,6 +132,8 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert '"/var/backups/runninghub-video"' in updater
     assert "Assert-QueuesIdle" in updater
     assert '$Script.Replace("`r`n", "`n").Replace("`r", "`n")' in updater
+    assert "& ssh -n -T -i $SshKey" in updater
+    assert "[Console]::OutputEncoding" in updater
     assert "--max-time 8" in updater
     assert "ServerAliveCountMax=3" in updater
     assert "install -d -m 700 -o '$LinuxUser' -g '$LinuxUser'" in updater
