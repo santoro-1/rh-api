@@ -21,7 +21,7 @@ from app.models import (
     User,
     VoiceAssetStatus,
 )
-from app.services.audio import format_timecode, inspect_audio_duration
+from app.services.audio import format_duration_timecode, inspect_audio_duration
 from app.services.batch_assets import load_available_assets
 from app.services.batch_manifests import (
     DIGITAL_HUMAN_WORKFLOW,
@@ -491,7 +491,7 @@ def validate_batch(
                     ),
                     # Batch generation always uses the complete uploaded audio.
                     "start_time": "0:00",
-                    "end_time": format_timecode(duration),
+                    "end_time": format_duration_timecode(duration),
                     "resolution": batch_resolution,
                     "person_mode": batch_person_mode,
                     "instance_type": "default",

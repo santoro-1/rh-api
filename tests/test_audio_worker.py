@@ -175,7 +175,7 @@ def test_audio_worker_activates_voices_and_hands_off_to_video_queue(
         task_input = json.loads(video_task.input_payload)
         assert audio_task.status == "SUCCESS"
         assert video_task.status == "PENDING"
-        assert task_input["parameters"]["end_time"] == "0:08"
+        assert task_input["parameters"]["end_time"] == "0:09"
         assert task_input["parameters"]["person_mode"] == "1"
         assert segment.generation_task.id == video_task.id
         assert segment.script_text.startswith("欢迎使用")

@@ -1,9 +1,10 @@
 (() => {
   "use strict";
 
-  // Service keys are API field names and DOM identifiers. Keep this list in
-  // sync with LOG_FILES in app/routes/operations.py.
-  const serviceKeys = ["web", "audio_worker", "video_worker", "launcher"];
+  // The server renders only services relevant to the current environment.
+  const serviceKeys = [
+    ...document.querySelectorAll("[data-service-card]"),
+  ].map((element) => element.dataset.serviceCard);
   const logElements = new Map(
     [...document.querySelectorAll("[data-log-service]")].map((element) => [
       element.dataset.logService,

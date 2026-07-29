@@ -97,6 +97,9 @@ def voice_studio_page(
             ),
             "voice_tasks": tasks,
             "voices": voices,
+            "temporary_voice_retention_hours": (
+                get_settings().temporary_voice_retention_hours
+            ),
             "has_active_tasks": any(
                 task.status in ACTIVE_CREATION_STATUSES for task in tasks
             ),

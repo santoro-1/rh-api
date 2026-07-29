@@ -32,6 +32,12 @@ LOG_FILES = {
     "video_worker": "video_worker.log",
     "launcher": "launcher.log",
 }
+SERVICE_LABELS = {
+    "web": "Web",
+    "audio_worker": "语音 Worker",
+    "video_worker": "视频 Worker",
+    "launcher": "本地总控",
+}
 # Successful background requests are useful in raw server logs but are not
 # operator events and must not flood the live admin stream.
 _DISPLAY_NOISE_PATTERNS = (
@@ -236,7 +242,7 @@ def _search_log_history(
 
 
 def _service_snapshot() -> dict[str, dict[str, object]]:
-    return {
+    services = {
         "web": {
             "online": True,
             "updatedAt": datetime.now(timezone.utc).isoformat(),
@@ -244,6 +250,28 @@ def _service_snapshot() -> dict[str, dict[str, object]]:
         "audio_worker": _heartbeat("audio_worker"),
         "video_worker": _heartbeat("video_worker"),
         "launcher": _heartbeat("launcher"),
+    }
+    return {
+        key: services[key]
+        for key, _label in _service_options()
+    }
+
+
+def _service_options() -> tuple[tuple[str, str], ...]:
+    """Hide the Windows-only launcher from systemd production deployments."""
+
+    keys = (
+        ("web", "audio_worker", "video_worker")
+        if get_settings().app_env == "production"
+        else tuple(LOG_FILES)
+    )
+    return tuple((key, SERVICE_LABELS[key]) for key in keys)
+
+
+def _visible_log_files() -> dict[str, str]:
+    return {
+        key: LOG_FILES[key]
+        for key, _label in _service_options()
     }
 
 
@@ -309,12 +337,13 @@ def operations_page(
 ):
     queue = _queue_snapshot(db)
     services = _service_snapshot()
+    visible_log_files = _visible_log_files()
     logs = {
         name: _read_log_chunk(
             get_settings().logs_dir / filename,
             None,
         )
-        for name, filename in LOG_FILES.items()
+        for name, filename in visible_log_files.items()
     }
     users = db.scalars(select(User).order_by(User.username)).all()
     selected_user = db.get(User, account_id) if account_id else None
@@ -343,6 +372,7 @@ def operations_page(
         {
             "current_user": current_user,
             "services": services,
+            "service_options": _service_options(),
             "video_counts": queue["videoCounts"],
             "audio_counts": queue["audioCounts"],
             "video_active": queue["videoActive"],
@@ -383,6 +413,7 @@ def operations_updates(
         "video_worker": video_worker,
         "launcher": launcher,
     }
+    visible_log_files = _visible_log_files()
     return {
         "services": _service_snapshot(),
         "queue": _queue_snapshot(db),
@@ -392,7 +423,7 @@ def operations_updates(
                 get_settings().logs_dir / filename,
                 cursors[service],
             )
-            for service, filename in LOG_FILES.items()
+            for service, filename in visible_log_files.items()
         },
     }
 

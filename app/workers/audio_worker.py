@@ -23,7 +23,7 @@ from app.models import (
     User,
     VoiceAssetStatus,
 )
-from app.services.audio import format_timecode, inspect_audio_duration
+from app.services.audio import format_duration_timecode, inspect_audio_duration
 from app.services.logging_config import (
     configure_logging,
     log_event,
@@ -552,7 +552,7 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
             segment_parameters = {
                 **parameters,
                 "start_time": "0:00",
-                "end_time": format_timecode(segment_duration),
+                "end_time": format_duration_timecode(segment_duration),
                 "person_mode": "1",
                 "instance_type": "default",
             }

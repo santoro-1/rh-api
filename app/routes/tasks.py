@@ -21,7 +21,7 @@ from app.routes.dependencies import (
 )
 from app.services.audio import (
     AudioInspectionError,
-    format_timecode,
+    format_duration_timecode,
     inspect_audio_duration,
     validate_time_range,
 )
@@ -188,7 +188,7 @@ def inspect_audio(
     try:
         saved_path, _ = save_upload(audio, temporary_dir, "audio", settings)
         duration = inspect_audio_duration(saved_path)
-        end_text = format_timecode(duration)
+        end_text = format_duration_timecode(duration)
         if duration < 1:
             raise AudioInspectionError("音频时长不足 1 秒，无法生成视频")
         if duration > MAX_SEGMENT_SECONDS + 0.01:

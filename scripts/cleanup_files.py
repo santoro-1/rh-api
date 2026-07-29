@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -112,6 +112,42 @@ def main() -> None:
         failed_voice_cutoff = now - timedelta(
             hours=settings.temporary_voice_retention_hours
         )
+        expired_preview_tasks = db.scalars(
+            select(VoiceCreationTask).where(
+                VoiceCreationTask.status
+                == VoiceCreationStatus.PREVIEW_READY.value,
+                VoiceCreationTask.voice_asset_id.is_(None),
+                func.coalesce(
+                    VoiceCreationTask.completed_at,
+                    VoiceCreationTask.updated_at,
+                )
+                < failed_voice_cutoff,
+            )
+        ).all()
+        for voice_task in expired_preview_tasks:
+            db.refresh(voice_task)
+            if (
+                voice_task.status
+                != VoiceCreationStatus.PREVIEW_READY.value
+                or voice_task.voice_asset_id is not None
+            ):
+                continue
+            remove_directory(
+                voice_creation_dir(
+                    settings,
+                    voice_task.user_id,
+                    voice_task.id,
+                )
+            )
+            voice_task.source_a_relative_path = ""
+            voice_task.source_b_relative_path = None
+            voice_task.preview_relative_path = None
+            voice_task.status = VoiceCreationStatus.EXPIRED.value
+            voice_task.error_code = "PREVIEW_EXPIRED"
+            voice_task.error_message = "试听超过保留期限且未保存，文件已自动清理"
+            voice_task.completed_at = now
+            removed_voice_sources += 1
+
         failed_voice_tasks = db.scalars(
             select(VoiceCreationTask).where(
                 VoiceCreationTask.status == VoiceCreationStatus.FAILED.value,

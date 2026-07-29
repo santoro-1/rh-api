@@ -257,6 +257,7 @@ def _process_clone_preview(
         preview, get_settings()
     )
     task.status = VoiceCreationStatus.PREVIEW_READY.value
+    task.completed_at = _now()
     db.commit()
     log_event(
         logger,
@@ -316,6 +317,7 @@ def _process_mix_preview(
         preview, get_settings()
     )
     task.status = VoiceCreationStatus.PREVIEW_READY.value
+    task.completed_at = _now()
     db.commit()
     log_event(
         logger,
@@ -405,6 +407,7 @@ def process_voice_task(db: Session, task_id: str) -> None:
     if task is None or task.status in {
         VoiceCreationStatus.PREVIEW_READY.value,
         VoiceCreationStatus.SAVED.value,
+        VoiceCreationStatus.EXPIRED.value,
         VoiceCreationStatus.FAILED.value,
     }:
         return

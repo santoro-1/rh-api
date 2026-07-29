@@ -2,12 +2,23 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import MiniMaxVoiceAsset, RunningHubConfig, User, VoiceAssetStatus
+from app.models import (
+    AudioGenerationTask,
+    AudioTaskStatus,
+    GenerationTask,
+    MiniMaxVoiceAsset,
+    RunningHubConfig,
+    TaskStatus,
+    User,
+    VoiceAssetStatus,
+    VoiceCreationStatus,
+    VoiceCreationTask,
+)
 from app.routes.dependencies import get_page_admin
 from app.services.csrf import require_csrf
 from app.services.security import (
@@ -19,6 +30,7 @@ from app.services.security import (
 from app.services.speech.accounts import save_minimax_config
 from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient
 from app.services.speech.system_voices import sync_system_voices
+from app.services.storage import remove_directory
 from app.services.workflow_configs import (
     get_user_workflow_config,
     save_workflow_config,
@@ -29,6 +41,29 @@ from app.workflows import get_workflow
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 LTX_DEFAULT_PROMPT = get_workflow("ltx_lip_sync").default_prompt
+ACTIVE_VIDEO_STATUSES = {
+    TaskStatus.PENDING.value,
+    TaskStatus.UPLOADING.value,
+    TaskStatus.SUBMITTED.value,
+    TaskStatus.RUNNING.value,
+}
+ACTIVE_AUDIO_STATUSES = {
+    AudioTaskStatus.PENDING.value,
+    AudioTaskStatus.CLONING.value,
+    AudioTaskStatus.SYNTHESIZING.value,
+    AudioTaskStatus.REMOTE_PENDING.value,
+    AudioTaskStatus.AWAITING_REVIEW.value,
+    AudioTaskStatus.ALIGNING.value,
+    AudioTaskStatus.SEGMENTING.value,
+    AudioTaskStatus.HANDOFF.value,
+}
+ACTIVE_VOICE_CREATION_STATUSES = {
+    VoiceCreationStatus.PENDING.value,
+    VoiceCreationStatus.CLONING.value,
+    VoiceCreationStatus.SYNTHESIZING.value,
+    VoiceCreationStatus.SAVE_PENDING.value,
+    VoiceCreationStatus.SAVING.value,
+}
 
 
 def _validate_config(base_url: str, ai_app_id: str, instance_type: str, max_tasks: int) -> None:
@@ -391,6 +426,76 @@ def update_user(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse("/admin/users", status_code=303)
+
+
+@router.post("/users/{user_id}/delete")
+def delete_user(
+    user_id: int,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    """Delete one account and only its own database records/files."""
+
+    if user_id == current_user.id:
+        raise HTTPException(status_code=409, detail="不能删除当前登录的管理员账号")
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    active_counts = {
+        "视频": db.scalar(
+            select(func.count(GenerationTask.id)).where(
+                GenerationTask.user_id == user_id,
+                GenerationTask.status.in_(ACTIVE_VIDEO_STATUSES),
+            )
+        )
+        or 0,
+        "语音": db.scalar(
+            select(func.count(AudioGenerationTask.id)).where(
+                AudioGenerationTask.user_id == user_id,
+                AudioGenerationTask.status.in_(ACTIVE_AUDIO_STATUSES),
+            )
+        )
+        or 0,
+        "音色制作": db.scalar(
+            select(func.count(VoiceCreationTask.id)).where(
+                VoiceCreationTask.user_id == user_id,
+                VoiceCreationTask.status.in_(ACTIVE_VOICE_CREATION_STATUSES),
+            )
+        )
+        or 0,
+    }
+    active_summary = "、".join(
+        f"{label} {count} 个"
+        for label, count in active_counts.items()
+        if count
+    )
+    if active_summary:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该账号仍有运行中任务（{active_summary}），不能删除",
+        )
+
+    settings = get_settings()
+    user_directories = (
+        settings.uploads_dir / str(user_id),
+        settings.outputs_dir / str(user_id),
+        settings.staged_assets_dir / str(user_id),
+        settings.voice_sources_dir / str(user_id),
+        settings.voice_creations_dir / str(user_id),
+    )
+    db.delete(user)
+    db.commit()
+    try:
+        for directory in user_directories:
+            remove_directory(directory)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="账号记录已删除，但该账号的部分本地文件清理失败",
+        ) from exc
+    return RedirectResponse("/admin/users?deleted=1", status_code=303)
 
 
 @router.post("/users/{user_id}/system-voices/sync")

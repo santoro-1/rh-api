@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 import logging
@@ -35,6 +36,14 @@ def format_timecode(seconds: float) -> str:
     return f"{whole_seconds // 60}:{whole_seconds % 60:02d}"
 
 
+def format_duration_timecode(seconds: float) -> str:
+    """Format a complete media duration without dropping a fractional tail."""
+    if seconds < 0:
+        raise ValueError("秒数不能小于 0")
+    whole_seconds = math.ceil(seconds)
+    return f"{whole_seconds // 60}:{whole_seconds % 60:02d}"
+
+
 def validate_time_range(
     start_time: str, end_time: str, duration_seconds: float
 ) -> tuple[float, float]:
@@ -44,8 +53,9 @@ def validate_time_range(
         raise ValueError("开始时间不能小于 0")
     if end_seconds <= start_seconds:
         raise ValueError("结束时间必须大于开始时间")
-    # Allow a small ffprobe floating point tolerance, but never a meaningful overflow.
-    if end_seconds > duration_seconds + 0.01:
+    # The public timecode has whole-second precision. Allow the exact ceiling
+    # of the media duration so a fractional final second is not cut off.
+    if end_seconds > math.ceil(duration_seconds):
         raise ValueError("结束时间不能超过音频实际时长")
     return start_seconds, end_seconds
 

@@ -145,7 +145,7 @@
 <section class="panel">
   <div class="panel-heading">
     <h2>制作记录与试听</h2>
-    <p class="muted">试听成功后仍需点击“保存为可用音色”，批量页面才会出现它。</p>
+    <p class="muted">试听成功后仍需点击“保存为可用音色”，批量页面才会出现它。未保存试听在 {{ temporary_voice_retention_hours }} 小时后进入每日清理，最迟约 {{ temporary_voice_retention_hours + 24 }} 小时自动删除。</p>
   </div>
   <div class="voice-task-list">
     {% for task in voice_tasks %}
@@ -160,13 +160,14 @@
             {% elif task.status == "PREVIEW_READY" %}试听已生成，等待保存
             {% elif task.status in ["SAVE_PENDING", "SAVING"] %}正在保存最终音色
             {% elif task.status == "SAVED" %}已保存，可用于批量生成
+            {% elif task.status == "EXPIRED" %}试听已过期并自动清理
             {% else %}制作失败{% endif %}
             · {{ task.created_at|beijing_datetime }}
           </p>
           {% if task.error_message %}<p class="error compact-error">{{ task.error_message }}</p>{% endif %}
         </div>
         <div class="voice-task-actions">
-          {% if task.preview_relative_path %}
+          {% if task.preview_relative_path and task.status != "EXPIRED" %}
             <audio controls preload="none" src="/api/voice-creations/{{ task.id }}/preview"></audio>
           {% endif %}
           {% if task.status == "PREVIEW_READY" %}

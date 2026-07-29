@@ -8,7 +8,12 @@ import pytest
 from app.config import get_settings
 from app.routes.operations import _read_log_chunk, _tail
 from app.services import audio
-from app.services.audio import format_timecode, parse_timecode, validate_time_range
+from app.services.audio import (
+    format_duration_timecode,
+    format_timecode,
+    parse_timecode,
+    validate_time_range,
+)
 from app.services.logging_config import SecretRedactionFilter
 from app.services.security import decrypt_secret, encrypt_secret, hash_password, verify_password
 
@@ -17,6 +22,9 @@ def test_timecode_parsing_and_formatting():
     assert parse_timecode("1:05") == 65
     assert format_timecode(65.8) == "1:05"
     assert format_timecode(0) == "0:00"
+    assert format_duration_timecode(28.0) == "0:28"
+    assert format_duration_timecode(28.1) == "0:29"
+    assert format_duration_timecode(65.8) == "1:06"
     with pytest.raises(ValueError):
         parse_timecode("1:60")
     with pytest.raises(ValueError):
@@ -25,10 +33,11 @@ def test_timecode_parsing_and_formatting():
 
 def test_time_range_validation():
     assert validate_time_range("0:00", "0:15", 15.7) == (0, 15)
+    assert validate_time_range("0:00", "0:16", 15.1) == (0, 16)
     with pytest.raises(ValueError):
         validate_time_range("0:15", "0:15", 20)
     with pytest.raises(ValueError):
-        validate_time_range("0:00", "0:16", 15.1)
+        validate_time_range("0:00", "0:17", 15.1)
 
 
 def test_password_hash_and_encrypted_secret_round_trip():

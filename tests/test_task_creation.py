@@ -38,6 +38,31 @@ def test_old_ltx_page_redirects_to_unified_generate_page(client):
     assert response.headers["location"] == "/generate?workflow=ltx_lip_sync"
 
 
+def test_audio_inspection_rounds_fractional_duration_up(client, monkeypatch):
+    create_user("duration-rounding-user")
+    login(client, "duration-rounding-user")
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_audio_duration",
+        lambda path: 28.1,
+    )
+
+    response = client.post(
+        "/api/audio/inspect",
+        files={
+            "audio": (
+                "fractional.mp3",
+                b"ID3audio-payload",
+                "audio/mpeg",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["durationSeconds"] == 28.1
+    assert response.json()["durationText"] == "0:29"
+    assert response.json()["suggestedEndTime"] == "0:29"
+
+
 def test_direct_audio_inspection_rejects_more_than_45_seconds(
     client,
     monkeypatch,
