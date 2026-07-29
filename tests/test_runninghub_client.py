@@ -66,6 +66,98 @@ def test_upload_rejects_missing_filename():
         client.upload_file(media)
 
 
+def test_upload_surfaces_business_error_message():
+    media = _test_media_path("invalid-key.png")
+    media.write_bytes(b"x")
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "app-1",
+        FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {"code": 1, "msg": "API Key不存在", "data": None},
+                )
+            ]
+        ),
+    )
+    with pytest.raises(RunningHubError, match="API Key不存在"):
+        client.upload_file(media)
+
+
+def test_account_status_returns_current_task_count_without_exposing_key():
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "msg": "success",
+                    "data": {"currentTaskCounts": "1"},
+                },
+            )
+        ]
+    )
+    client = RunningHubClient("secret", "https://rh.example", "app-1", session)
+    assert client.get_account_current_task_count() == 1
+    _, kwargs = session.calls[0]
+    assert kwargs["json"] == {"apikey": "secret"}
+    assert session.calls[0][0][0] == "https://rh.example/uc/openapi/accountStatus"
+
+
+def test_submit_identifies_remote_capacity_limit():
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "app-1",
+        FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "errorCode": "421",
+                        "errorMessage": (
+                            "api queue limit reached, please retry later | "
+                            "API 并发数已达上线，请降低并发或稍后重试"
+                        ),
+                    },
+                )
+            ]
+        ),
+    )
+    with pytest.raises(RunningHubError) as error:
+        client.submit_task({"nodeInfoList": []})
+    assert error.value.is_capacity_limited is True
+
+
+def test_query_identifies_remote_task_not_found():
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "app-1",
+        FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "taskId": "missing-task",
+                        "status": "",
+                        "errorCode": "1004",
+                        "errorMessage": (
+                            "Task not found, please check the task ID | "
+                            "任务不存在或已过期，请检查任务ID"
+                        ),
+                    },
+                )
+            ]
+        ),
+    )
+    with pytest.raises(RunningHubError) as error:
+        client.query_task("missing-task")
+    assert error.value.is_task_not_found is True
+
+
 def test_query_preserves_usage_null():
     client = RunningHubClient(
         "secret",

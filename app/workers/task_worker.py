@@ -26,6 +26,8 @@ from app.workflows.base import WorkflowAdapter, resolve_asset_path
 
 
 logger = logging.getLogger(__name__)
+REMOTE_CAPACITY_RECHECK_SECONDS = 180.0
+_capacity_check_after: dict[int, float] = {}
 
 # Only these remote-work states consume a user's configured concurrency slot.
 # PENDING remains in the shared FIFO but does not occupy RunningHub capacity.
@@ -38,6 +40,24 @@ SLOT_OCCUPYING_TASK_STATUSES = (
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _capacity_check_is_deferred(user_id: int) -> bool:
+    deadline = _capacity_check_after.get(user_id)
+    if deadline is None:
+        return False
+    if deadline <= time.monotonic():
+        _capacity_check_after.pop(user_id, None)
+        return False
+    return True
+
+
+def _defer_capacity_check(user_id: int, seconds: float) -> None:
+    _capacity_check_after[user_id] = time.monotonic() + max(seconds, 0.0)
+
+
+def _allow_immediate_capacity_check(user_id: int) -> None:
+    _capacity_check_after.pop(user_id, None)
 
 
 def _video_log_context(task: GenerationTask) -> dict[str, object]:
@@ -72,6 +92,24 @@ def _mark_failed(task: GenerationTask, code: str, message: str) -> None:
         level=logging.WARNING,
         workflow=task.workflow_type,
         error_code=code,
+        error=message,
+        **_video_log_context(task),
+    )
+
+
+def _mark_remote_cancelled(task: GenerationTask, message: str) -> None:
+    """Close a task that RunningHub no longer exposes after manual cancel."""
+
+    task.status = TaskStatus.CANCELLED.value
+    task.error_code = "REMOTE_TASK_NOT_FOUND"
+    task.error_message = message
+    task.completed_at = _now()
+    log_event(
+        logger,
+        "video.cancelled",
+        "RunningHub 任务已不存在，本地任务已结束",
+        level=logging.WARNING,
+        runninghub_task_id=task.runninghub_task_id,
         error=message,
         **_video_log_context(task),
     )
@@ -131,6 +169,8 @@ def claim_next_pending_task(db: Session) -> str | None:
         .order_by(GenerationTask.created_at)
     ).all()
     for task_id, user_id in pending_tasks:
+        if _capacity_check_is_deferred(user_id):
+            continue
         limit = max(int(concurrency_limits.get(user_id, 1)), 1)
         if int(active_counts.get(user_id, 0)) >= limit:
             continue
@@ -181,6 +221,13 @@ def _handle_remote_status(
     try:
         result = client.query_task(task.runninghub_task_id)
     except RunningHubError as exc:
+        if exc.is_task_not_found:
+            _mark_remote_cancelled(
+                task,
+                "RunningHub 返回任务不存在或已过期，可能已在平台手动取消",
+            )
+            db.commit()
+            return
         # A query failure must never lead to a second paid submission.
         changed = (
             task.error_code != "QUERY_ERROR"
@@ -287,6 +334,66 @@ def _handle_remote_status(
     )
 
 
+def _return_to_capacity_queue(
+    db: Session,
+    task: GenerationTask,
+    *,
+    reason: str,
+    event_code: str,
+    level: int = logging.INFO,
+    remote_current_tasks: int | None = None,
+    concurrency_limit: int | None = None,
+) -> None:
+    task.status = TaskStatus.PENDING.value
+    task.error_code = None
+    task.error_message = None
+    task.completed_at = None
+    _defer_capacity_check(task.user_id, REMOTE_CAPACITY_RECHECK_SECONDS)
+    db.commit()
+    log_event(
+        logger,
+        event_code,
+        reason,
+        level=level,
+        remote_current_tasks=remote_current_tasks,
+        concurrency_limit=concurrency_limit,
+        retry_after_seconds=int(REMOTE_CAPACITY_RECHECK_SECONDS),
+        **_video_log_context(task),
+    )
+
+
+def _remote_capacity_is_available(
+    db: Session,
+    task: GenerationTask,
+    client: RunningHubClient,
+    config: RunningHubConfig,
+) -> bool:
+    limit = max(int(config.max_concurrent_tasks), 1)
+    try:
+        current_tasks = client.get_account_current_task_count()
+    except RunningHubError as exc:
+        _return_to_capacity_queue(
+            db,
+            task,
+            reason="读取 RunningHub 账号并发状态失败，任务将保留排队",
+            event_code="video.capacity_check_error",
+            level=logging.WARNING,
+        )
+        logger.warning("RunningHub 容量检查失败：%s", exc)
+        return False
+    if current_tasks >= limit:
+        _return_to_capacity_queue(
+            db,
+            task,
+            reason="RunningHub 账号并发已满，任务将保留排队",
+            event_code="video.capacity_waiting",
+            remote_current_tasks=current_tasks,
+            concurrency_limit=limit,
+        )
+        return False
+    return True
+
+
 def process_task(db: Session, task_id: str) -> None:
     task = _load_task(db, task_id)
     if not task or task.status in {
@@ -313,6 +420,7 @@ def process_task(db: Session, task_id: str) -> None:
     if task.runninghub_task_id and _has_timed_out(task):
         _mark_failed(task, "TASK_TIMEOUT", "RunningHub 任务超过允许的最长等待时间")
         db.commit()
+        _allow_immediate_capacity_check(task.user_id)
         return
     try:
         client = _make_client(task.user.runninghub_config)
@@ -327,6 +435,16 @@ def process_task(db: Session, task_id: str) -> None:
 
     if task.runninghub_task_id:
         _handle_remote_status(db, task, client, workflow)
+        if task.status not in SLOT_OCCUPYING_TASK_STATUSES:
+            _allow_immediate_capacity_check(task.user_id)
+        return
+
+    if not _remote_capacity_is_available(
+        db,
+        task,
+        client,
+        task.user.runninghub_config,
+    ):
         return
 
     try:
@@ -365,7 +483,21 @@ def process_task(db: Session, task_id: str) -> None:
             runninghub_task_id=remote_task_id,
             **_video_log_context(task),
         )
-    except (OSError, ValueError, RunningHubError) as exc:
+        # Let RunningHub accountStatus catch up before considering another
+        # task for this user. Other users remain eligible in the same pass.
+        _defer_capacity_check(task.user_id, get_settings().poll_interval_seconds)
+    except RunningHubError as exc:
+        if exc.is_capacity_limited:
+            _return_to_capacity_queue(
+                db,
+                task,
+                reason="RunningHub 在提交时报告并发已满，任务将保留排队",
+                event_code="video.capacity_waiting",
+            )
+            return
+        _mark_failed(task, "SUBMIT_FAILED", str(exc))
+        db.commit()
+    except (OSError, ValueError) as exc:
         _mark_failed(task, "SUBMIT_FAILED", str(exc))
         db.commit()
 
@@ -407,6 +539,7 @@ def main() -> None:
         "video.worker_started",
         "视频 Worker 已启动",
         poll_interval_seconds=settings.poll_interval_seconds,
+        capacity_recheck_seconds=int(REMOTE_CAPACITY_RECHECK_SECONDS),
     )
     while True:
         try:
