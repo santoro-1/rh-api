@@ -288,7 +288,7 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
     $backupScript = @"
 set -euo pipefail
 umask 077
-install -d -m 700 '$script:RemoteTemp'
+install -d -m 700 -o '$LinuxUser' -g '$LinuxUser' '$script:RemoteTemp'
 sudo -u '$LinuxUser' /bin/bash '$AppDir/deploy/scripts/backup.sh'
 code_backup='$BackupDir/runninghub-video-code-pre-$shortCommit-$timestamp.tar.gz'
 tar -C '$AppDir' \
@@ -322,6 +322,12 @@ echo "代码备份：`$code_backup"
 set -euo pipefail
 actual=`$(sha256sum '$script:RemoteTemp/release.tar' | awk '{print `$1}')
 test "`$actual" = '$archiveHash'
+chown '${LinuxUser}:$LinuxUser' \
+  '$script:RemoteTemp/release.tar' \
+  '$script:RemoteTemp/added-files.txt'
+chmod 600 \
+  '$script:RemoteTemp/release.tar' \
+  '$script:RemoteTemp/added-files.txt'
 install -d -m 700 -o '$LinuxUser' -g '$LinuxUser' '$script:RemoteTemp/stage'
 sudo -u '$LinuxUser' tar -C '$script:RemoteTemp/stage' -xf '$script:RemoteTemp/release.tar'
 ln -s '$AppDir/.env' '$script:RemoteTemp/stage/.env'
