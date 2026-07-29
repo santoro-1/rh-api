@@ -55,6 +55,7 @@ class VoiceAssetStatus(str, Enum):
     CLONED = "CLONED"
     READY = "READY"
     ACTIVE = "ACTIVE"
+    HIDDEN = "HIDDEN"
     FAILED = "FAILED"
 
 
@@ -215,6 +216,7 @@ class MiniMaxVoiceAsset(Base):
     method: Mapped[str] = mapped_column(
         String(20), nullable=False, default="legacy"
     )
+    category: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     is_saved: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )

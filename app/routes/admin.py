@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -21,6 +23,7 @@ from app.models import (
 )
 from app.routes.dependencies import get_page_admin
 from app.services.csrf import require_csrf
+from app.services.logging_config import log_event
 from app.services.security import (
     decrypt_secret,
     encrypt_secret,
@@ -29,7 +32,10 @@ from app.services.security import (
 )
 from app.services.speech.accounts import save_minimax_config
 from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient
-from app.services.speech.system_voices import sync_system_voices
+from app.services.speech.system_voices import (
+    group_system_voice_assets,
+    sync_system_voices,
+)
 from app.services.storage import remove_directory
 from app.services.workflow_configs import (
     get_user_workflow_config,
@@ -40,6 +46,7 @@ from app.workflows import get_workflow
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+logger = logging.getLogger(__name__)
 LTX_DEFAULT_PROMPT = get_workflow("ltx_lip_sync").default_prompt
 ACTIVE_VIDEO_STATUSES = {
     TaskStatus.PENDING.value,
@@ -64,6 +71,80 @@ ACTIVE_VOICE_CREATION_STATUSES = {
     VoiceCreationStatus.SAVE_PENDING.value,
     VoiceCreationStatus.SAVING.value,
 }
+
+
+def _voice_management_context(user: User) -> dict[str, object]:
+    config = user.minimax_config
+    if config is None:
+        return {
+            "system_voice_groups": [],
+            "hidden_system_voice_groups": [],
+            "custom_minimax_voices": [],
+            "system_voice_count": 0,
+            "hidden_system_voice_count": 0,
+        }
+    current_voices = [
+        voice
+        for voice in user.minimax_voices
+        if voice.account_binding_id == config.account_binding_id
+    ]
+    active = [
+        voice
+        for voice in current_voices
+        if voice.is_saved
+        and voice.status
+        in {
+            VoiceAssetStatus.READY.value,
+            VoiceAssetStatus.ACTIVE.value,
+        }
+    ]
+    system_voices = [voice for voice in active if voice.method == "system"]
+    hidden_system_voices = [
+        voice
+        for voice in current_voices
+        if voice.method == "system"
+        and voice.status == VoiceAssetStatus.HIDDEN.value
+    ]
+    return {
+        "system_voice_groups": group_system_voice_assets(system_voices),
+        "hidden_system_voice_groups": group_system_voice_assets(
+            hidden_system_voices
+        ),
+        "custom_minimax_voices": [
+            voice for voice in active if voice.method != "system"
+        ],
+        "system_voice_count": len(system_voices),
+        "hidden_system_voice_count": len(hidden_system_voices),
+    }
+
+
+def _system_voice_for_admin(
+    db: Session,
+    user_id: int,
+    voice_asset_id: str,
+) -> tuple[User, MiniMaxVoiceAsset]:
+    user = db.scalar(
+        select(User)
+        .options(selectinload(User.minimax_config))
+        .where(User.id == user_id)
+    )
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    config = user.minimax_config
+    voice = db.scalar(
+        select(MiniMaxVoiceAsset).where(
+            MiniMaxVoiceAsset.id == voice_asset_id,
+            MiniMaxVoiceAsset.user_id == user_id,
+            MiniMaxVoiceAsset.method == "system",
+        )
+    )
+    if (
+        voice is None
+        or config is None
+        or voice.account_binding_id != config.account_binding_id
+    ):
+        raise HTTPException(status_code=404, detail="官方音色不存在")
+    return user, voice
 
 
 def _validate_config(base_url: str, ai_app_id: str, instance_type: str, max_tasks: int) -> None:
@@ -220,7 +301,11 @@ def new_user_page(
                 "requests_per_minute": 20,
                 "account_label": "MiniMax 账号",
             },
-            "active_minimax_voices": [],
+            "system_voice_groups": [],
+            "hidden_system_voice_groups": [],
+            "custom_minimax_voices": [],
+            "system_voice_count": 0,
+            "hidden_system_voice_count": 0,
         },
     )
 
@@ -333,19 +418,7 @@ def edit_user_page(
                 "requests_per_minute": 20,
                 "account_label": "MiniMax 账号",
             },
-            "active_minimax_voices": [
-                voice
-                for voice in user.minimax_voices
-                if voice.is_saved
-                and voice.status
-                in {
-                    VoiceAssetStatus.READY.value,
-                    VoiceAssetStatus.ACTIVE.value,
-                }
-                and user.minimax_config is not None
-                and voice.account_binding_id
-                == user.minimax_config.account_binding_id
-            ],
+            **_voice_management_context(user),
         },
     )
 
@@ -548,8 +621,92 @@ def sync_user_system_voices(
         db.commit()
     except (MiniMaxAPIError, OSError, ValueError) as exc:
         db.rollback()
+        log_event(
+            logger,
+            "voice.system_sync_failed",
+            "同步 MiniMax 官方音色失败",
+            level=logging.WARNING,
+            user_id=user.id,
+            username=user.username,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return RedirectResponse(
         f"/admin/users/{user_id}?system_voice_count={len(saved)}",
+        status_code=303,
+    )
+
+
+@router.post("/users/{user_id}/system-voices/{voice_asset_id}/delete")
+def delete_user_system_voice(
+    user_id: int,
+    voice_asset_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    _: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    """Hide one provider voice locally without touching MiniMax's catalogue."""
+
+    user, voice = _system_voice_for_admin(db, user_id, voice_asset_id)
+    active_references = db.scalar(
+        select(func.count(AudioGenerationTask.id)).where(
+            AudioGenerationTask.user_id == user_id,
+            AudioGenerationTask.status.in_(ACTIVE_AUDIO_STATUSES),
+            or_(
+                AudioGenerationTask.voice_a_id == voice.id,
+                AudioGenerationTask.voice_b_id == voice.id,
+                AudioGenerationTask.voice_asset_id == voice.id,
+            ),
+        )
+    ) or 0
+    if active_references:
+        raise HTTPException(
+            status_code=409,
+            detail="该官方音色仍被运行中的语音任务使用，暂时不能删除",
+        )
+    voice.status = VoiceAssetStatus.HIDDEN.value
+    voice.is_saved = False
+    db.commit()
+    log_event(
+        logger,
+        "voice.system_deleted",
+        "管理员从站内账号删除官方音色",
+        user_id=user.id,
+        username=user.username,
+        voice_asset_id=voice.id,
+        voice_id=voice.voice_id,
+    )
+    return RedirectResponse(
+        f"/admin/users/{user_id}?system_voice_deleted=1",
+        status_code=303,
+    )
+
+
+@router.post("/users/{user_id}/system-voices/{voice_asset_id}/restore")
+def restore_user_system_voice(
+    user_id: int,
+    voice_asset_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    _: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    """Restore one locally hidden provider voice."""
+
+    user, voice = _system_voice_for_admin(db, user_id, voice_asset_id)
+    voice.status = VoiceAssetStatus.ACTIVE.value
+    voice.is_saved = True
+    db.commit()
+    log_event(
+        logger,
+        "voice.system_restored",
+        "管理员恢复站内官方音色",
+        user_id=user.id,
+        username=user.username,
+        voice_asset_id=voice.id,
+        voice_id=voice.voice_id,
+    )
+    return RedirectResponse(
+        f"/admin/users/{user_id}?system_voice_restored=1",
         status_code=303,
     )

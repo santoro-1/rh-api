@@ -18,17 +18,45 @@
     <h2>可用音色</h2>
     <p class="muted">官方音色由管理员从当前 MiniMax 账号实时同步，自定义音色需要制作并保存。</p>
   </div>
-  <div class="voice-library-grid">
-    {% for voice in voices %}
-      <article class="summary-card">
-        <strong>{{ voice.name }}</strong>
-        <span>{% if voice.method == "system" %}官方系统音色{% elif voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</span>
-        <small>{% if voice.method == "system" %}无克隆音色费，文本合成仍计费{% elif voice.status == "ACTIVE" %}已完成首次正式使用{% else %}首次正式使用可能收费{% endif %}</small>
-      </article>
-    {% else %}
-      <p class="muted">还没有可用音色。请联系管理员同步官方音色，或使用下方高级工具制作自定义音色。</p>
-    {% endfor %}
-  </div>
+  {% if custom_voices %}
+    <h3>我的自定义音色</h3>
+    <div class="voice-library-grid">
+      {% for voice in custom_voices %}
+        <article class="summary-card">
+          <strong>{{ voice.name }}</strong>
+          <span>{% if voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</span>
+          <small>{% if voice.status == "ACTIVE" %}已完成首次正式使用{% else %}首次正式使用可能收费{% endif %}</small>
+        </article>
+      {% endfor %}
+    </div>
+  {% endif %}
+  {% if system_voice_groups %}
+    <details class="voice-category-group system-voice-library">
+      <summary>
+        <strong>官方系统音色</strong>
+        <span>{{ system_voice_count }} 个，展开后按语言查找</span>
+      </summary>
+      <div class="voice-category-list">
+        {% for group in system_voice_groups %}
+          <details class="voice-category-group">
+            <summary><strong>{{ group.label }}</strong><span>{{ group.voices|length }} 个</span></summary>
+            <div class="voice-library-grid">
+              {% for voice in group.voices %}
+                <article class="summary-card">
+                  <strong>{{ voice.name }}</strong>
+                  <span>官方系统音色</span>
+                  <small>无克隆音色费，文本合成仍计费</small>
+                </article>
+              {% endfor %}
+            </div>
+          </details>
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+  {% if not voices %}
+    <p class="muted">还没有可用音色。请联系管理员同步官方音色，或使用下方高级工具制作自定义音色。</p>
+  {% endif %}
 </section>
 
 <details class="panel voice-advanced-wrapper">

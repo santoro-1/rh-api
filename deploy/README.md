@@ -32,6 +32,52 @@ systemd 服务、Nginx 配置和证书，不与服务器上的其他项目共用
 5. 提交并推送确定的 Git commit 后才能发布。
 6. 禁止把 `.env`、SQLite、上传、输出或日志提交到 Git。
 
+## Windows 安全更新脚本
+
+推荐从 Windows 本地项目目录运行
+[`deploy-update.ps1`](./deploy-update.ps1)。服务器没有安装 Git，而且仓库是私有
+仓库，因此脚本会在本地把已经合并到 `main` 的准确 commit 打包后，通过 SSH
+上传到本项目独立的临时目录。
+
+先更新本地 `main`：
+
+```powershell
+Set-Location -LiteralPath "D:\工作内容\轻盈健\数字人\runninghub_mvp"
+git switch main
+git fetch origin
+git pull --ff-only origin main
+```
+
+第一次先不带 `-Deploy`。这只会运行本地测试和服务器只读检查，不会修改服务器：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1
+```
+
+看到“只读检查通过”后，再明确进入部署模式：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
+```
+
+脚本会在关键写操作前显示将修改的范围，并要求输入两次带 commit 的确认词。
+它只允许操作以下固定范围：
+
+- `/opt/runninghub-video`
+- `/var/backups/runninghub-video`
+- `/var/tmp/runninghub-video-*`
+- `runninghub-video-web.service`
+- `runninghub-video-audio.service`
+- `runninghub-video-worker.service`
+
+脚本不会修改 Nginx、证书、安全组或其他项目，不会自动删除备份。以下情况会拒绝
+自动发布：工作区不干净、本地不是最新 `main`、测试失败、项目队列不为空、依赖
+文件发生变化、发布范围不匹配，或本次 Git 变更包含文件删除。
+
+如果上传或预检阶段失败，生产服务尚未停止。代码覆盖或迁移阶段失败时，脚本会
+恢复发布前代码并尝试重新启动本项目服务；数据库不会被静默覆盖，完整数据备份
+会保留在 `/var/backups/runninghub-video/`，需要确认后再按“回滚与恢复”处理。
+
 ## 服务器发布前只读检查
 
 ```bash

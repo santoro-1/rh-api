@@ -116,3 +116,21 @@ def test_backup_timer_and_restore_confirmation_are_present():
     ).read_text(encoding="utf-8")
     assert "Persistent=true" in timer
     assert '"$CONFIRM" != "--confirm"' in restore
+
+
+def test_windows_production_update_script_is_explicit_and_scoped():
+    updater = (
+        PROJECT_ROOT / "deploy" / "deploy-update.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "[switch]$Deploy" in updater
+    assert "if (-not $Deploy)" in updater
+    assert 'Confirm-Exact' in updater
+    assert '"BACKUP $shortCommit"' in updater
+    assert '"DEPLOY $shortCommit"' in updater
+    assert '"/opt/runninghub-video"' in updater
+    assert '"/var/backups/runninghub-video"' in updater
+    assert "Assert-QueuesIdle" in updater
+    assert "requirements.txt 有变化" in updater
+    assert "systemctl restart" not in updater
+    assert "systemctl reload" not in updater

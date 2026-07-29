@@ -62,6 +62,7 @@ from app.services.batch_status import (
     summarize_batch,
 )
 from app.services.csrf import require_csrf
+from app.services.speech.system_voices import group_available_voice_assets
 from app.services.storage import (
     UploadValidationError,
     remove_directory,
@@ -177,6 +178,7 @@ def batch_generate_page(
                 and current_user.minimax_config.account_binding_id
             ),
             "minimax_voices": active_voices,
+            "minimax_voice_groups": group_available_voice_assets(active_voices),
         },
     )
 

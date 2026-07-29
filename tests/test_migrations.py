@@ -104,3 +104,46 @@ def test_audio_review_migration_preserves_existing_batch_items():
         assert foreign_key_errors == []
     finally:
         database.unlink(missing_ok=True)
+
+
+def test_system_voice_category_migration_resumes_after_interrupted_add_column():
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-resume-{uuid.uuid4().hex}.db"
+    try:
+        _run_alembic(database, "0010_audio_review")
+        with sqlite3.connect(database) as connection:
+            # Reproduce SQLite's non-transactional DDL state: the column was
+            # committed, but the launcher stopped before Alembic recorded 0011.
+            connection.execute(
+                "ALTER TABLE minimax_voice_assets "
+                "ADD COLUMN category VARCHAR(50)"
+            )
+            connection.commit()
+            assert connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0] == "0010_audio_review"
+        connection.close()
+
+        _run_alembic(database, "head")
+
+        with sqlite3.connect(database) as connection:
+            version = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            category_columns = sum(
+                row[1] == "category"
+                for row in connection.execute(
+                    "PRAGMA table_info('minimax_voice_assets')"
+                )
+            )
+            quick_check = connection.execute(
+                "PRAGMA quick_check"
+            ).fetchone()[0]
+        connection.close()
+
+        assert version == "0011_system_voice_categories"
+        assert category_columns == 1
+        assert quick_check == "ok"
+    finally:
+        database.unlink(missing_ok=True)
