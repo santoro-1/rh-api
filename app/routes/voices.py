@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.routes.dependencies import check_rate_limit, get_current_user, get_page_user
 from app.services.csrf import require_csrf
+from app.services.speech.system_voices import group_system_voice_assets
 from app.services.speech.voice_studio import create_voice_task, request_voice_save
 from app.services.storage import UploadValidationError, safe_relative_path
 from app.web import templates
@@ -97,6 +98,15 @@ def voice_studio_page(
             ),
             "voice_tasks": tasks,
             "voices": voices,
+            "system_voice_groups": group_system_voice_assets(
+                voice for voice in voices if voice.method == "system"
+            ),
+            "system_voice_count": sum(
+                voice.method == "system" for voice in voices
+            ),
+            "custom_voices": [
+                voice for voice in voices if voice.method != "system"
+            ],
             "temporary_voice_retention_hours": (
                 get_settings().temporary_voice_retention_hours
             ),

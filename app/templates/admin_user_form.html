@@ -58,6 +58,12 @@
   {% if request.query_params.get("system_voice_count") %}
     <p class="success-notice">已同步 {{ request.query_params.get("system_voice_count") }} 个当前 MiniMax 账号可用的官方音色。</p>
   {% endif %}
+  {% if request.query_params.get("system_voice_deleted") %}
+    <p class="success-notice">已从该站内账号删除官方音色；后续同步不会自动恢复。</p>
+  {% endif %}
+  {% if request.query_params.get("system_voice_restored") %}
+    <p class="success-notice">已恢复官方音色。</p>
+  {% endif %}
   <label>账号备注名称
     <input name="minimax_account_label" maxlength="100" value="{{ minimax_config.account_label or 'MiniMax 账号' }}" placeholder="例如：公司主账号">
   </label>
@@ -89,14 +95,71 @@
       >同步官方音色</button>
     </div>
   {% endif %}
-  {% if active_minimax_voices %}
-    <h3>该账号已保存音色</h3>
+  {% if custom_minimax_voices %}
+    <h3>我的自定义音色（{{ custom_minimax_voices|length }}）</h3>
     <div class="compact-list">
-      {% for voice in active_minimax_voices %}
-        <span class="asset-chip">{{ voice.name }} · {{ voice.activated_at|beijing_datetime if voice.activated_at else "已激活" }}</span>
+      {% for voice in custom_minimax_voices %}
+        <span class="asset-chip">{{ voice.name }} · {% if voice.method == "mix" %}融合{% else %}克隆{% endif %}</span>
       {% endfor %}
     </div>
-    <p class="field-help">包含管理员同步的官方音色，以及用户明确保存的克隆或融合音色。</p>
+  {% endif %}
+  {% if system_voice_groups %}
+    <details class="voice-category-group system-voice-library">
+      <summary>
+        <strong>官方系统音色</strong>
+        <span>{{ system_voice_count }} 个，展开后管理</span>
+      </summary>
+      <div class="voice-management-help">
+        <p class="field-help">官方音色与克隆/融合音色分开显示。删除只影响该站内账号，不会删除 MiniMax 官方目录；后续同步也不会自动加回。</p>
+      </div>
+      <div class="voice-category-list">
+        {% for group in system_voice_groups %}
+          <details class="voice-category-group">
+            <summary><strong>{{ group.label }}</strong><span>{{ group.voices|length }} 个</span></summary>
+            <div class="managed-voice-grid">
+              {% for voice in group.voices %}
+                <article class="managed-voice-item">
+                  <span>
+                    <strong>{{ voice.name }}</strong>
+                    <small>{{ voice.voice_id }}</small>
+                  </span>
+                  <button
+                    class="button danger compact-button"
+                    type="submit"
+                    formmethod="post"
+                    formaction="/admin/users/{{ user.id }}/system-voices/{{ voice.id }}/delete"
+                    onclick="return confirm('只从该站内账号删除官方音色“{{ voice.name|e }}”？MiniMax 官方目录不会受影响。')"
+                  >删除</button>
+                </article>
+              {% endfor %}
+            </div>
+          </details>
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+  {% if hidden_system_voice_groups %}
+    <details class="voice-category-group removed-voice-group">
+      <summary><strong>已删除的官方音色</strong><span>{{ hidden_system_voice_count }} 个，可恢复</span></summary>
+      <div class="managed-voice-grid">
+        {% for group in hidden_system_voice_groups %}
+          {% for voice in group.voices %}
+            <article class="managed-voice-item">
+              <span>
+                <strong>{{ voice.name }}</strong>
+                <small>{{ group.label }} · {{ voice.voice_id }}</small>
+              </span>
+              <button
+                class="button secondary compact-button"
+                type="submit"
+                formmethod="post"
+                formaction="/admin/users/{{ user.id }}/system-voices/{{ voice.id }}/restore"
+              >恢复</button>
+            </article>
+          {% endfor %}
+        {% endfor %}
+      </div>
+    </details>
   {% endif %}
   </div>
   </details>

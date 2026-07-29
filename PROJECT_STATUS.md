@@ -1,4 +1,4 @@
-> 最新更新时间：2026-07-28（北京时间，UTC+8）
+> 最新更新时间：2026-07-29（北京时间，UTC+8）
 
 # 项目状态与交接说明
 
@@ -12,11 +12,14 @@
   `/opt/runninghub-video`，由独立 Web、语音 Worker、视频 Worker systemd 服务运行，
   Nginx 只代理本机 `127.0.0.1:18083`。
 - 远端 `main` 与当前生产基线均为合并提交
-  `d2b1aee9996dc20cbb3ab497fb803ffc5203cff1`。
-- 当前本地分支为 `feature/ceil-media-duration`。完整音频结束秒数向上取整、管理员安全
-  删除账号、生产状态页隐藏本地总控、未保存试听到期清理和试听区布局修复仍是本地
-  未提交改动；用户明确要求汇总验证后再手动推送和更新服务器。
+  `b53fb7794f26df6a45fdbdd6ed60ae069a3bc432`。
+- 当前本地分支为 `feature/safe-deploy-script-voice-sync`。本地新增 Windows 生产安全
+  更新脚本，并修复 MiniMax 官方音色目录中 `voice_id` 带首尾空白时同步返回 502
+  的问题；这些改动尚未提交、推送或部署。
 - 生产更新前已保留独立数据备份和代码回滚包；本轮不得直接在服务器上改代码。
+- `deploy/deploy-update.ps1` 默认只做本地测试和服务器只读检查；明确使用 `-Deploy`
+  并输入两次 commit 确认词后，才会备份、上传和只重启本项目三个服务。脚本不会
+  修改 Nginx、证书或其他项目。
 - 已在本地实现数字人/视频对口型批量生成：默认网页快速入口、Excel/CSV 清单、
   逐文件暂存、严格预检、原子创建、批次进度、失败项重试和整批删除。
 - 批量现在同时支持“上传现成音频”和“MiniMax 根据每行脚本生成音频”。两条路径在
@@ -47,9 +50,9 @@
   实现克隆/融合/保存细节。架构回归测试会阻止这些职责重新回流。
 - Windows 启动器已改用只读进程句柄判断 PID 是否存活，修复重复双击无法打开页面、
   点击停止却误报“没有运行”的问题。
-- 当前新增数据库迁移头为 `0010_audio_review`，部署或本地更新代码后必须
+- 当前新增数据库迁移头为 `0011_system_voice_categories`，部署或本地更新代码后必须
   执行 `python -m alembic upgrade head`。
-- 本轮完整修改以发布分支为交接边界；远端 `main` 在草稿PR合并前仍为 `3b96633`。
+- 本轮部署脚本与官方音色修复以独立功能分支为交接边界，合并前不得更新生产环境。
 
 ## 1. 项目定位
 
@@ -258,11 +261,12 @@ Worker 提交时在 JSON 请求体顶层传 accessPassword
 
 ### 最近一次验证记录
 
-- 数据库迁移头：`0010_audio_review`；已在隔离 SQLite 数据库从空库执行
-  完整 `upgrade head`、`current` 和 `alembic check`，确认顺序升级至 `0010 (head)`
+- 数据库迁移头：`0011_system_voice_categories`；已在隔离 SQLite 数据库从空库执行
+  完整 `upgrade head` 并验证迁移链；官方音色分类使用原生 `ADD COLUMN`，不重建
+  `minimax_voice_assets` 表。
   且模型与迁移没有待生成差异。
 - 本轮针对账号删除、生产状态页和未保存试听清理的测试：`15 passed`。
-- 最近一次完整 mock 测试：`96 passed in 13.12s`。
+- 最近一次完整 mock 测试：`99 passed`。
 - 已修复原始 `0010_audio_review` 使用 SQLite 批量重建父表导致既有批次行被级联删除的
   回归。迁移现改用原生 `ADD COLUMN`，并以真实既有父子数据验证升级后记录不变。
   本地受影响的两个历史批次已恢复 3 条父任务、7 条分段和 7 条视频任务关联；修复前
@@ -335,6 +339,7 @@ deploy/
 0008_minimax_async_timestamps
 0009_pronunciation_dict
 0010_audio_review
+0011_system_voice_categories
 ```
 
 LTX 工作流继续沿用 `workflow_configs` 和通用 `input_payload`。批量功能持久化批次、
@@ -563,6 +568,7 @@ alembic/versions/0007_full_script_pipeline.py
 alembic/versions/0008_minimax_async_timestamps.py
 alembic/versions/0009_pronunciation_dict.py
 alembic/versions/0010_audio_review.py
+alembic/versions/0011_system_voice_categories.py
 app/routes/voices.py
 app/services/media_segmentation.py
 app/services/speech/async_outputs.py

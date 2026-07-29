@@ -80,8 +80,12 @@
   <label>已保存音色
     <select id="speech-voice" {% if not minimax_voices %}disabled{% endif %}>
       <option value="">请选择音色</option>
-      {% for voice in minimax_voices %}
-        <option value="{{ voice.id }}" data-method="{{ voice.method }}" data-activated="{{ 'true' if voice.status == 'ACTIVE' else 'false' }}">{{ voice.name }} · {% if voice.method == "system" %}官方系统音色（无克隆费）{% elif voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</option>
+      {% for group in minimax_voice_groups %}
+        <optgroup label="{{ group.label }}">
+          {% for voice in group.voices %}
+            <option value="{{ voice.id }}" data-method="{{ voice.method }}" data-activated="{{ 'true' if voice.status == 'ACTIVE' else 'false' }}">{{ voice.name }} · {% if voice.method == "system" %}官方系统音色（无克隆费）{% elif voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</option>
+          {% endfor %}
+        </optgroup>
       {% endfor %}
     </select>
     <span class="field-help">没有合适音色？前往<a href="/voices">声音管理</a>制作并试听。</span>
