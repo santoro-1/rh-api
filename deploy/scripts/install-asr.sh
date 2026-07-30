@@ -90,7 +90,21 @@ else
         --timeout "$PIP_TIMEOUT" \
         --retries "$PIP_RETRIES" \
         --index-url "$PYPI_INDEX_URL" \
-        --extra-index-url "$TORCH_INDEX_URL" \
+        "filelock" \
+        "typing-extensions>=4.10.0" \
+        "sympy>=1.13.3" \
+        "networkx>=2.5.1" \
+        "jinja2" \
+        "fsspec>=0.8.5"
+    sudo -u "$APP_USER" env \
+      HOME="$ASR_HOME" \
+      PIP_CACHE_DIR="$PIP_CACHE_DIR" \
+      "$build_dir/bin/python" -m pip install \
+        --disable-pip-version-check \
+        --timeout "$PIP_TIMEOUT" \
+        --retries "$PIP_RETRIES" \
+        --no-deps \
+        --index-url "$TORCH_INDEX_URL" \
         "torch==$TORCH_VERSION+cpu" "torchaudio==$TORCH_VERSION+cpu"
     sudo -u "$APP_USER" env \
       HOME="$ASR_HOME" \
@@ -103,6 +117,7 @@ else
         -r "$REQUIREMENTS"
     sudo -u "$APP_USER" "$build_dir/bin/python" -c \
         "import fastapi, funasr, modelscope, psutil, torch, torchaudio, uvicorn; assert not torch.cuda.is_available()"
+    sudo -u "$APP_USER" "$build_dir/bin/python" -m pip check
 
     rm -rf -- "$old_dir"
     if [[ -d "$VENV_DIR" ]]; then

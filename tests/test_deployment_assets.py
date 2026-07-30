@@ -80,6 +80,9 @@ def test_asr_installer_is_idempotent_and_scoped_to_project():
     assert 'PIP_CACHE_DIR="$RUNTIME_DIR/pip-cache"' in installer
     assert 'PIP_TIMEOUT="${ASR_PIP_TIMEOUT_SECONDS:-300}"' in installer
     assert 'PIP_RETRIES="${ASR_PIP_RETRIES:-12}"' in installer
+    assert '"networkx>=2.5.1"' in installer
+    assert "--no-deps" in installer
+    assert '"$build_dir/bin/python" -m pip check' in installer
     assert "ASR_SHARED_TOKEN" in installer
     assert "openssl rand -hex 32" in installer
 
