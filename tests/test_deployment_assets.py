@@ -200,6 +200,7 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert '"/opt/runninghub-video"' in updater
     assert '"/var/backups/runninghub-video"' in updater
     assert "Assert-QueuesIdle" in updater
+    assert updater.count("git -c core.quotePath=false diff --name-only") == 2
     assert '$Script.Replace("`r`n", "`n").Replace("`r", "`n")' in updater
     assert "& ssh -n -T -i $SshKey" in updater
     assert "[Console]::OutputEncoding" in updater

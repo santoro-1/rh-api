@@ -244,14 +244,16 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
         git cat-file -e "$deployedRevision`^{commit}"
     } | Out-Null
     $deletedFiles = Invoke-LocalText -Description "检查删除文件" -Command {
-        git diff --name-only --diff-filter=D $deployedRevision $commit
+        git -c core.quotePath=false diff --name-only --diff-filter=D `
+            $deployedRevision $commit
     }
     if ($deletedFiles) {
         Write-Host $deletedFiles
         throw "本次包含删除文件。为避免脚本误删服务器内容，请先人工审查这些路径；本脚本不会自动删除。"
     }
     $addedFilesText = Invoke-LocalText -Description "检查新增文件" -Command {
-        git diff --name-only --diff-filter=A $deployedRevision $commit
+        git -c core.quotePath=false diff --name-only --diff-filter=A `
+            $deployedRevision $commit
     }
     $addedFiles = @()
     if ($addedFilesText) {
