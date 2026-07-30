@@ -96,11 +96,16 @@
 
 <section class="panel">
   <div class="panel-heading"><h2>队列概况</h2><p class="muted">只显示数据库中的任务数量。</p></div>
-  <div class="two-columns">
+  <div class="three-columns">
     <div>
       <h3>语音任务</h3>
       <p>活动：<strong id="audio-active-count">{{ audio_active }}</strong></p>
       <p class="muted" id="audio-status-counts">{{ audio_counts }}</p>
+    </div>
+    <div>
+      <h3>媒体预处理</h3>
+      <p>活动：<strong id="media-active-count">{{ media_active }}</strong></p>
+      <p class="muted" id="media-status-counts">{{ media_counts }}</p>
     </div>
     <div>
       <h3>视频任务</h3>

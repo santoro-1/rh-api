@@ -173,3 +173,30 @@
 @media (max-width: 760px) { .three-columns, .service-status-grid, .resource-grid, .operations-filter-form { grid-template-columns:1fr; } }
 @media (max-width: 760px) { .voice-weight-row { grid-template-columns:1fr 1fr; } .voice-task-card { grid-template-columns:minmax(0,1fr); } }
 @media (max-width: 760px) { .voice-source-switch, .voice-official-controls { grid-template-columns:1fr; } }
+.long-audio-status-panel {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:20px;
+}
+.long-audio-status-panel p { margin:6px 0 0; }
+.long-audio-segment-table input[type="number"] { min-width:92px; }
+.long-audio-segment-table textarea {
+  min-width:320px;
+  resize:vertical;
+}
+.long-audio-segment-table .segment-play { white-space:nowrap; }
+.confidence {
+  display:inline-block;
+  padding:3px 8px;
+  border-radius:999px;
+  white-space:nowrap;
+  background:#f3f4f6;
+}
+.confidence.high { color:#166534; background:#dcfce7; }
+.confidence.low { color:#991b1b; background:#fee2e2; }
+.confidence.reviewed { color:#1d4ed8; background:#dbeafe; }
+.danger-zone { margin-top:22px; }
+@media (max-width: 760px) {
+  .long-audio-status-panel { grid-template-columns:1fr; }
+  .long-audio-segment-table textarea { min-width:240px; }
+}

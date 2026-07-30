@@ -57,6 +57,8 @@
       "audio-active-count": queue.audioActive,
       "video-active-count": queue.videoActive,
       "audio-status-counts": JSON.stringify(queue.audioCounts),
+      "media-active-count": queue.mediaActive,
+      "media-status-counts": JSON.stringify(queue.mediaCounts),
       "video-status-counts": JSON.stringify(queue.videoCounts),
     };
     for (const [id, value] of Object.entries(bindings)) {

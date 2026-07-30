@@ -83,6 +83,10 @@ class Settings:
     minimax_default_base_url: str
     minimax_request_timeout_seconds: int
     temporary_voice_retention_hours: int
+    long_audio_alignment_provider: str
+    asr_base_url: str
+    asr_shared_token: str
+    asr_request_timeout_seconds: int
     log_retention_days: int
     log_max_bytes: int
 
@@ -176,6 +180,16 @@ class Settings:
             temporary_voice_retention_hours=_as_int(
                 "TEMPORARY_VOICE_RETENTION_HOURS", 48
             ),
+            long_audio_alignment_provider=os.getenv(
+                "LONG_AUDIO_ALIGNMENT_PROVIDER", "funasr_http"
+            ).strip(),
+            asr_base_url=os.getenv(
+                "ASR_BASE_URL", "http://127.0.0.1:18084"
+            ).rstrip("/"),
+            asr_shared_token=os.getenv("ASR_SHARED_TOKEN", "").strip(),
+            asr_request_timeout_seconds=_as_int(
+                "ASR_REQUEST_TIMEOUT_SECONDS", 1800
+            ),
             log_retention_days=_as_int("LOG_RETENTION_DAYS", 7),
             log_max_bytes=_as_int("LOG_MAX_BYTES", 10 * 1024 * 1024),
         )
@@ -199,6 +213,10 @@ class Settings:
     @property
     def voice_creations_dir(self) -> Path:
         return self.data_dir / "voice-creations"
+
+    @property
+    def long_audio_dir(self) -> Path:
+        return self.data_dir / "long-audio"
 
     @property
     def logs_dir(self) -> Path:

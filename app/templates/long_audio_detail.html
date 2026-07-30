@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} · 长音频拆分{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>{{ project.name }}</h1>
+    <p class="muted">{{ project.audio_original_name }} · {{ project.duration_seconds|timecode }} · {{ project.created_at|beijing_datetime }}</p>
+  </div>
+  <a class="button secondary" href="/long-audio">返回长音频列表</a>
+</section>
+
+<section class="panel long-audio-status-panel">
+  <div>
+    <strong>处理状态</strong>
+    <p id="long-audio-status-label">{{ status_labels.get(project.status, project.status) }}</p>
+  </div>
+  <div>
+    <strong>对齐方式</strong>
+    <p id="long-audio-provider">{{ project.alignment_provider }}</p>
+  </div>
+  <div>
+    <strong>预计分段</strong>
+    <p id="long-audio-segment-count">等待分析</p>
+  </div>
+</section>
+
+<div id="long-audio-error" class="error{% if not project.error_message %} hidden{% endif %}">
+  {{ project.error_message or "" }}
+</div>
+
+<section id="long-audio-review-panel" class="panel stack-form hidden">
+  <div class="panel-heading">
+    <h2>试听并确认分段</h2>
+    <p class="muted">高可信度表示原脚本相邻字词都取得了ASR时间戳；低可信度表示附近存在识别差异并使用了插值，请重点试听。修改结束时间会自动同步下一段开始时间。</p>
+  </div>
+  <audio
+    id="long-audio-player"
+    controls
+    preload="metadata"
+    src="/api/long-audio-projects/{{ project.id }}/audio"
+  ></audio>
+  <div class="table-scroll">
+    <table class="long-audio-segment-table">
+      <thead>
+        <tr><th>段</th><th>开始</th><th>结束</th><th>时长</th><th>可信度</th><th>对应原脚本</th><th>试听</th></tr>
+      </thead>
+      <tbody id="long-audio-segment-body"></tbody>
+    </table>
+  </div>
+  <div id="long-audio-plan-error" class="error hidden"></div>
+  <p id="long-audio-save-status" class="muted">确认前可以反复试听和保存调整，不会创建RunningHub任务。</p>
+  <div class="form-actions">
+    <button id="long-audio-save" type="button" class="secondary">保存调整</button>
+    <button id="long-audio-confirm" type="button">确认并创建子任务</button>
+  </div>
+</section>
+
+<section id="long-audio-processing-panel" class="panel hidden">
+  <h2>后台处理中</h2>
+  <p class="muted">页面会自动更新。分析阶段不会切文件；确认后才会切割音频和视频。</p>
+</section>
+
+<section id="long-audio-completed-panel" class="panel hidden">
+  <h2>子任务已创建</h2>
+  <p>所有分段已经进入本地视频任务队列。</p>
+  <a id="long-audio-batch-link" class="button" href="/batches">查看批次任务</a>
+</section>
+
+<section id="long-audio-failed-panel" class="panel{% if project.status != 'FAILED' %} hidden{% endif %}">
+  <h2>处理没有完成</h2>
+  <p class="muted">修正素材或环境问题后，可以从失败步骤继续。</p>
+  <form method="post" action="/long-audio/{{ project.id }}/retry" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">重试失败步骤</button>
+  </form>
+</section>
+
+{% if project.status in ["REVIEW", "FAILED"] and not project.batch_id %}
+<form method="post" action="/long-audio/{{ project.id }}/reanalyze" class="inline-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit" class="secondary">使用ASR重新分析</button>
+</form>
+{% endif %}
+
+{% if project.status not in ["ANALYZING", "CUTTING", "PENDING_CUT"] %}
+<form method="post" action="/long-audio/{{ project.id }}/delete" class="inline-form danger-zone">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit" class="danger">删除预处理项目</button>
+</form>
+{% endif %}
+
+<script id="long-audio-initial-data" type="application/json">{{ project_payload|tojson }}</script>
+<script src="/static/long_audio.js" defer></script>
+{% endblock %}

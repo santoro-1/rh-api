@@ -10,6 +10,8 @@ from app.models import (
     AudioGenerationTask,
     AudioTaskStatus,
     GenerationTask,
+    LongAudioProject,
+    LongAudioProjectStatus,
     MiniMaxVoiceAsset,
     StagedAsset,
     TaskStatus,
@@ -18,6 +20,7 @@ from app.models import (
 )
 from app.services.storage import (
     remove_directory,
+    long_audio_project_dir,
     staged_asset_dir,
     task_output_dir,
     task_upload_dir,
@@ -42,7 +45,27 @@ def main() -> None:
         TaskStatus.CANCELLED.value,
     ]
     removed_uploads = removed_outputs = removed_staged_assets = removed_voice_sources = 0
+    removed_long_audio_projects = 0
     with SessionLocal() as db:
+        expired_long_audio_projects = db.scalars(
+            select(LongAudioProject).where(
+                LongAudioProject.expires_at < now,
+                LongAudioProject.status.not_in(
+                    {
+                        LongAudioProjectStatus.ANALYZING.value,
+                        LongAudioProjectStatus.PENDING_CUT.value,
+                        LongAudioProjectStatus.CUTTING.value,
+                    }
+                ),
+            )
+        ).all()
+        for project in expired_long_audio_projects:
+            remove_directory(
+                long_audio_project_dir(settings, project.user_id, project.id)
+            )
+            db.delete(project)
+            removed_long_audio_projects += 1
+
         staged_assets = db.scalars(
             select(StagedAsset).where(StagedAsset.expires_at < now)
         ).all()
@@ -216,7 +239,8 @@ def main() -> None:
     print(
         f"已清理暂存素材 {removed_staged_assets} 个、上传目录 "
         f"{removed_uploads} 个、输出目录 {removed_outputs} 个、"
-        f"声音参考目录 {removed_voice_sources} 个。"
+        f"声音参考目录 {removed_voice_sources} 个、长音频预处理项目 "
+        f"{removed_long_audio_projects} 个。"
     )
 
 
