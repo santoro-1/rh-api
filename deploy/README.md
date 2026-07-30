@@ -36,6 +36,8 @@ ASR 使用 `/opt/runninghub-video/.asr-runtime/venv`，不向主项目 `.venv`
 - 普通代码更新且依赖未变化时只验证环境，随后跳过安装。
 - ASR 依赖或指定的 PyTorch 版本变化时才重建隔离环境。
 - 首次缺少 `ASR_SHARED_TOKEN` 时生成独立随机密钥并写入权限为 `600` 的 `.env`。
+- 安装使用项目内持久 pip 缓存、长读取超时和重试；生产服务器的通用 Python
+  依赖默认从阿里云镜像下载，CPU 版 PyTorch 仍从官方 wheel 源获取。
 
 ASR systemd 单元限制为单进程、`CPUQuota=150%`、`MemoryMax=2560M`，并只监听
 `127.0.0.1:18084`。不得开放安全组、防火墙或 Nginx 公网代理到该端口。
