@@ -75,7 +75,11 @@ def test_asr_installer_is_idempotent_and_scoped_to_project():
     assert 'sha256sum "$REQUIREMENTS" | awk' in installer
     assert "importlib.util.find_spec" in installer
     assert "跳过安装" in installer
-    assert "torch==$TORCH_VERSION" in installer
+    assert "torch==$TORCH_VERSION+cpu" in installer
+    assert "https://mirrors.aliyun.com/pypi/simple" in installer
+    assert 'PIP_CACHE_DIR="$RUNTIME_DIR/pip-cache"' in installer
+    assert 'PIP_TIMEOUT="${ASR_PIP_TIMEOUT_SECONDS:-300}"' in installer
+    assert 'PIP_RETRIES="${ASR_PIP_RETRIES:-12}"' in installer
     assert "ASR_SHARED_TOKEN" in installer
     assert "openssl rand -hex 32" in installer
 

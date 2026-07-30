@@ -8,11 +8,14 @@ RUNTIME_DIR="$APP_DIR/.asr-runtime"
 VENV_DIR="$RUNTIME_DIR/venv"
 MODEL_DIR="$APP_DIR/data/asr-models"
 ASR_HOME="$APP_DIR/data/asr-home"
+PIP_CACHE_DIR="$RUNTIME_DIR/pip-cache"
 REQUIREMENTS="$RELEASE_DIR/asr_service/requirements.txt"
 STAMP_FILE="$RUNTIME_DIR/requirements.sha256"
 TORCH_VERSION="${ASR_TORCH_VERSION:-2.11.0}"
 TORCH_INDEX_URL="${ASR_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
-PYPI_INDEX_URL="${ASR_PYPI_INDEX_URL:-https://pypi.org/simple}"
+PYPI_INDEX_URL="${ASR_PYPI_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}"
+PIP_TIMEOUT="${ASR_PIP_TIMEOUT_SECONDS:-300}"
+PIP_RETRIES="${ASR_PIP_RETRIES:-12}"
 
 if [[ "$APP_DIR" != "/opt/runninghub-video" ]]; then
     echo "拒绝安装到非生产项目目录：$APP_DIR" >&2
@@ -38,12 +41,14 @@ fi
 install -d -m 750 -o "$APP_USER" -g "$APP_USER" "$RUNTIME_DIR"
 install -d -m 750 -o "$APP_USER" -g "$APP_USER" "$MODEL_DIR"
 install -d -m 750 -o "$APP_USER" -g "$APP_USER" "$ASR_HOME"
+install -d -m 750 -o "$APP_USER" -g "$APP_USER" "$PIP_CACHE_DIR"
 
 desired_hash="$(
     {
         sha256sum "$REQUIREMENTS" | awk '{print $1}'
         printf 'torch==%s\ntorchaudio==%s\nindex=%s\n' \
             "$TORCH_VERSION" "$TORCH_VERSION" "$TORCH_INDEX_URL"
+        printf 'pypi=%s\n' "$PYPI_INDEX_URL"
     } | sha256sum | awk '{print $1}'
 )"
 installed_hash=""
@@ -77,12 +82,23 @@ else
     }
     trap cleanup_build EXIT
     sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" -m venv "$build_dir"
-    sudo -u "$APP_USER" "$build_dir/bin/python" -m pip install \
+    sudo -u "$APP_USER" env \
+      HOME="$ASR_HOME" \
+      PIP_CACHE_DIR="$PIP_CACHE_DIR" \
+      "$build_dir/bin/python" -m pip install \
         --disable-pip-version-check \
-        --index-url "$TORCH_INDEX_URL" \
-        "torch==$TORCH_VERSION" "torchaudio==$TORCH_VERSION"
-    sudo -u "$APP_USER" "$build_dir/bin/python" -m pip install \
+        --timeout "$PIP_TIMEOUT" \
+        --retries "$PIP_RETRIES" \
+        --index-url "$PYPI_INDEX_URL" \
+        --extra-index-url "$TORCH_INDEX_URL" \
+        "torch==$TORCH_VERSION+cpu" "torchaudio==$TORCH_VERSION+cpu"
+    sudo -u "$APP_USER" env \
+      HOME="$ASR_HOME" \
+      PIP_CACHE_DIR="$PIP_CACHE_DIR" \
+      "$build_dir/bin/python" -m pip install \
         --disable-pip-version-check \
+        --timeout "$PIP_TIMEOUT" \
+        --retries "$PIP_RETRIES" \
         --index-url "$PYPI_INDEX_URL" \
         -r "$REQUIREMENTS"
     sudo -u "$APP_USER" "$build_dir/bin/python" -c \
