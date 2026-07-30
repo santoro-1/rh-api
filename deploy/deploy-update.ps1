@@ -13,11 +13,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$script:Services = @(
+$script:CoreServices = @(
     "runninghub-video-web.service",
     "runninghub-video-audio.service",
     "runninghub-video-worker.service"
 )
+$script:MediaService = "runninghub-video-media.service"
+$script:AsrService = "runninghub-video-asr.service"
+$script:OptionalServices = @($script:MediaService, $script:AsrService)
+$script:Services = @($script:CoreServices) + $script:OptionalServices
 $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $script:LocalTemp = $null
 $script:RemoteTemp = $null
@@ -188,7 +192,14 @@ else
   echo 'MISSING'
 fi
 echo '本项目服务：'
-  systemctl --no-pager is-active $($script:Services -join " ")
+  systemctl --no-pager is-active $($script:CoreServices -join " ")
+  for optional_service in $($script:OptionalServices -join " "); do
+    if systemctl cat "`$optional_service" >/dev/null 2>&1; then
+      systemctl --no-pager is-active "`$optional_service"
+    else
+      echo "`$optional_service PENDING_INSTALL"
+    fi
+  done
   echo '本项目健康检查：'
   curl --connect-timeout 3 --max-time 8 -fsS \
     -H 'Host: $Domain' http://127.0.0.1:18083/healthz
@@ -250,7 +261,7 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
             if (
                 [IO.Path]::IsPathRooted($relativePath) -or
                 $normalizedPath -match "(^|/)\.\.(/|$)" -or
-                $normalizedPath -match "^(\.env|\.venv|data|tools)(/|$)"
+                $normalizedPath -match "^(\.env|\.venv|\.asr-runtime|data|tools)(/|$)"
             ) {
                 throw "新增文件路径不安全，拒绝自动发布：$relativePath"
             }
@@ -266,7 +277,7 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
     }
 
     Confirm-Exact `
-        -Prompt "下一步会创建本项目的数据备份和代码备份，并上传 commit $shortCommit；不会停止服务。" `
+        -Prompt "下一步会创建本项目备份、上传 commit $shortCommit，并在不中断现有服务的情况下安装或验证项目独立 ASR 环境；不会启动 ASR，也不会停止服务。" `
         -Expected "BACKUP $shortCommit"
 
     Write-Step "打包当前 Git commit（不包含 .env、数据库、上传、输出和日志）"
@@ -298,6 +309,7 @@ code_backup='$BackupDir/runninghub-video-code-pre-$shortCommit-$timestamp.tar.gz
 tar -C '$AppDir' \
   --exclude='./.env' \
   --exclude='./.venv' \
+  --exclude='./.asr-runtime' \
   --exclude='./data' \
   --exclude='./tools' \
   -czf "`$code_backup" .
@@ -348,6 +360,11 @@ sudo -u '$LinuxUser' env \
   PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
   RUNNINGHUB_APP_DIR='$script:RemoteTemp/stage' \
   /bin/bash '$script:RemoteTemp/stage/deploy/scripts/preflight.sh'
+env \
+  RUNNINGHUB_APP_DIR='$AppDir' \
+  RUNNINGHUB_RELEASE_DIR='$script:RemoteTemp/stage' \
+  RUNNINGHUB_LINUX_USER='$LinuxUser' \
+  /bin/bash '$script:RemoteTemp/stage/deploy/scripts/install-asr.sh'
 migration_check='$script:RemoteTemp/migration-check.db'
 sqlite3 -readonly '$AppDir/data/app.db' \
   '.timeout 30000' ".backup '`$migration_check'"
@@ -368,13 +385,32 @@ echo '发布包校验和预检通过'
 
     Assert-QueuesIdle
     Confirm-Exact `
-        -Prompt "即将只停止三个 runninghub-video 服务，覆盖项目代码，执行数据库迁移，再启动这三个服务。其他服务、Nginx、证书均不修改。" `
+        -Prompt "即将只停止本项目 runninghub-video 服务，安装或更新媒体 Worker 与 ASR 单元，覆盖项目代码，执行数据库迁移，再启动五个服务。其他服务、Nginx、证书均不修改。" `
         -Expected "DEPLOY $shortCommit"
 
     Write-Step "更新本项目代码（服务器写操作 3）"
     $mutateScript = @"
 set -euo pipefail
-services='$($script:Services -join " ")'
+core_services='$($script:CoreServices -join " ")'
+media_service='$script:MediaService'
+asr_service='$script:AsrService'
+services="`$core_services"
+media_unit='/etc/systemd/system/runninghub-video-media.service'
+media_unit_backup='$script:RemoteTemp/runninghub-video-media.service.before'
+media_unit_existed=0
+asr_unit='/etc/systemd/system/runninghub-video-asr.service'
+asr_unit_backup='$script:RemoteTemp/runninghub-video-asr.service.before'
+asr_unit_existed=0
+if systemctl cat "`$media_service" >/dev/null 2>&1; then
+  media_unit_existed=1
+  services="`$services `$media_service"
+  cp -a -- "`$media_unit" "`$media_unit_backup"
+fi
+if systemctl cat "`$asr_service" >/dev/null 2>&1; then
+  asr_unit_existed=1
+  services="`$services `$asr_service"
+  cp -a -- "`$asr_unit" "`$asr_unit_backup"
+fi
 old_revision='$deployedRevision'
 rollback_code='$BackupDir/runninghub-video-code-pre-$shortCommit-$timestamp.tar.gz'
 pre_deploy_db='$script:RemoteTemp/pre-deploy-app.db'
@@ -384,7 +420,7 @@ rollback() {
   trap - ERR
   set +e
   echo '发布失败，正在恢复发布前代码和数据库。' >&2
-  systemctl stop `$services
+  systemctl stop `$core_services "`$media_service" "`$asr_service" >/dev/null 2>&1 || true
   if [ -f "`$pre_deploy_db" ]; then
     if [ -f '$AppDir/data/app.db' ]; then
       sqlite3 -readonly '$AppDir/data/app.db' \
@@ -401,7 +437,7 @@ rollback() {
     while IFS= read -r relative_path; do
       [ -n "`$relative_path" ] || continue
       case "`$relative_path" in
-        /*|../*|*/../*|.env|.env/*|.venv|.venv/*|data|data/*|tools|tools/*)
+        /*|../*|*/../*|.env|.env/*|.venv|.venv/*|.asr-runtime|.asr-runtime/*|data|data/*|tools|tools/*)
           echo "回滚清单包含不安全路径：`$relative_path" >&2
           continue
           ;;
@@ -410,10 +446,29 @@ rollback() {
     done < '$script:RemoteTemp/added-files.txt'
   fi
   tar -C '$AppDir' -xzf "`$rollback_code"
+  if [ "`$media_unit_existed" -eq 1 ]; then
+    cp -a -- "`$media_unit_backup" "`$media_unit"
+  else
+    systemctl disable "`$media_service" >/dev/null 2>&1 || true
+    rm -f -- "`$media_unit"
+  fi
+  if [ "`$asr_unit_existed" -eq 1 ]; then
+    cp -a -- "`$asr_unit_backup" "`$asr_unit"
+  else
+    systemctl disable "`$asr_service" >/dev/null 2>&1 || true
+    rm -f -- "`$asr_unit"
+  fi
   printf '%s\n' "`$old_revision" > '$AppDir/.deployed-revision'
   chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
   systemctl daemon-reload
-  systemctl start `$services
+  rollback_services="`$core_services"
+  if [ "`$media_unit_existed" -eq 1 ]; then
+    rollback_services="`$rollback_services `$media_service"
+  fi
+  if [ "`$asr_unit_existed" -eq 1 ]; then
+    rollback_services="`$rollback_services `$asr_service"
+  fi
+  systemctl start `$rollback_services
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
     curl --connect-timeout 2 --max-time 5 -fsS \
       -H 'Host: $Domain' http://127.0.0.1:18083/healthz >/dev/null && break
@@ -430,6 +485,10 @@ sqlite3 -readonly "`$pre_deploy_db_partial" 'PRAGMA quick_check;' | grep -qx 'ok
 mv -f -- "`$pre_deploy_db_partial" "`$pre_deploy_db"
 chmod 600 "`$pre_deploy_db"
 sudo -u '$LinuxUser' tar -C '$AppDir' -xf '$script:RemoteTemp/release.tar'
+install -m 644 -o root -g root \
+  '$AppDir/deploy/systemd/runninghub-video-media.service' "`$media_unit"
+install -m 644 -o root -g root \
+  '$AppDir/deploy/systemd/runninghub-video-asr.service' "`$asr_unit"
 printf '%s\n' '$commit' > '$AppDir/.deployed-revision'
 chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
 chmod 600 '$AppDir/.env'
@@ -443,6 +502,8 @@ sudo -u '$LinuxUser' env \
     '$AppDir/.venv/bin/python' -m alembic -c alembic.ini upgrade head
 )
 systemctl daemon-reload
+services="`$core_services `$media_service `$asr_service"
+systemctl enable "`$media_service" "`$asr_service" >/dev/null
 systemctl start `$services
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
   if curl --connect-timeout 2 --max-time 5 -fsS \
@@ -451,6 +512,17 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
   fi
   if [ "`$attempt" -eq 10 ]; then
     echo '新版本健康检查失败' >&2
+    false
+  fi
+  sleep 1
+done
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if curl --connect-timeout 2 --max-time 5 -fsS \
+    http://127.0.0.1:18084/healthz >/dev/null; then
+    break
+  fi
+  if [ "`$attempt" -eq 10 ]; then
+    echo 'ASR 服务健康检查失败' >&2
     false
   fi
   sleep 1
@@ -477,6 +549,14 @@ curl --connect-timeout 3 --max-time 8 -fsS \
 echo
 curl --connect-timeout 3 --max-time 10 -fsS 'https://$Domain/healthz'
 echo
+curl --connect-timeout 3 --max-time 8 -fsS \
+  http://127.0.0.1:18084/healthz
+echo
+ss -ltn | awk '
+  `$1 == "LISTEN" && `$4 == "127.0.0.1:18084" { found=1 }
+  END { exit(found ? 0 : 1) }
+'
+echo 'ASR internal port 127.0.0.1:18084 LISTEN'
 timeout 15 nginx -t
 for port in 18080 18081 18082; do
   ss -ltn | awk -v expected=":`$port" '

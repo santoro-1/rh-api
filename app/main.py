@@ -15,7 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import get_settings
 from app.database import engine
-from app.routes import admin, auth, batches, operations, tasks, voices
+from app.routes import admin, auth, batches, long_audio, operations, tasks, voices
 from app.services.logging_config import configure_logging, log_event
 
 
@@ -35,6 +35,7 @@ def create_app() -> FastAPI:
         settings.staged_assets_dir.mkdir(parents=True, exist_ok=True)
         settings.voice_sources_dir.mkdir(parents=True, exist_ok=True)
         settings.voice_creations_dir.mkdir(parents=True, exist_ok=True)
+        settings.long_audio_dir.mkdir(parents=True, exist_ok=True)
         settings.logs_dir.mkdir(parents=True, exist_ok=True)
         settings.runtime_dir.mkdir(parents=True, exist_ok=True)
         yield
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(tasks.router)
     app.include_router(batches.router)
     app.include_router(voices.router)
+    app.include_router(long_audio.router)
     app.include_router(operations.router)
 
     @app.get("/healthz", include_in_schema=False)

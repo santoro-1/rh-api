@@ -34,6 +34,8 @@
 - 生产环境必须设置 APP_ENCRYPTION_KEY：Fernet URL-safe Base64 key
 - COOKIE_SECURE=false：仅限本地 HTTP；上线 HTTPS 后改为 true
 - MAX_VIDEO_SIZE_MB：LTX 源视频上传上限，默认 500 MB
+- LONG_AUDIO_ALIGNMENT_PROVIDER：长音频默认对齐器，当前为 `funasr_http`
+- ASR_BASE_URL：独立 ASR 服务地址，本地默认 `http://127.0.0.1:18084`
 
 可用以下方式生成加密 Key：
 
@@ -42,17 +44,19 @@
 ## 启动
 
 首次初始化完成后，双击项目根目录的 `启动系统.cmd` 即可。它会在后台完成迁移，
-同时启动 Web、语音 Worker 和视频 Worker，并自动打开默认的批量生成页。无需保留
-PowerShell 窗口；重复双击不会重复启动同一套服务。
+同时启动 Web、语音 Worker、媒体 Worker 和视频 Worker；如果 `.asr-runtime`
+中的独立环境已经安装完成，也会启动本地 ASR 服务。随后自动打开默认批量生成页。
+无需保留 PowerShell 窗口；重复双击不会重复启动同一套服务。
 
-需要停止时双击 `停止系统.cmd`。管理员登录后可从“运行状态”页面查看三个服务的
-心跳、CPU、内存、磁盘、FFmpeg、语音/视频队列数量和最近日志。日志位于
+需要停止时双击 `停止系统.cmd`。管理员登录后可从“运行状态”页面查看四个服务的
+心跳、CPU、内存、磁盘、FFmpeg、语音/媒体/视频队列数量和最近日志。日志位于
 `data/logs/`，默认保留 7 天且单文件最大 10 MB，敏感凭证写入前会脱敏。
 
 开发时仍可分别运行以下进程，以便在终端看即时输出：
 
     python -m scripts.serve_web
     python -m app.workers.audio_worker
+    python -m app.workers.media_worker
     python -m app.workers.task_worker
 
 修改 Worker 代码后需要重新启动对应 Worker；Web 进程不会替它重载。
@@ -124,8 +128,15 @@ MiniMax 账单计费；克隆、融合或设计音色首次正式使用可能另
 不会被覆盖，可在批次详情中展开试听；只有通过的版本才会继续切分并创建 RunningHub
 视频任务。
 
-直接上传音频模式不自动切分，单条音频最长 45 秒；超过时请先自行拆成多行，或改用
-完整流程自动切分。
+普通直接上传音频模式仍保持单条最长 45 秒。超过 45 秒的视频对口型素材可进入独立
+“长音频拆分”页面：上传源视频、长音频和完整原脚本后，媒体 Worker 使用可插拔的
+对齐服务生成约 30 秒、最长 45 秒的草稿。当前默认 provider 为
+`funasr_http`：独立 Paraformer 服务返回字词时间戳，主站将其与完整原脚本做模糊
+对齐，并优先在原脚本标点处选择真实字词间隙。ASR 文本不会替换原脚本。页面直接
+播放原始音频的指定区间，支持调整边界和每段原脚本；只有用户确认后才切割实体
+音频/视频并创建标准 `generation_segments` 子任务。`heuristic` provider 仍保留为
+显式降级工具，但不再作为默认正式方案。独立环境安装与真实音频基准方法见
+`asr_service/README.md`。
 
 批量暂存素材默认最多合计 5 GB、保留 24 小时，可通过
 `MAX_BATCH_ITEMS`、`MAX_BATCH_TOTAL_UPLOAD_MB` 和
@@ -169,8 +180,8 @@ MiniMax 账单计费；克隆、融合或设计音色首次正式使用可能另
 
 ## 数据与安全
 
-- SQLite 启用 WAL、外键与 busy timeout，适合一个 Web、一个语音 Worker 和一个
-  视频 Worker 并发访问。
+- SQLite 启用 WAL、外键与 busy timeout，适合一个 Web、一个语音 Worker、一个
+  媒体 Worker 和一个视频 Worker 并发访问。
 - 数据文件位于 data/uploads/用户ID/任务ID/ 和 data/outputs/用户ID/任务ID/。
 - 用户密码使用 PBKDF2-SHA256 哈希；RunningHub Key 使用 Fernet 对称加密。
 - 任务、图片预览和视频下载均进行登录与归属校验；管理员可查看全部任务。
@@ -192,15 +203,16 @@ MiniMax 账单计费；克隆、融合或设计音色首次正式使用可能另
 - generation_batches / generation_batch_items：批次元数据、脚本父任务和原始清单行
 - generation_segments：完整流程的分段脚本、时间区间、分段素材和 RunningHub 子任务关系
 - staged_assets：批量创建前已经校验、等待清单引用的暂存素材
+- long_audio_projects：长音频原始素材、脚本、可编辑分段草稿、处理状态和目标批次
 
 ## 生产部署
 
 仓库已提供 Ubuntu 单服务器部署模板，包括：
 
 - Nginx 反向代理和大文件上传配置；
-- Web、语音 Worker、视频 Worker、自动备份和自动清理的 systemd 服务；
+- Web、语音 Worker、媒体 Worker、视频 Worker、自动备份和自动清理的 systemd 服务；
 - 生产环境变量模板、预检、备份与恢复脚本；
 - HTTPS、上线验收、更新和日志检查步骤。
 
 完整说明见 [deploy/README.md](deploy/README.md)。正式部署时使用一个 Web 进程、
-一个语音 Worker 和一个视频 Worker；公网不直接开放 8000 端口。
+一个语音 Worker、一个媒体 Worker 和一个视频 Worker；公网不直接开放 8000 端口。

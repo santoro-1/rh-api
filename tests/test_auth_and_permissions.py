@@ -100,6 +100,7 @@ def test_admin_can_view_operations_without_terminal(client):
     assert set(payload["logs"]) == {
         "web",
         "audio_worker",
+        "media_worker",
         "video_worker",
         "launcher",
     }
@@ -124,11 +125,13 @@ def test_production_operations_hide_local_launcher(client, monkeypatch):
     assert set(update.json()["services"]) == {
         "web",
         "audio_worker",
+        "media_worker",
         "video_worker",
     }
     assert set(update.json()["logs"]) == {
         "web",
         "audio_worker",
+        "media_worker",
         "video_worker",
     }
 

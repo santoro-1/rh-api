@@ -11,17 +11,34 @@ systemd 服务、Nginx 配置和证书，不与服务器上的其他项目共用
 /etc/nginx/conf.d/runninghub-video.conf
 /etc/systemd/system/runninghub-video-web.service
 /etc/systemd/system/runninghub-video-audio.service
+/etc/systemd/system/runninghub-video-media.service
+/etc/systemd/system/runninghub-video-asr.service
 /etc/systemd/system/runninghub-video-worker.service
 /etc/letsencrypt/live/video.lanyingjk01.com/
 ```
 
 - Linux 用户：`rhvideo`
 - Web 监听：`127.0.0.1:18083`
+- ASR 仅监听服务器环回地址：`127.0.0.1:18084`
 - 公网入口：`https://video.lanyingjk01.com`
 - 对外只使用 Nginx 的 80/443，不开放内部端口
 - `.env` 权限必须为 `600`
-- 音频 Worker 固定使用较低 CPU、I/O 优先级及内存上限，避免影响服务器上的
+- 音频和媒体 Worker 固定使用较低 CPU、I/O 优先级及内存上限，避免影响服务器上的
   24 小时客服项目
+
+## ASR 隔离环境
+
+ASR 使用 `/opt/runninghub-video/.asr-runtime/venv`，不向主项目 `.venv`
+安装 PyTorch 或 FunASR。模型下载到 `/opt/runninghub-video/data/asr-models`。
+`deploy/scripts/install-asr.sh` 会计算依赖指纹：
+
+- 首次部署时创建隔离环境并安装 CPU 版依赖。
+- 普通代码更新且依赖未变化时只验证环境，随后跳过安装。
+- ASR 依赖或指定的 PyTorch 版本变化时才重建隔离环境。
+- 首次缺少 `ASR_SHARED_TOKEN` 时生成独立随机密钥并写入权限为 `600` 的 `.env`。
+
+ASR systemd 单元限制为单进程、`CPUQuota=150%`、`MemoryMax=2560M`，并只监听
+`127.0.0.1:18084`。不得开放安全组、防火墙或 Nginx 公网代理到该端口。
 
 ## 本地发布前要求
 
@@ -68,11 +85,14 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
 - `/var/tmp/runninghub-video-*`
 - `runninghub-video-web.service`
 - `runninghub-video-audio.service`
+- `runninghub-video-media.service`
+- `runninghub-video-asr.service`
 - `runninghub-video-worker.service`
 
 脚本不会修改 Nginx、证书、安全组或其他项目，不会自动删除备份。以下情况会拒绝
-自动发布：工作区不干净、本地不是最新 `main`、测试失败、项目队列不为空、依赖
-文件发生变化、发布范围不匹配，或本次 Git 变更包含文件删除。
+自动发布：工作区不干净、本地不是最新 `main`、测试失败、项目队列不为空、主项目
+`requirements.txt` 发生变化、发布范围不匹配，或本次 Git 变更包含文件删除。
+ASR 独立依赖由安装脚本通过指纹单独管理。
 
 如果上传或预检阶段失败，生产服务尚未停止。代码覆盖或迁移阶段失败时，脚本会
 恢复发布前代码并尝试重新启动本项目服务；数据库不会被静默覆盖，完整数据备份
@@ -83,8 +103,11 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
 ```bash
 systemctl is-active runninghub-video-web.service
 systemctl is-active runninghub-video-audio.service
+systemctl is-active runninghub-video-media.service
+systemctl is-active runninghub-video-asr.service
 systemctl is-active runninghub-video-worker.service
 curl -fsS -H 'Host: video.lanyingjk01.com' http://127.0.0.1:18083/healthz
+curl -fsS http://127.0.0.1:18084/healthz
 ```
 
 确认任务队列没有正在执行的任务，并先运行独立备份：
@@ -107,13 +130,19 @@ sudo -u rhvideo /opt/runninghub-video/.venv/bin/pip install \
 sudo -u rhvideo /bin/bash /opt/runninghub-video/deploy/scripts/preflight.sh
 sudo -u rhvideo /opt/runninghub-video/.venv/bin/python \
   -m alembic -c /opt/runninghub-video/alembic.ini upgrade head
+RUNNINGHUB_APP_DIR=/opt/runninghub-video \
+  RUNNINGHUB_RELEASE_DIR=/opt/runninghub-video \
+  RUNNINGHUB_LINUX_USER=rhvideo \
+  /bin/bash /opt/runninghub-video/deploy/scripts/install-asr.sh
 ```
 
-只重启本项目三个服务：
+只重启本项目五个服务：
 
 ```bash
 systemctl restart runninghub-video-web.service
 systemctl restart runninghub-video-audio.service
+systemctl restart runninghub-video-media.service
+systemctl restart runninghub-video-asr.service
 systemctl restart runninghub-video-worker.service
 ```
 
@@ -138,7 +167,7 @@ systemctl reload nginx
 
 ## 发布后验收
 
-1. 三个 `runninghub-video` 服务均为 active。
+1. 五个 `runninghub-video` 服务均为 active。
 2. `/healthz` 返回 `{"status":"ok"}`。
 3. HTTPS 登录、管理员页面和普通用户页面正常。
 4. 用户 A、B 的音色、任务、上传和输出互相不可见。
@@ -150,7 +179,7 @@ systemctl reload nginx
 ## 回滚与恢复
 
 代码异常优先回滚到发布前确认的 Git commit。涉及数据恢复时，必须先停止
-本项目三个服务，再显式执行：
+本项目五个服务，再显式执行：
 
 ```bash
 /bin/bash /opt/runninghub-video/deploy/scripts/restore.sh \

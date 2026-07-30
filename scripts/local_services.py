@@ -113,18 +113,96 @@ def _creation_flags() -> int:
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
-def _spawn_service(name: str, args: list[str]) -> tuple[subprocess.Popen[bytes], object]:
+def _spawn_service(
+    name: str,
+    executable: str,
+    args: list[str],
+    environment: dict[str, str] | None = None,
+) -> tuple[subprocess.Popen[bytes], object]:
     get_settings().logs_dir.mkdir(parents=True, exist_ok=True)
     stream: object = subprocess.DEVNULL
     process = subprocess.Popen(
-        [sys.executable, *args],
+        [executable, *args],
         cwd=PROJECT_ROOT,
         stdin=subprocess.DEVNULL,
         stdout=stream,
         stderr=subprocess.STDOUT,
+        env=environment,
         creationflags=_creation_flags(),
     )
     return process, stream
+
+
+def _local_asr_command() -> tuple[str, list[str], dict[str, str]] | None:
+    if not _port_available(18084):
+        log_event(
+            logger,
+            "system.asr_already_running",
+            "检测到本地 ASR 端口已在监听，本次不重复启动",
+        )
+        return None
+    python = PROJECT_ROOT / ".asr-runtime" / "venv" / "Scripts" / "python.exe"
+    if not python.is_file():
+        return None
+    try:
+        ready = subprocess.run(
+            [
+                str(python),
+                "-c",
+                (
+                    "import importlib.util,sys;"
+                    "names=('funasr','psutil','uvicorn');"
+                    "sys.exit(0 if all(importlib.util.find_spec(name) "
+                    "for name in names) else 1)"
+                ),
+            ],
+            cwd=PROJECT_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+            creationflags=_creation_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        log_event(
+            logger,
+            "system.asr_probe_failed",
+            "ASR 环境检查超时或无法执行；本次不启动 ASR 服务",
+            level=logging.WARNING,
+        )
+        return None
+    if ready.returncode != 0:
+        log_event(
+            logger,
+            "system.asr_not_ready",
+            "检测到 ASR 环境，但依赖尚未安装完成；本次不启动 ASR 服务",
+            level=logging.WARNING,
+        )
+        return None
+    environment = os.environ.copy()
+    for proxy_name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        environment.pop(proxy_name, None)
+    environment.setdefault(
+        "MODELSCOPE_CACHE",
+        str(PROJECT_ROOT / ".asr-runtime" / "models"),
+    )
+    environment.setdefault("ASR_MODEL", "paraformer-zh")
+    environment.setdefault("ASR_VAD_MODEL", "fsmn-vad")
+    environment.setdefault("ASR_DEVICE", "cpu")
+    return (
+        str(python),
+        [
+            "-m",
+            "uvicorn",
+            "asr_service.app:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18084",
+        ],
+        environment,
+    )
 
 
 def _terminate(process: subprocess.Popen[bytes]) -> None:
@@ -188,16 +266,31 @@ def run_supervisor() -> int:
     # later startup.
     token = uuid.uuid4().hex
     _run_migrations()
-    commands = {
-        "web": ["-m", "scripts.serve_web"],
-        "audio_worker": ["-m", "app.workers.audio_worker"],
-        "video_worker": ["-m", "app.workers.task_worker"],
+    commands: dict[str, tuple[str, list[str], dict[str, str] | None]] = {
+        "web": (sys.executable, ["-m", "scripts.serve_web"], None),
+        "audio_worker": (
+            sys.executable,
+            ["-m", "app.workers.audio_worker"],
+            None,
+        ),
+        "media_worker": (
+            sys.executable,
+            ["-m", "app.workers.media_worker"],
+            None,
+        ),
+        "video_worker": (
+            sys.executable,
+            ["-m", "app.workers.task_worker"],
+            None,
+        ),
     }
+    if asr_command := _local_asr_command():
+        commands["asr_service"] = asr_command
     children: dict[str, subprocess.Popen[bytes]] = {}
     streams: dict[str, object] = {}
     try:
         for name, command in commands.items():
-            children[name], streams[name] = _spawn_service(name, command)
+            children[name], streams[name] = _spawn_service(name, *command)
             log_event(
                 logger,
                 "system.service_started",
@@ -248,7 +341,10 @@ def run_supervisor() -> int:
                 stream = streams.pop(name, None)
                 if hasattr(stream, "close"):
                     stream.close()
-                children[name], streams[name] = _spawn_service(name, commands[name])
+                children[name], streams[name] = _spawn_service(
+                    name,
+                    *commands[name],
+                )
                 _write_json(
                     STATE_FILE,
                     {

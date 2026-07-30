@@ -71,6 +71,16 @@ class VoiceCreationStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class LongAudioProjectStatus(str, Enum):
+    PENDING_ANALYSIS = "PENDING_ANALYSIS"
+    ANALYZING = "ANALYZING"
+    REVIEW = "REVIEW"
+    PENDING_CUT = "PENDING_CUT"
+    CUTTING = "CUTTING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -109,6 +119,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     voice_creation_tasks: Mapped[list["VoiceCreationTask"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    long_audio_projects: Mapped[list["LongAudioProject"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -465,6 +478,60 @@ class StagedAsset(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="staged_assets")
+
+
+class LongAudioProject(Base):
+    """Temporary long-media analysis that becomes a segmented video batch."""
+
+    __tablename__ = "long_audio_projects"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    batch_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("generation_batches.id", ondelete="SET NULL"),
+        unique=True,
+        nullable=True,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    script_text: Mapped[str] = mapped_column(Text, nullable=False)
+    audio_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    audio_original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    video_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    video_original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    parameters_json: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    alignment_provider: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="funasr_http"
+    )
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=LongAudioProjectStatus.PENDING_ANALYSIS.value,
+        index=True,
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="long_audio_projects")
+    batch: Mapped[Optional["GenerationBatch"]] = relationship()
 
 
 class GenerationSegment(Base):

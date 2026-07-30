@@ -33,6 +33,53 @@ def test_audio_worker_has_its_own_restartable_service():
     assert "MemoryMax=1536M" in service
 
 
+def test_media_worker_is_isolated_and_resource_limited():
+    service = (
+        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-video-media.service"
+    ).read_text(encoding="utf-8")
+    assert "-m app.workers.media_worker" in service
+    assert "Restart=on-failure" in service
+    assert "ReadWritePaths=/opt/runninghub-video/data" in service
+    assert "CPUQuota=100%" in service
+    assert "MemoryMax=2048M" in service
+
+
+def test_asr_service_is_loopback_only_and_strictly_resource_limited():
+    service = (
+        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-video-asr.service"
+    ).read_text(encoding="utf-8")
+    assert ".asr-runtime/venv/bin/python -m uvicorn asr_service.app:app" in service
+    assert "--host 127.0.0.1" in service
+    assert "--port 18084" in service
+    assert "EnvironmentFile=/opt/runninghub-video/.env" in service
+    assert "ASR_DEVICE=cpu" in service
+    assert "OMP_NUM_THREADS=2" in service
+    assert "CPUQuota=150%" in service
+    assert "CPUWeight=10" in service
+    assert "MemoryHigh=2048M" in service
+    assert "MemoryMax=2560M" in service
+    assert "OOMScoreAdjust=500" in service
+    assert "ReadWritePaths=/opt/runninghub-video/data" in service
+
+
+def test_asr_installer_is_idempotent_and_scoped_to_project():
+    installer = (
+        PROJECT_ROOT / "deploy" / "scripts" / "install-asr.sh"
+    ).read_text(encoding="utf-8")
+    assert 'APP_DIR="${RUNNINGHUB_APP_DIR:-/opt/runninghub-video}"' in installer
+    assert 'if [[ "$APP_DIR" != "/opt/runninghub-video" ]]' in installer
+    assert 'RUNTIME_DIR="$APP_DIR/.asr-runtime"' in installer
+    assert 'MODEL_DIR="$APP_DIR/data/asr-models"' in installer
+    assert "requirements.sha256" in installer
+    assert '"$installed_hash" == "$desired_hash"' in installer
+    assert 'sha256sum "$REQUIREMENTS" | awk' in installer
+    assert "importlib.util.find_spec" in installer
+    assert "跳过安装" in installer
+    assert "torch==$TORCH_VERSION" in installer
+    assert "ASR_SHARED_TOKEN" in installer
+    assert "openssl rand -hex 32" in installer
+
+
 def test_windows_one_click_launcher_starts_all_local_services():
     launcher = (PROJECT_ROOT / "scripts" / "local_services.py").read_text(
         encoding="utf-8"
@@ -43,7 +90,9 @@ def test_windows_one_click_launcher_starts_all_local_services():
         encoding="utf-8"
     )
     assert "app.workers.audio_worker" in launcher
+    assert "app.workers.media_worker" in launcher
     assert "app.workers.task_worker" in launcher
+    assert "asr_service.app:app" in launcher
     assert "scripts.serve_web" in launcher
     assert "uvicorn.run" in web_runner
     assert "alembic" in launcher
@@ -134,6 +183,8 @@ def test_backup_timer_and_restore_confirmation_are_present():
     ).read_text(encoding="utf-8")
     assert "Persistent=true" in timer
     assert '"$CONFIRM" != "--confirm"' in restore
+    assert "runninghub-video-media.service" in restore
+    assert "runninghub-video-asr.service" in restore
 
 
 def test_windows_production_update_script_is_explicit_and_scoped():
@@ -164,6 +215,13 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert "failed-app.db" in updater
     assert "正在恢复发布前代码和数据库" in updater
     assert "systemctl daemon-reload" in updater
+    assert "runninghub-video-media.service" in updater
+    assert "runninghub-video-media.service.before" in updater
+    assert "runninghub-video-asr.service" in updater
+    assert "runninghub-video-asr.service.before" in updater
+    assert "deploy/scripts/install-asr.sh" in updater
+    assert "http://127.0.0.1:18084/healthz" in updater
+    assert "systemctl enable" in updater
     assert "cd '$AppDir'" in updater
     assert "requirements.txt 有变化" in updater
     assert "systemctl restart" not in updater

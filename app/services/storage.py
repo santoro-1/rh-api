@@ -155,6 +155,12 @@ def voice_creation_dir(settings: Settings, user_id: int, task_id: str) -> Path:
     return settings.voice_creations_dir / str(user_id) / task_id
 
 
+def long_audio_project_dir(
+    settings: Settings, user_id: int, project_id: str
+) -> Path:
+    return settings.long_audio_dir / str(user_id) / project_id
+
+
 def materialize_staged_asset(
     source: Path,
     destination_dir: Path,

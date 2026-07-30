@@ -16,7 +16,15 @@ from starlette.background import BackgroundTask
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import AudioGenerationTask, AudioTaskStatus, GenerationTask, TaskStatus, User
+from app.models import (
+    AudioGenerationTask,
+    AudioTaskStatus,
+    GenerationTask,
+    LongAudioProject,
+    LongAudioProjectStatus,
+    TaskStatus,
+    User,
+)
 from app.routes.dependencies import get_page_admin
 from app.services.resource_monitor import resource_snapshot
 from app.web import templates
@@ -29,12 +37,14 @@ router = APIRouter(prefix="/admin", tags=["operations"])
 LOG_FILES = {
     "web": "web.log",
     "audio_worker": "audio_worker.log",
+    "media_worker": "media_worker.log",
     "video_worker": "video_worker.log",
     "launcher": "launcher.log",
 }
 SERVICE_LABELS = {
     "web": "Web",
     "audio_worker": "语音 Worker",
+    "media_worker": "媒体 Worker",
     "video_worker": "视频 Worker",
     "launcher": "本地总控",
 }
@@ -248,6 +258,7 @@ def _service_snapshot() -> dict[str, dict[str, object]]:
             "updatedAt": datetime.now(timezone.utc).isoformat(),
         },
         "audio_worker": _heartbeat("audio_worker"),
+        "media_worker": _heartbeat("media_worker"),
         "video_worker": _heartbeat("video_worker"),
         "launcher": _heartbeat("launcher"),
     }
@@ -261,7 +272,7 @@ def _service_options() -> tuple[tuple[str, str], ...]:
     """Hide the Windows-only launcher from systemd production deployments."""
 
     keys = (
-        ("web", "audio_worker", "video_worker")
+        ("web", "audio_worker", "media_worker", "video_worker")
         if get_settings().app_env == "production"
         else tuple(LOG_FILES)
     )
@@ -292,6 +303,13 @@ def _queue_snapshot(db: Session) -> dict[str, object]:
             )
         ).all()
     )
+    media_counts = dict(
+        db.execute(
+            select(LongAudioProject.status, func.count()).group_by(
+                LongAudioProject.status
+            )
+        ).all()
+    )
     video_active_statuses = {
         TaskStatus.PENDING.value,
         TaskStatus.UPLOADING.value,
@@ -308,9 +326,16 @@ def _queue_snapshot(db: Session) -> dict[str, object]:
         AudioTaskStatus.SEGMENTING.value,
         AudioTaskStatus.HANDOFF.value,
     }
+    media_active_statuses = {
+        LongAudioProjectStatus.PENDING_ANALYSIS.value,
+        LongAudioProjectStatus.ANALYZING.value,
+        LongAudioProjectStatus.PENDING_CUT.value,
+        LongAudioProjectStatus.CUTTING.value,
+    }
     return {
         "videoCounts": video_counts,
         "audioCounts": audio_counts,
+        "mediaCounts": media_counts,
         "videoActive": sum(
             count
             for status, count in video_counts.items()
@@ -320,6 +345,11 @@ def _queue_snapshot(db: Session) -> dict[str, object]:
             count
             for status, count in audio_counts.items()
             if status in audio_active_statuses
+        ),
+        "mediaActive": sum(
+            count
+            for status, count in media_counts.items()
+            if status in media_active_statuses
         ),
     }
 
@@ -375,8 +405,10 @@ def operations_page(
             "service_options": _service_options(),
             "video_counts": queue["videoCounts"],
             "audio_counts": queue["audioCounts"],
+            "media_counts": queue["mediaCounts"],
             "video_active": queue["videoActive"],
             "audio_active": queue["audioActive"],
+            "media_active": queue["mediaActive"],
             "logs": logs,
             "resources": resource_snapshot(get_settings()),
             "users": users,
@@ -399,6 +431,7 @@ def operations_page(
 def operations_updates(
     web: int | None = None,
     audio_worker: int | None = None,
+    media_worker: int | None = None,
     video_worker: int | None = None,
     launcher: int | None = None,
     current_user: User = Depends(get_page_admin),
@@ -410,6 +443,7 @@ def operations_updates(
     cursors = {
         "web": web,
         "audio_worker": audio_worker,
+        "media_worker": media_worker,
         "video_worker": video_worker,
         "launcher": launcher,
     }
