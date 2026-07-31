@@ -87,6 +87,26 @@ def test_asr_installer_is_idempotent_and_scoped_to_project():
     assert "openssl rand -hex 32" in installer
 
 
+def test_remote_media_worker_switch_is_explicit_and_reversible():
+    switcher = (
+        PROJECT_ROOT
+        / "deploy"
+        / "scripts"
+        / "configure-remote-media-worker.sh"
+    ).read_text(encoding="utf-8")
+    assert '"$APP_DIR" != "/opt/runninghub-video"' in switcher
+    assert '"$CONFIRM" != "--confirm"' in switcher
+    assert '"$MODE" != "remote" && "$MODE" != "local"' in switcher
+    assert "remote-worker-env-" in switcher
+    assert "restore_on_error" in switcher
+    assert "切换失败，正在恢复修改前 .env" in switcher
+    assert 'upsert_env "MEDIA_PROCESSING_MODE" "remote"' in switcher
+    assert 'upsert_env "MEDIA_PROCESSING_MODE" "local"' in switcher
+    assert 'upsert_env "LONG_AUDIO_ALIGNMENT_PROVIDER" "funasr_http"' in switcher
+    assert "openssl rand -hex 32" in switcher
+    assert "runninghub-video-asr.service" not in switcher
+
+
 def test_windows_one_click_launcher_starts_all_local_services():
     launcher = (PROJECT_ROOT / "scripts" / "local_services.py").read_text(
         encoding="utf-8"
@@ -191,7 +211,7 @@ def test_backup_timer_and_restore_confirmation_are_present():
     assert "Persistent=true" in timer
     assert '"$CONFIRM" != "--confirm"' in restore
     assert "runninghub-video-media.service" in restore
-    assert "runninghub-video-asr.service" in restore
+    assert "runninghub-video-asr.service" not in restore
 
 
 def test_windows_production_update_script_is_explicit_and_scoped():
@@ -225,10 +245,10 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert "systemctl daemon-reload" in updater
     assert "runninghub-video-media.service" in updater
     assert "runninghub-video-media.service.before" in updater
-    assert "runninghub-video-asr.service" in updater
-    assert "runninghub-video-asr.service.before" in updater
-    assert "deploy/scripts/install-asr.sh" in updater
-    assert "http://127.0.0.1:18084/healthz" in updater
+    assert "runninghub-video-asr.service" not in updater
+    assert "deploy/scripts/install-asr.sh" not in updater
+    assert "http://127.0.0.1:18084/healthz" not in updater
+    assert "不会安装或启动服务器 ASR" in updater
     assert "systemctl enable" in updater
     assert "cd '$AppDir'" in updater
     assert "requirements.txt 有变化" in updater

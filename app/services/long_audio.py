@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -198,14 +199,31 @@ def analyze_long_audio_project(
         raise LongAudioError("原始长音频文件不存在")
     provider = get_alignment_provider(project.alignment_provider)
     result = provider.align(audio_path, project.script_text)
-    if not result.plans:
+    apply_alignment_plans(
+        project,
+        settings,
+        list(result.plans),
+        provider=result.provider,
+    )
+
+
+def apply_alignment_plans(
+    project: LongAudioProject,
+    settings: Settings,
+    plans: list[SegmentPlan] | tuple[SegmentPlan, ...],
+    *,
+    provider: str,
+) -> None:
+    """Validate an alignment result before making it visible for review."""
+
+    if not plans:
         raise LongAudioError("对齐服务没有生成分段")
-    if len(result.plans) > settings.max_batch_items:
+    if len(plans) > settings.max_batch_items:
         raise LongAudioError(
             f"自动分段数量超过当前上限 {settings.max_batch_items}"
         )
     previous_end = 0.0
-    for position, plan in enumerate(result.plans, start=1):
+    for position, plan in enumerate(plans, start=1):
         if plan.index != position:
             raise LongAudioError("对齐服务返回的分段序号不连续")
         if abs(plan.start_seconds - previous_end) > 0.05:
@@ -219,11 +237,11 @@ def analyze_long_audio_project(
     if abs(previous_end - project.duration_seconds) > 0.1:
         raise LongAudioError("对齐服务没有覆盖完整音频")
     if _normalized_script(
-        "".join(plan.script_text for plan in result.plans)
+        "".join(plan.script_text for plan in plans)
     ) != _normalized_script(project.script_text):
         raise LongAudioError("对齐服务没有完整映射原始脚本")
-    project.plan_json = serialize_plans(result.plans)
-    project.alignment_provider = result.provider
+    project.plan_json = serialize_plans(plans)
+    project.alignment_provider = provider
     project.status = LongAudioProjectStatus.REVIEW.value
     project.error_code = None
     project.error_message = None
@@ -328,6 +346,8 @@ def materialize_long_audio_project(
     db: Session,
     project: LongAudioProject,
     settings: Settings,
+    *,
+    precut_directory: Path | None = None,
 ) -> GenerationBatch:
     if project.batch_id and project.batch is not None:
         return project.batch
@@ -402,19 +422,53 @@ def materialize_long_audio_project(
             created_directories.append(upload_dir)
             segment_audio = upload_dir / f"segment-{plan.index:03d}.mp3"
             segment_video = upload_dir / f"segment-{plan.index:03d}.mp4"
-            cut_audio_segment(
-                audio_source,
-                segment_audio,
-                start_seconds=plan.start_seconds,
-                end_seconds=plan.end_seconds,
-            )
+            if precut_directory is None:
+                cut_audio_segment(
+                    audio_source,
+                    segment_audio,
+                    start_seconds=plan.start_seconds,
+                    end_seconds=plan.end_seconds,
+                )
+            else:
+                source_audio = (
+                    precut_directory
+                    / "audio"
+                    / f"segment-{plan.index:03d}.mp3"
+                )
+                source_video = (
+                    precut_directory
+                    / "video"
+                    / f"segment-{plan.index:03d}.mp4"
+                )
+                if not source_audio.is_file() or not source_video.is_file():
+                    raise LongAudioError(
+                        f"远程节点没有返回第 {plan.index} 段完整素材"
+                    )
+                segment_audio.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source_audio, segment_audio)
+                shutil.copyfile(source_video, segment_video)
             segment_duration = inspect_audio_duration(segment_audio)
-            cut_video_segment(
-                video_source,
-                segment_video,
-                start_seconds=plan.start_seconds,
-                duration_seconds=segment_duration,
-            )
+            if segment_duration <= 0 or segment_duration > MAX_SEGMENT_SECONDS + 0.2:
+                raise LongAudioError(
+                    f"第 {plan.index} 段远程音频时长无效"
+                )
+            if abs(segment_duration - plan.duration_seconds) > 0.75:
+                raise LongAudioError(
+                    f"第 {plan.index} 段远程音频时长与分段方案不一致"
+                )
+            if precut_directory is None:
+                cut_video_segment(
+                    video_source,
+                    segment_video,
+                    start_seconds=plan.start_seconds,
+                    duration_seconds=segment_duration,
+                )
+            else:
+                video_duration = inspect_media_duration(segment_video)
+                if video_duration + 0.1 < segment_duration:
+                    raise LongAudioError(
+                        f"第 {plan.index} 段远程视频短于对应音频"
+                    )
             audio_relative = to_relative_data_path(segment_audio, settings)
             video_relative = to_relative_data_path(segment_video, settings)
             prompt = f"{prompt_prefix}：“{plan.script_text}”"

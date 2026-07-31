@@ -22,6 +22,11 @@
     <strong>预计分段</strong>
     <p id="long-audio-segment-count">等待分析</p>
   </div>
+  <div>
+    <strong>处理节点</strong>
+    <p id="long-audio-worker">{{ project.remote_worker_id or "等待领取" }}</p>
+    <small id="long-audio-worker-metrics" class="muted"></small>
+  </div>
 </section>
 
 <div id="long-audio-error" class="error{% if not project.error_message %} hidden{% endif %}">
@@ -57,7 +62,7 @@
 
 <section id="long-audio-processing-panel" class="panel hidden">
   <h2>后台处理中</h2>
-  <p class="muted">页面会自动更新。分析阶段不会切文件；确认后才会切割音频和视频。</p>
+  <p class="muted">页面会自动更新。远程模式下由已授权的电脑主动领取素材；分析阶段不会切文件，确认后才会切割并回传音频和视频。</p>
 </section>
 
 <section id="long-audio-completed-panel" class="panel hidden">

@@ -192,6 +192,19 @@
     document.getElementById("long-audio-provider").textContent = project.alignmentProvider;
     document.getElementById("long-audio-segment-count").textContent =
       project.segments?.length ? `${project.segments.length} 段` : "等待分析";
+    const worker = document.getElementById("long-audio-worker");
+    const workerMetrics = document.getElementById("long-audio-worker-metrics");
+    if (worker) worker.textContent = project.remoteWorkerId || "等待领取";
+    if (workerMetrics) {
+      const metrics = project.remoteMetrics || {};
+      const details = [];
+      if (metrics.phase) details.push(metrics.phase);
+      if (metrics.elapsedSeconds != null) details.push(`${Number(metrics.elapsedSeconds).toFixed(1)} 秒`);
+      if (metrics.workerTreeRssMb != null) details.push(`节点进程 ${Number(metrics.workerTreeRssMb).toFixed(0)} MB`);
+      else if (metrics.processRssMb != null) details.push(`Worker ${Number(metrics.processRssMb).toFixed(0)} MB`);
+      if (metrics.systemMemoryPercent != null) details.push(`整机内存 ${Number(metrics.systemMemoryPercent).toFixed(0)}%`);
+      workerMetrics.textContent = details.join(" · ");
+    }
     if (project.errorMessage) {
       errorBox.textContent = project.errorMessage;
       errorBox.classList.remove("hidden");

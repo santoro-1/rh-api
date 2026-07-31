@@ -16,9 +16,8 @@ fi
 if systemctl is-active --quiet runninghub-video-web.service ||
    systemctl is-active --quiet runninghub-video-audio.service ||
    systemctl is-active --quiet runninghub-video-media.service ||
-   systemctl is-active --quiet runninghub-video-asr.service ||
    systemctl is-active --quiet runninghub-video-worker.service; then
-    echo "恢复前必须停止 runninghub-video 的五个服务" >&2
+    echo "恢复前必须停止 runninghub-video 的四个服务" >&2
     exit 1
 fi
 

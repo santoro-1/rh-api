@@ -36,6 +36,8 @@
 - MAX_VIDEO_SIZE_MB：LTX 源视频上传上限，默认 500 MB
 - LONG_AUDIO_ALIGNMENT_PROVIDER：长音频默认对齐器，当前为 `funasr_http`
 - ASR_BASE_URL：独立 ASR 服务地址，本地默认 `http://127.0.0.1:18084`
+- MEDIA_PROCESSING_MODE：`local` 为同机处理，`remote` 为授权电脑主动领任务
+- MEDIA_WORKER_TOKEN：远程模式专用随机令牌，生产环境至少 32 个字符
 
 可用以下方式生成加密 Key：
 
@@ -60,6 +62,45 @@
     python -m app.workers.task_worker
 
 修改 Worker 代码后需要重新启动对应 Worker；Web 进程不会替它重载。
+
+## 笔记本远程媒体节点
+
+长音频的 ASR、切音频和切视频可以放在 Windows 电脑执行，服务器只负责保存
+任务、素材和最终子任务。电脑使用 HTTPS 主动轮询服务器，因此不需要公网 IP、
+端口映射、防火墙放行或把本机 ASR 暴露到公网。
+
+处理顺序如下：
+
+1. 用户仍在网站上传长音频、原脚本和源视频。
+2. 服务器保存项目，笔记本节点用独立令牌领取分析任务。
+3. 笔记本下载音频，调用本机 `127.0.0.1:18084` 的 FunASR，回传时间轴和脚本分段。
+4. 用户在网站试听、调整并确认。
+5. 笔记本再次领取切割任务，下载音视频，使用本机 FFmpeg 串行切割。
+6. 笔记本把严格命名的分段 ZIP 回传；服务器复核段数和时长后创建 RunningHub
+   子任务。
+
+任务租约默认 30 分钟，节点每 60 秒续租。电脑断网或退出后，租约过期的任务会
+自动回到队列，另一个节点可以继续领取。服务器与电脑使用同一个
+`MEDIA_WORKER_TOKEN`，网站用户密码、RunningHub Key 和 MiniMax Key 都不会下发
+到电脑。
+
+笔记本首次配置：
+
+```powershell
+Copy-Item .env.worker.example .env.worker
+notepad .env.worker
+```
+
+把服务器脚本输出的 `MEDIA_WORKER_TOKEN` 填入 `.env.worker`，确认
+`MEDIA_WORKER_SERVER_URL=https://video.lanyingjk01.com`。本机 ASR 环境按
+[`asr_service/README.md`](asr_service/README.md) 安装完成后，双击
+`启动远程媒体节点.cmd`。启动器会复用已经运行的本机 ASR；若没有运行，则只在
+`127.0.0.1:18084` 启动一个。关闭窗口会停止由该启动器创建的 ASR 和 Worker。
+
+节点工作目录默认是 `data/remote-worker`，每个任务成功或失败后都会清理。网页的
+长音频详情会显示领取任务的电脑名称、处理耗时、节点进程内存和整机内存占用。
+第一版 ASR 与 FFmpeg 都限制为单任务串行，避免和电脑上已有的高精度 ASR、分镜
+FFmpeg 同时抢占大量资源。
 
 创建任务时先在统一页面选择数字人或视频对口型工作流。数字人固定使用 24G 普通版；视频对口型可为当前任务选择 `default` 或 `plus`。
 
@@ -181,7 +222,7 @@ MiniMax 账单计费；克隆、融合或设计音色首次正式使用可能另
 ## 数据与安全
 
 - SQLite 启用 WAL、外键与 busy timeout，适合一个 Web、一个语音 Worker、一个
-  媒体 Worker 和一个视频 Worker 并发访问。
+  媒体调度 Worker 和一个视频 Worker 并发访问。
 - 数据文件位于 data/uploads/用户ID/任务ID/ 和 data/outputs/用户ID/任务ID/。
 - 用户密码使用 PBKDF2-SHA256 哈希；RunningHub Key 使用 Fernet 对称加密。
 - 任务、图片预览和视频下载均进行登录与归属校验；管理员可查看全部任务。
@@ -203,7 +244,8 @@ MiniMax 账单计费；克隆、融合或设计音色首次正式使用可能另
 - generation_batches / generation_batch_items：批次元数据、脚本父任务和原始清单行
 - generation_segments：完整流程的分段脚本、时间区间、分段素材和 RunningHub 子任务关系
 - staged_assets：批量创建前已经校验、等待清单引用的暂存素材
-- long_audio_projects：长音频原始素材、脚本、可编辑分段草稿、处理状态和目标批次
+- long_audio_projects：长音频原始素材、脚本、可编辑分段草稿、远程节点租约、
+  资源指标、处理状态和目标批次
 
 ## 生产部署
 
@@ -216,3 +258,5 @@ MiniMax 账单计费；克隆、融合或设计音色首次正式使用可能另
 
 完整说明见 [deploy/README.md](deploy/README.md)。正式部署时使用一个 Web 进程、
 一个语音 Worker、一个媒体 Worker 和一个视频 Worker；公网不直接开放 8000 端口。
+服务器默认不再安装或启动 FunASR；长媒体使用 Windows 节点时，服务器媒体 Worker
+只负责保留队列心跳，实际 ASR 与 FFmpeg 由授权节点执行。

@@ -25,23 +25,31 @@ logger = logging.getLogger(__name__)
 
 
 def recover_inflight_projects(db: Session) -> None:
+    if get_settings().media_processing_mode != "local":
+        return
     db.execute(
         update(LongAudioProject)
         .where(
             LongAudioProject.status
-            == LongAudioProjectStatus.ANALYZING.value
+            == LongAudioProjectStatus.ANALYZING.value,
+            LongAudioProject.remote_lease_id.is_(None),
         )
         .values(status=LongAudioProjectStatus.PENDING_ANALYSIS.value)
     )
     db.execute(
         update(LongAudioProject)
-        .where(LongAudioProject.status == LongAudioProjectStatus.CUTTING.value)
+        .where(
+            LongAudioProject.status == LongAudioProjectStatus.CUTTING.value,
+            LongAudioProject.remote_lease_id.is_(None),
+        )
         .values(status=LongAudioProjectStatus.PENDING_CUT.value)
     )
     db.commit()
 
 
 def _claim_next(db: Session) -> LongAudioProject | None:
+    if get_settings().media_processing_mode != "local":
+        return None
     row = db.execute(
         select(LongAudioProject.id, LongAudioProject.status)
         .where(
