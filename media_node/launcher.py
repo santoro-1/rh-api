@@ -9,16 +9,24 @@ from pathlib import Path
 import requests
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-WORKER_ENV = PROJECT_ROOT / ".env.worker"
+NODE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = NODE_ROOT.parent
+WORKER_ENV = NODE_ROOT / ".env"
+LEGACY_WORKER_ENV = PROJECT_ROOT / ".env.worker"
 
 
 def _load_worker_env() -> None:
-    if not WORKER_ENV.is_file():
+    environment_file = (
+        WORKER_ENV if WORKER_ENV.is_file() else LEGACY_WORKER_ENV
+    )
+    if not environment_file.is_file():
         raise RuntimeError(
-            "缺少 .env.worker，请复制 .env.worker.example 后填写服务器地址和令牌"
+            "缺少 media_node/.env，请复制 media_node/.env.example "
+            "后填写服务器地址和令牌"
         )
-    for raw_line in WORKER_ENV.read_text(encoding="utf-8").splitlines():
+    if environment_file == LEGACY_WORKER_ENV:
+        print("检测到根目录旧版 .env.worker，本次兼容读取；建议迁移到 media_node/.env。")
+    for raw_line in environment_file.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -46,15 +54,22 @@ def _start_asr() -> subprocess.Popen[bytes] | None:
     if _asr_healthy():
         print("检测到本机 ASR 已运行，将直接复用。")
         return None
-    python = PROJECT_ROOT / ".asr-runtime" / "venv" / "Scripts" / "python.exe"
+    runtime_root = NODE_ROOT / ".runtime"
+    python = runtime_root / "venv" / "Scripts" / "python.exe"
+    if not python.is_file():
+        legacy_runtime = PROJECT_ROOT / ".asr-runtime"
+        legacy_python = legacy_runtime / "venv" / "Scripts" / "python.exe"
+        if legacy_python.is_file():
+            runtime_root = legacy_runtime
+            python = legacy_python
     if not python.is_file():
         raise RuntimeError(
-            "缺少 .asr-runtime ASR 环境，请先按 asr_service/README.md 安装"
+            "缺少媒体节点运行环境，请先执行 media_node/安装媒体节点.ps1"
         )
     environment = os.environ.copy()
     environment.setdefault(
         "MODELSCOPE_CACHE",
-        str(PROJECT_ROOT / ".asr-runtime" / "models"),
+        str(runtime_root / "models"),
     )
     environment.setdefault("ASR_MODEL", "paraformer-zh")
     environment.setdefault("ASR_VAD_MODEL", "fsmn-vad")
@@ -66,11 +81,11 @@ def _start_asr() -> subprocess.Popen[bytes] | None:
             str(python),
             "-m",
             "uvicorn",
-            "asr_service.app:app",
+            "media_node.asr_service.app:app",
             "--host",
-            "127.0.0.1",
+            os.getenv("ASR_HOST", "127.0.0.1"),
             "--port",
-            "18084",
+            os.getenv("ASR_PORT", "18084"),
         ],
         cwd=PROJECT_ROOT,
         env=environment,
@@ -90,7 +105,7 @@ def main() -> int:
     _load_worker_env()
     asr_process = _start_asr()
     try:
-        from scripts.remote_media_worker import run
+        from media_node.worker import run
 
         return run()
     finally:

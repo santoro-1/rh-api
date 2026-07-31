@@ -71,6 +71,7 @@ def _create_project(client, monkeypatch) -> str:
             "promptPrefix": "一名人物用中文说",
             "instanceType": "default",
             "alignmentProvider": "funasr_http",
+            "reviewRequired": "true",
         },
         files={
             "customAudio": ("long.mp3", b"ID3long-audio", "audio/mpeg"),
@@ -126,6 +127,17 @@ def _segment_archive() -> bytes:
             bundle.writestr(
                 f"video/segment-{index:03d}.mp4",
                 b"\x00\x00\x00\x18ftypisomsegment",
+            )
+    return output.getvalue()
+
+
+def _audio_only_segment_archive() -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as bundle:
+        for index in range(1, 4):
+            bundle.writestr(
+                f"audio/segment-{index:03d}.mp3",
+                b"ID3segment",
             )
     return output.getvalue()
 
@@ -291,3 +303,85 @@ def test_expired_remote_lease_is_reclaimed(client, monkeypatch):
         },
     )
     assert stale.status_code == 409
+
+
+def test_remote_digital_human_uses_audio_only_cut_archive(client, monkeypatch):
+    _remote_settings(monkeypatch)
+    create_user("remote-digital-user")
+    login(client, "remote-digital-user")
+    monkeypatch.setattr(
+        "app.services.long_audio.inspect_audio_duration",
+        lambda path: 30.0 if "segment-" in Path(path).name else 90.0,
+    )
+    created = client.post(
+        "/api/long-audio-projects",
+        data={
+            "name": "远程数字人长音频",
+            "workflowType": "digital_human",
+            "digitalPrompt": "人物自然说话。",
+        },
+        files={
+            "customAudio": ("long.mp3", b"ID3long-audio", "audio/mpeg"),
+            "sourceImage": (
+                "person.png",
+                b"\x89PNG\r\n\x1a\nperson",
+                "image/png",
+            ),
+        },
+    )
+    assert created.status_code == 201, created.text
+    project_id = created.json()["projectId"]
+
+    analysis_job = client.post(
+        "/api/media-worker/v1/jobs/claim",
+        headers=_worker_headers(),
+        json={"workerId": "san-laptop", "capabilities": ["analysis", "cut"]},
+    ).json()
+    assert analysis_job["workflowType"] == "digital_human"
+    segments = [
+        {
+            "index": index,
+            "startSeconds": (index - 1) * 30,
+            "endSeconds": index * 30,
+            "scriptText": "",
+            "alignmentMethod": "vad_silence",
+        }
+        for index in range(1, 4)
+    ]
+    analyzed = client.post(
+        f"/api/media-worker/v1/jobs/{project_id}/analysis",
+        headers=_worker_headers(),
+        json={
+            "leaseId": analysis_job["leaseId"],
+            "provider": "vad_silence",
+            "segments": segments,
+        },
+    )
+    assert analyzed.status_code == 200, analyzed.text
+    assert analyzed.json()["status"] == LongAudioProjectStatus.PENDING_CUT.value
+
+    cut_job = client.post(
+        "/api/media-worker/v1/jobs/claim",
+        headers=_worker_headers(),
+        json={"workerId": "san-laptop", "capabilities": ["analysis", "cut"]},
+    ).json()
+    completed = client.post(
+        f"/api/media-worker/v1/jobs/{project_id}/cut",
+        headers=_worker_headers(),
+        data={"leaseId": cut_job["leaseId"]},
+        files={
+            "archive": (
+                "segments.zip",
+                _audio_only_segment_archive(),
+                "application/zip",
+            )
+        },
+    )
+    assert completed.status_code == 200, completed.text
+    with SessionLocal() as db:
+        tasks = (
+            db.query(GenerationTask)
+            .filter(GenerationTask.workflow_type == "digital_human")
+            .all()
+        )
+        assert len(tasks) == 3

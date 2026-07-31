@@ -13,7 +13,6 @@
     {% if request.session.get("user_id") %}
       <nav>
         <a href="/generate/batch">生成视频</a>
-        <a href="/long-audio">长音频拆分</a>
         <a href="/batches">任务记录</a>
         <a href="/voices">声音</a>
         {% if current_user is defined and current_user.is_admin %}<a href="/admin/users">用户管理</a><a href="/admin/operations">系统状态</a>{% endif %}

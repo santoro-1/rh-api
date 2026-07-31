@@ -15,6 +15,20 @@ from app.config import get_settings
 _SECRET_PATTERNS = (
     re.compile(
         r"""(?ix)
+        (https?://)
+        [^/\s:@]+:[^@\s/]+@
+        """
+    ),
+    re.compile(
+        r"""(?ix)
+        (
+          [?&](?:api[_-]?key|token|access[_-]?password)=
+        )
+        [^&\s]+
+        """
+    ),
+    re.compile(
+        r"""(?ix)
         (authorization["']?\s*[:=]\s*["']?\s*bearer\s+)
         [^"',\s}]+
         """
@@ -157,8 +171,9 @@ class SecretRedactionFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        for pattern in _SECRET_PATTERNS:
-            message = pattern.sub(r"\1***", message)
+        for index, pattern in enumerate(_SECRET_PATTERNS):
+            replacement = r"\1***:***@" if index == 0 else r"\1***"
+            message = pattern.sub(replacement, message)
         record.msg = message
         record.args = ()
         return True

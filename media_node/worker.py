@@ -9,6 +9,7 @@ import socket
 import threading
 import time
 import zipfile
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -21,17 +22,60 @@ from app.services.media_segmentation import (
     SegmentPlan,
     cut_audio_segment,
     cut_video_segment,
+    detect_silence_midpoints,
+    plan_silence_segments,
 )
-from app.services.logging_config import configure_logging, log_event
-
-
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+NODE_ROOT = Path(__file__).resolve().parent
 WORKER_VERSION = "1"
 
 
 class RemoteWorkerError(RuntimeError):
     pass
+
+
+def configure_logging(service_name: str) -> None:
+    log_directory = NODE_ROOT / "logs"
+    log_directory.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if root.handlers:
+        return
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    file_handler = TimedRotatingFileHandler(
+        log_directory / f"{service_name}.log",
+        when="midnight",
+        backupCount=7,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    root.addHandler(console)
+    root.addHandler(file_handler)
+
+
+def log_event(
+    target_logger: logging.Logger,
+    event_code: str,
+    message: str,
+    **details: object,
+) -> None:
+    suffix = (
+        " "
+        + json.dumps(
+            {key: value for key, value in details.items() if value is not None},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        if details
+        else ""
+    )
+    target_logger.info("[EVENT %s] %s%s", event_code, message, suffix)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -330,15 +374,12 @@ def _create_segment_archive(
     directory: Path,
     plans: list[SegmentPlan],
     audio_source: Path,
-    video_source: Path,
+    video_source: Path | None,
 ) -> Path:
     output = directory / "segments.zip"
     for plan in plans:
         audio_target = (
             directory / "audio" / f"segment-{plan.index:03d}.mp3"
-        )
-        video_target = (
-            directory / "video" / f"segment-{plan.index:03d}.mp4"
         )
         cut_audio_segment(
             audio_source,
@@ -346,20 +387,27 @@ def _create_segment_archive(
             start_seconds=plan.start_seconds,
             end_seconds=plan.end_seconds,
         )
-        audio_duration = inspect_audio_duration(audio_target)
-        cut_video_segment(
-            video_source,
-            video_target,
-            start_seconds=plan.start_seconds,
-            duration_seconds=audio_duration,
-        )
+        if video_source is not None:
+            video_target = (
+                directory / "video" / f"segment-{plan.index:03d}.mp4"
+            )
+            audio_duration = inspect_audio_duration(audio_target)
+            cut_video_segment(
+                video_source,
+                video_target,
+                start_seconds=plan.start_seconds,
+                duration_seconds=audio_duration,
+            )
     with zipfile.ZipFile(
         output,
         "w",
         compression=zipfile.ZIP_STORED,
         allowZip64=True,
     ) as bundle:
-        for kind, extension in (("audio", "mp3"), ("video", "mp4")):
+        kinds = [("audio", "mp3")]
+        if video_source is not None:
+            kinds.append(("video", "mp4"))
+        for kind, extension in kinds:
             for plan in plans:
                 path = (
                     directory
@@ -380,6 +428,7 @@ def process_job(
     job_id = str(job.get("jobId") or "")
     lease_id = str(job.get("leaseId") or "")
     action = str(job.get("action") or "")
+    workflow_type = str(job.get("workflowType") or "ltx_lip_sync")
     if not job_id or not lease_id or action not in {"analysis", "cut"}:
         raise RemoteWorkerError("服务器返回的任务格式错误")
     source = job.get("source")
@@ -413,19 +462,30 @@ def process_job(
                 audio_path,
             )
             if action == "analysis":
-                provider = FunASRHTTPProvider(
-                    base_url=os.getenv(
-                        "ASR_BASE_URL", "http://127.0.0.1:18084"
-                    ),
-                    shared_token=os.getenv("ASR_SHARED_TOKEN", ""),
-                    timeout_seconds=_env_int(
-                        "ASR_REQUEST_TIMEOUT_SECONDS", 1800
-                    ),
-                )
-                result = provider.align(
-                    audio_path,
-                    str(job.get("scriptText") or ""),
-                )
+                if workflow_type == "digital_human":
+                    result_provider = "vad_silence"
+                    result_plans = tuple(
+                        plan_silence_segments(
+                            float(job.get("durationSeconds") or 0),
+                            detect_silence_midpoints(audio_path),
+                        )
+                    )
+                else:
+                    provider = FunASRHTTPProvider(
+                        base_url=os.getenv(
+                            "ASR_BASE_URL", "http://127.0.0.1:18084"
+                        ),
+                        shared_token=os.getenv("ASR_SHARED_TOKEN", ""),
+                        timeout_seconds=_env_int(
+                            "ASR_REQUEST_TIMEOUT_SECONDS", 1800
+                        ),
+                    )
+                    result = provider.align(
+                        audio_path,
+                        str(job.get("scriptText") or ""),
+                    )
+                    result_provider = result.provider
+                    result_plans = result.plans
                 metrics = _metrics(
                     phase="analysis_completed",
                     started=started,
@@ -436,27 +496,31 @@ def process_job(
                         "audioDurationSeconds": job.get(
                             "durationSeconds"
                         ),
-                        "segmentCount": len(result.plans),
+                        "segmentCount": len(result_plans),
                     },
                 )
                 client.complete_analysis(
                     job_id,
                     lease_id,
-                    result.provider,
-                    result.plans,
+                    result_provider,
+                    result_plans,
                     metrics,
                 )
             else:
-                video_bytes = client.download(
-                    str(source.get("videoUrl") or ""),
-                    video_path,
-                )
+                video_bytes = 0
+                video_source = None
+                if workflow_type == "ltx_lip_sync":
+                    video_bytes = client.download(
+                        str(source.get("videoUrl") or ""),
+                        video_path,
+                    )
+                    video_source = video_path
                 plans = _plans(job.get("segments"))
                 archive = _create_segment_archive(
                     job_directory,
                     plans,
                     audio_path,
-                    video_path,
+                    video_source,
                 )
                 metrics = _metrics(
                     phase="cut_completed",
@@ -508,10 +572,10 @@ def run() -> int:
     server_url = os.getenv("MEDIA_WORKER_SERVER_URL", "").strip()
     token = os.getenv("MEDIA_WORKER_TOKEN", "").strip()
     if not server_url:
-        raise RemoteWorkerError(".env.worker 缺少 MEDIA_WORKER_SERVER_URL")
+        raise RemoteWorkerError("media_node/.env 缺少 MEDIA_WORKER_SERVER_URL")
     if len(token) < 32:
         raise RemoteWorkerError(
-            ".env.worker 中的 MEDIA_WORKER_TOKEN 至少需要 32 个字符"
+            "media_node/.env 中的 MEDIA_WORKER_TOKEN 至少需要 32 个字符"
         )
     worker_id = os.getenv(
         "MEDIA_WORKER_ID",
@@ -527,14 +591,14 @@ def run() -> int:
     work_root = (
         configured_work_root
         if configured_work_root.is_absolute()
-        else PROJECT_ROOT / configured_work_root
+        else NODE_ROOT / configured_work_root
     ).resolve()
     work_root.mkdir(parents=True, exist_ok=True)
     client = RemoteMediaClient(server_url, token)
     log_event(
         logger,
         "remote_media.started",
-        "笔记本媒体节点已启动",
+        "远程媒体节点已启动",
         worker_id=worker_id,
         server_url=server_url,
     )
@@ -553,7 +617,7 @@ def run() -> int:
         except KeyboardInterrupt:
             return 0
         except Exception:
-            logger.exception("笔记本媒体节点任务失败")
+            logger.exception("远程媒体节点任务失败")
             time.sleep(poll_seconds)
 
 

@@ -72,6 +72,28 @@ def test_log_filter_redacts_header_and_dictionary_secret_shapes():
     assert message.count("***") == 3
 
 
+def test_log_filter_redacts_proxy_url_and_query_secret():
+    record = logging.LogRecord(
+        "security-test",
+        logging.WARNING,
+        __file__,
+        1,
+        (
+            "proxy=https://proxy-user:proxy-password@proxy.example/path"
+            "?apiKey=query-secret"
+        ),
+        (),
+        None,
+    )
+
+    assert SecretRedactionFilter().filter(record)
+    message = record.getMessage()
+    assert "proxy-user" not in message
+    assert "proxy-password" not in message
+    assert "query-secret" not in message
+    assert "https://***:***@proxy.example/path?apiKey=***" in message
+
+
 def test_admin_log_tail_hides_successful_polling_but_keeps_raw_file():
     log_path = get_settings().data_dir / "web-display-test.log"
     meaningful = "2026-07-28 ERROR app: 语音任务失败"

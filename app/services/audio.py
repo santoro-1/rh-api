@@ -97,6 +97,8 @@ def inspect_audio_duration(path: Path) -> float:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
             creationflags=hidden_creation_flags(),

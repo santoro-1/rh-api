@@ -1,7 +1,18 @@
 {% extends "base.html" %}
 {% block title %}任务详情{% endblock %}
 {% block content %}
-<section class="page-heading"><div><h1>任务详情</h1><p id="status-text" class="status">{{ status_labels.get(task.status, task.status) }}</p></div><a class="button secondary" href="{{ return_url }}">{{ return_label }}</a></section>
+<section class="page-heading">
+  <div><h1>任务详情</h1><p id="status-text" class="status">{{ status_labels.get(task.status, task.status) }}</p></div>
+  <div class="button-row">
+    {% if task.status in ["PENDING", "SUBMITTED", "RUNNING"] %}
+      <form method="post" action="/tasks/{{ task.id }}/cancel" onsubmit="return confirm('确定取消这个生成任务吗？已提交的任务会同时请求 RunningHub 取消。');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="button danger" type="submit">取消生成</button>
+      </form>
+    {% endif %}
+    <a class="button secondary" href="{{ return_url }}">{{ return_label }}</a>
+  </div>
+</section>
 <div class="detail-grid">
   <section class="panel">
     {% if task.workflow_type == "digital_human" %}

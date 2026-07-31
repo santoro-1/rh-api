@@ -24,6 +24,8 @@ class FakeRunningHub:
         *,
         current_task_count: int = 0,
         capacity_error: bool = False,
+        upload_error: bool = False,
+        submit_network_error: bool = False,
         query_not_found: bool = False,
         query_result: dict | None = None,
     ):
@@ -33,6 +35,8 @@ class FakeRunningHub:
         self.capacity_checks = 0
         self.current_task_count = current_task_count
         self.capacity_error = capacity_error
+        self.upload_error = upload_error
+        self.submit_network_error = submit_network_error
         self.query_not_found = query_not_found
         self.query_result = query_result
 
@@ -42,9 +46,28 @@ class FakeRunningHub:
 
     def upload_file(self, path):
         self.upload_calls += 1
+        if self.upload_error:
+            raise RunningHubError(
+                "上传素材到 RunningHub 时网络请求失败",
+                retry_safe=True,
+                diagnostics={
+                    "runninghub_operation": "asset_upload",
+                    "endpoint_host": "rh.example",
+                    "network_error_type": "ReadTimeout",
+                    "elapsed_ms": 600001,
+                    "asset_size_bytes": 240 * 1024 * 1024,
+                    "asset_size_mb": 240.0,
+                    "upload_size_warning": (
+                        "素材体积 240.0MB，超过 RunningHub 官方建议的 "
+                        "30MB，可能导致上传失败"
+                    ),
+                },
+            )
         return "openapi/" + path.name
 
     def submit_task(self, payload):
+        if self.submit_network_error:
+            raise RunningHubError("提交 RunningHub 任务时网络请求失败")
         if self.capacity_error:
             raise RunningHubError(
                 "提交任务失败：api queue limit reached, please retry later",
@@ -218,6 +241,63 @@ def test_worker_recovers_unsubmitted_uploading_task():
     with SessionLocal() as db:
         assert task_worker.recover_interrupted_tasks(db) == 1
         assert db.get(GenerationTask, "recover-task").status == TaskStatus.PENDING.value
+
+
+def test_worker_retries_safe_upload_network_failures_three_times(
+    monkeypatch,
+    caplog,
+):
+    user = create_user("upload-retry-worker-user")
+    _add_task(user.id, "upload-retry-task", TaskStatus.PENDING.value)
+    fake = FakeRunningHub(upload_error=True)
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    caplog.set_level("WARNING", logger=task_worker.__name__)
+
+    with SessionLocal() as db:
+        for attempt in range(4):
+            task_worker.process_task(db, "upload-retry-task")
+            task = db.get(GenerationTask, "upload-retry-task")
+            if attempt < 3:
+                assert task.status == TaskStatus.PENDING.value
+                assert task.runninghub_auto_retry_count == attempt + 1
+                assert task.runninghub_auto_retry_after is not None
+                assert f"第 {attempt + 1}/3 次自动重试" in task.error_message
+                task.runninghub_auto_retry_after = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                )
+                db.commit()
+            else:
+                assert task.status == TaskStatus.FAILED.value
+                assert task.runninghub_auto_retry_count == 3
+                assert task.runninghub_auto_retry_after is None
+                assert "已用完 3 次自动重试" in task.error_message
+
+    assert fake.upload_calls == 4
+    assert fake.submissions == 0
+    assert '"runninghub_operation":"asset_upload"' in caplog.text
+    assert '"network_error_type":"ReadTimeout"' in caplog.text
+    assert '"elapsed_ms":600001' in caplog.text
+    assert "超过 RunningHub 官方建议的 30MB" in caplog.text
+    assert '"asset_slot":"image"' in caplog.text
+
+
+def test_worker_does_not_retry_ambiguous_submit_network_failure(
+    monkeypatch,
+):
+    user = create_user("submit-network-worker-user")
+    _add_task(user.id, "submit-network-task", TaskStatus.PENDING.value)
+    fake = FakeRunningHub(submit_network_error=True)
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+
+    with SessionLocal() as db:
+        task_worker.process_task(db, "submit-network-task")
+        task = db.get(GenerationTask, "submit-network-task")
+        assert task.status == TaskStatus.FAILED.value
+        assert task.runninghub_auto_retry_count == 0
+        assert task.runninghub_auto_retry_after is None
+        assert task.runninghub_task_id is None
+
+    assert fake.upload_calls == 2
 
 
 def test_worker_claims_fifo_tasks_only_up_to_user_concurrency_limit():

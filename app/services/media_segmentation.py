@@ -57,6 +57,8 @@ def inspect_media_duration(path: Path) -> float:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
             creationflags=hidden_creation_flags(),
@@ -139,6 +141,8 @@ def detect_silence_midpoints(audio_path: Path) -> list[float]:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             check=False,
             creationflags=hidden_creation_flags(),
@@ -262,6 +266,65 @@ def plan_audio_segments(
         )
         unit_start = unit_end + 1
         time_start = time_end
+    return plans
+
+
+def plan_silence_segments(
+    duration_seconds: float,
+    silence_midpoints: list[float] | None = None,
+) -> list[SegmentPlan]:
+    """Split narration at natural pauses without transcript alignment."""
+
+    if duration_seconds <= 0:
+        raise MediaSegmentationError("音频时长必须大于 0")
+    candidates = sorted(
+        {
+            round(float(value), 3)
+            for value in (silence_midpoints or [])
+            if 0 < float(value) < duration_seconds
+        }
+    )
+    plans: list[SegmentPlan] = []
+    start = 0.0
+    while duration_seconds - start > MAX_SEGMENT_SECONDS + 0.01:
+        lower = start + _MIN_USEFUL_SEGMENT_SECONDS
+        upper = min(start + MAX_SEGMENT_SECONDS, duration_seconds)
+        target = min(start + TARGET_SEGMENT_SECONDS, upper)
+        available = [
+            value
+            for value in candidates
+            if lower <= value <= upper
+            and duration_seconds - value >= _MIN_USEFUL_SEGMENT_SECONDS
+        ]
+        if available:
+            end = min(available, key=lambda value: abs(value - target))
+        else:
+            end = upper
+            tail = duration_seconds - end
+            if 0 < tail < _MIN_USEFUL_SEGMENT_SECONDS:
+                balanced = duration_seconds - _MIN_USEFUL_SEGMENT_SECONDS
+                if balanced >= lower:
+                    end = balanced
+        method = "vad_silence" if available else "duration_fallback"
+        plans.append(
+            SegmentPlan(
+                index=len(plans) + 1,
+                script_text="",
+                start_seconds=round(start, 3),
+                end_seconds=round(end, 3),
+                alignment_method=method,
+            )
+        )
+        start = end
+    plans.append(
+        SegmentPlan(
+            index=len(plans) + 1,
+            script_text="",
+            start_seconds=round(start, 3),
+            end_seconds=round(duration_seconds, 3),
+            alignment_method="vad_silence",
+        )
+    )
     return plans
 
 
@@ -461,6 +524,8 @@ def _run_ffmpeg(command: list[str], message: str) -> None:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=1800,
             check=False,
             creationflags=hidden_creation_flags(),

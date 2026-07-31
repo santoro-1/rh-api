@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from app.database import SessionLocal
 from app.models import (
@@ -111,6 +112,7 @@ def test_long_audio_review_and_handoff_flow(client, monkeypatch):
             "promptPrefix": "一名人物用中文说",
             "instanceType": "default",
             "alignmentProvider": "heuristic",
+            "reviewRequired": "true",
         },
         files={
             "customAudio": ("long.mp3", b"ID3long-audio", "audio/mpeg"),
@@ -218,6 +220,7 @@ def test_review_plan_rejects_gaps_and_missing_original_script(client, monkeypatc
             "scriptText": SCRIPT,
             "promptPrefix": "一名人物用中文说",
             "instanceType": "default",
+            "reviewRequired": "true",
         },
         files={
             "customAudio": ("long.mp3", b"ID3long-audio", "audio/mpeg"),
@@ -265,3 +268,111 @@ def test_review_plan_rejects_gaps_and_missing_original_script(client, monkeypatc
         assert project.status == LongAudioProjectStatus.PENDING_ANALYSIS.value
         assert project.alignment_provider == "funasr_http"
         assert project.plan_json is None
+
+
+def test_digital_human_long_audio_auto_splits_without_asr(client, monkeypatch):
+    create_user("digital-long-audio-user")
+    login(client, "digital-long-audio-user")
+    monkeypatch.setattr(
+        "app.services.long_audio.inspect_audio_duration",
+        lambda path: 30.0 if "segment-" in Path(path).name else 90.0,
+    )
+    monkeypatch.setattr(
+        "app.services.long_audio.detect_silence_midpoints",
+        lambda _path: [30.0, 60.0],
+    )
+    monkeypatch.setattr(
+        "app.services.long_audio.cut_audio_segment",
+        _fake_cut,
+    )
+    monkeypatch.setattr(
+        "app.services.long_audio.get_alignment_provider",
+        lambda _name: (_ for _ in ()).throw(
+            AssertionError("数字人长音频不应调用 ASR")
+        ),
+    )
+
+    created = client.post(
+        "/api/long-audio-projects",
+        data={
+            "name": "数字人长音频",
+            "workflowType": "digital_human",
+            "digitalPrompt": "人物自然说话并轻微挥手。",
+        },
+        files={
+            "customAudio": ("long.mp3", b"ID3long-audio", "audio/mpeg"),
+            "sourceImage": (
+                "person.png",
+                b"\x89PNG\r\n\x1a\nperson",
+                "image/png",
+            ),
+        },
+    )
+    assert created.status_code == 201, created.text
+    project_id = created.json()["projectId"]
+
+    with SessionLocal() as db:
+        assert process_next(db) is True
+    status = client.get(f"/api/long-audio-projects/{project_id}").json()
+    assert status["status"] == LongAudioProjectStatus.PENDING_CUT.value
+    assert status["workflowType"] == "digital_human"
+    assert status["reviewRequired"] is False
+    assert len(status["segments"]) == 3
+
+    with SessionLocal() as db:
+        assert process_next(db) is True
+    completed = client.get(f"/api/long-audio-projects/{project_id}").json()
+    assert completed["status"] == LongAudioProjectStatus.COMPLETED.value
+
+    with SessionLocal() as db:
+        tasks = (
+            db.query(GenerationTask)
+            .filter(GenerationTask.workflow_type == "digital_human")
+            .order_by(GenerationTask.created_at)
+            .all()
+        )
+        assert len(tasks) == 3
+        assert all(task.prompt == "人物自然说话并轻微挥手。" for task in tasks)
+        assert all(task.start_seconds == 0 for task in tasks)
+        assert all(task.end_seconds == 30 for task in tasks)
+        payloads = [json.loads(task.input_payload) for task in tasks]
+        assert all("image" in payload["assets"] for payload in payloads)
+        assert all(payload["parameters"]["instance_type"] == "default" for payload in payloads)
+
+
+def test_long_audio_ltx_defaults_to_plus_instance(client, monkeypatch):
+    create_user("long-audio-plus-user")
+    _configure_ltx("long-audio-plus-user")
+    login(client, "long-audio-plus-user")
+    monkeypatch.setattr(
+        "app.services.long_audio.get_alignment_provider",
+        lambda _name: FakeAlignmentProvider(),
+    )
+    monkeypatch.setattr(
+        "app.services.long_audio.inspect_audio_duration",
+        lambda _path: 90.0,
+    )
+    monkeypatch.setattr(
+        "app.services.long_audio.inspect_media_duration",
+        lambda _path: 100.0,
+    )
+    created = client.post(
+        "/api/long-audio-projects",
+        data={
+            "name": "默认 48G",
+            "scriptText": SCRIPT,
+            "promptPrefix": "一名人物用中文说",
+        },
+        files={
+            "customAudio": ("long.mp3", b"ID3long-audio", "audio/mpeg"),
+            "sourceVideo": (
+                "source.mp4",
+                b"\x00\x00\x00\x18ftypisomvideo",
+                "video/mp4",
+            ),
+        },
+    )
+    assert created.status_code == 201, created.text
+    with SessionLocal() as db:
+        project = db.get(LongAudioProject, created.json()["projectId"])
+        assert json.loads(project.parameters_json)["instance_type"] == "plus"

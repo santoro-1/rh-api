@@ -19,6 +19,7 @@ from app.database import get_db
 from app.models import (
     AudioTaskStatus,
     GenerationBatch,
+    LongAudioProjectStatus,
     MiniMaxVoiceAsset,
     User,
     VoiceAssetStatus,
@@ -44,8 +45,10 @@ from app.services.batch_lifecycle import (
     BatchFileCleanupError,
     BatchLifecycleError,
     batch_is_deletable,
+    cancel_pending_media_projects,
     delete_terminal_batch,
     retry_failed_batch,
+    video_tasks,
 )
 from app.services.batch_manifests import (
     DIGITAL_HUMAN_WORKFLOW,
@@ -59,6 +62,7 @@ from app.services.batch_status import (
     STATUS_LABELS,
     batch_detail_status,
     batch_query,
+    batch_view_revision,
     item_display_status,
     summarize_batch,
 )
@@ -73,6 +77,11 @@ from app.services.storage import (
     to_relative_data_path,
 )
 from app.services.task_management import RETRYABLE_TASK_STATUSES
+from app.services.task_cancellation import (
+    TaskCancellationError,
+    cancel_generation_task,
+)
+from app.services.runninghub import RunningHubError
 from app.services.workflow_configs import get_user_workflow_config
 from app.web import templates
 
@@ -264,6 +273,7 @@ def _body_parts(
     list[str],
     dict[str, str],
     dict[str, Any],
+    bool,
 ]:
     audio_mode = str(body.get("audioMode") or "upload")
     workflow_type = str(body.get("workflowType") or "")
@@ -271,6 +281,7 @@ def _body_parts(
     raw_asset_ids = body.get("assetIds")
     raw_batch_parameters = body.get("batchParameters") or {}
     raw_speech_options = body.get("speechOptions") or {}
+    review_required = body.get("longAudioReviewRequired") is True
     if not isinstance(raw_rows, list) or not all(
         isinstance(row, dict) for row in raw_rows
     ):
@@ -297,6 +308,7 @@ def _body_parts(
         asset_ids,
         batch_parameters,
         raw_speech_options,
+        review_required,
     )
 
 
@@ -318,6 +330,7 @@ async def validate_batch_request(
         asset_ids,
         batch_parameters,
         speech_options,
+        review_required,
     ) = _body_parts(body)
     try:
         plan = validate_batch(
@@ -330,6 +343,7 @@ async def validate_batch_request(
             batch_parameters=batch_parameters,
             audio_mode=audio_mode,
             speech_options=speech_options,
+            review_required=review_required,
         )
     except BatchValidationError as exc:
         return JSONResponse(
@@ -363,6 +377,7 @@ async def create_batch_request(
         asset_ids,
         batch_parameters,
         speech_options,
+        review_required,
     ) = _body_parts(body)
     request_key = str(body.get("requestKey") or "").strip()
     existing = db.scalar(
@@ -389,6 +404,7 @@ async def create_batch_request(
             batch_parameters=batch_parameters,
             audio_mode=audio_mode,
             speech_options=speech_options,
+            review_required=review_required,
         )
         batch, created_directories = create_batch(
             db,
@@ -430,6 +446,7 @@ def batch_status(
     _ensure_batch_access(batch, current_user)
     return {
         **summarize_batch(batch),
+        "viewRevision": batch_view_revision(batch),
         "items": batch_detail_status(batch),
     }
 
@@ -531,6 +548,7 @@ def batch_detail_page(
             "current_user": current_user,
             "batch": batch,
             "summary": summarize_batch(batch),
+            "view_revision": batch_view_revision(batch),
             "manifests": manifests,
             "item_statuses": {
                 item.id: item_display_status(item) for item in batch.items
@@ -540,6 +558,20 @@ def batch_detail_page(
             "status_labels": STATUS_LABELS,
             "auto_retry_limit": get_settings().runninghub_auto_retry_limit,
             "can_delete_batch": batch_is_deletable(batch),
+            "can_cancel_batch": any(
+                task.status in ACTIVE_VIDEO_STATUSES
+                for task in video_tasks(batch)
+            )
+            or any(
+                item.long_audio_project is not None
+                and item.long_audio_project.status
+                in {
+                    LongAudioProjectStatus.PENDING_ANALYSIS.value,
+                    LongAudioProjectStatus.REVIEW.value,
+                    LongAudioProjectStatus.PENDING_CUT.value,
+                }
+                for item in batch.items
+            ),
         },
     )
 
@@ -823,6 +855,38 @@ def retry_batch(
             f"/batches/{batch.id}?retried={result.retried}"
             f"&skipped={result.skipped}"
         ),
+        status_code=303,
+    )
+
+
+@router.post("/batches/{batch_id}/cancel")
+def cancel_batch(
+    batch_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del csrf_ok
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    cancelled = 0
+    failed = 0
+    cancelled += cancel_pending_media_projects(batch)
+    db.commit()
+    for task in video_tasks(batch):
+        if task.status not in ACTIVE_VIDEO_STATUSES:
+            continue
+        try:
+            cancel_generation_task(db, task)
+            db.commit()
+            cancelled += 1
+        except (TaskCancellationError, RunningHubError):
+            db.rollback()
+            failed += 1
+    return RedirectResponse(
+        f"/batches/{batch.id}?cancelled={cancelled}&cancelFailed={failed}",
         status_code=303,
     )
 

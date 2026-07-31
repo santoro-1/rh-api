@@ -182,7 +182,7 @@ def test_tasks_beyond_concurrency_limit_are_saved_for_queue(client, monkeypatch)
     assert len(set(task_ids)) == 8
 
 
-def test_dual_person_task_persists_both_person_audio_files(client, monkeypatch):
+def test_dual_person_task_is_disabled(client, monkeypatch):
     create_user("dual-creator")
     login(client, "dual-creator")
     monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda path: 15.5)
@@ -202,15 +202,8 @@ def test_dual_person_task_persists_both_person_audio_files(client, monkeypatch):
             "rightAudio": ("right.mp3", b"ID3right", "audio/mpeg"),
         },
     )
-    assert response.status_code == 201
-    with SessionLocal() as db:
-        task = db.get(GenerationTask, response.json()["taskId"])
-        payload = json.loads(task.input_payload)
-        assert payload["parameters"]["resolution"] == "2048"
-        assert payload["parameters"]["person_mode"] == "0"
-        assert "overall_mode" not in payload["parameters"]
-        assert payload["assets"]["left_audio"]["original_name"] == "left.mp3"
-        assert payload["assets"]["right_audio"]["original_name"] == "right.mp3"
+    assert response.status_code == 400
+    assert "双人数字人模式暂未开放" in response.json()["detail"]
 
 
 def test_dual_person_task_requires_both_person_audio_files(client, monkeypatch):
@@ -232,7 +225,7 @@ def test_dual_person_task_requires_both_person_audio_files(client, monkeypatch):
         },
     )
     assert response.status_code == 400
-    assert "左边人物音频和右边人物音频" in response.json()["detail"]
+    assert "双人数字人模式暂未开放" in response.json()["detail"]
 
 
 def test_task_creation_rejects_invalid_time_range(client, monkeypatch):

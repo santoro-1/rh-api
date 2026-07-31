@@ -20,10 +20,13 @@ from app.routes.dependencies import (
 )
 from app.services.csrf import require_csrf
 from app.services.long_audio import (
+    DIGITAL_HUMAN_WORKFLOW,
+    LTX_WORKFLOW,
     LongAudioError,
     confirm_long_audio_project,
     create_long_audio_project,
     save_reviewed_plan,
+    sync_linked_batch_item,
 )
 from app.services.storage import (
     UploadValidationError,
@@ -37,13 +40,14 @@ from app.web import templates
 router = APIRouter(tags=["long-audio"])
 
 STATUS_LABELS = {
-    LongAudioProjectStatus.PENDING_ANALYSIS.value: "等待分析",
-    LongAudioProjectStatus.ANALYZING.value: "正在分析停顿和脚本",
+    LongAudioProjectStatus.PENDING_ANALYSIS.value: "等待处理",
+    LongAudioProjectStatus.ANALYZING.value: "处理中",
     LongAudioProjectStatus.REVIEW.value: "等待试听确认",
-    LongAudioProjectStatus.PENDING_CUT.value: "等待切割",
-    LongAudioProjectStatus.CUTTING.value: "正在切割音频和视频",
+    LongAudioProjectStatus.PENDING_CUT.value: "等待创建任务",
+    LongAudioProjectStatus.CUTTING.value: "正在创建任务",
     LongAudioProjectStatus.COMPLETED.value: "已创建视频任务",
     LongAudioProjectStatus.FAILED.value: "处理失败",
+    LongAudioProjectStatus.CANCELLED.value: "已取消",
 }
 
 
@@ -80,10 +84,16 @@ def _project_payload(project: LongAudioProject) -> dict[str, Any]:
         "statusLabel": STATUS_LABELS.get(project.status, project.status),
         "durationSeconds": project.duration_seconds,
         "alignmentProvider": project.alignment_provider,
+        "workflowType": project.workflow_type,
+        "reviewRequired": project.review_required,
         "segments": _plan_payload(project),
         "errorCode": project.error_code,
         "errorMessage": project.error_message,
-        "batchId": project.batch_id,
+        "batchId": (
+            project.batch_item.batch_id
+            if project.batch_item is not None
+            else project.batch_id
+        ),
         "remoteWorkerId": project.remote_worker_id,
         "remoteLeaseExpiresAt": (
             project.remote_lease_expires_at.isoformat()
@@ -144,11 +154,18 @@ def long_audio_detail_page(
 def create_project(
     request: Request,
     name: str = Form(...),
-    scriptText: str = Form(...),
+    workflowType: str = Form(LTX_WORKFLOW),
+    scriptText: str = Form(""),
     customAudio: UploadFile = File(...),
-    sourceVideo: UploadFile = File(...),
+    sourceVideo: UploadFile | None = File(None),
+    sourceImage: UploadFile | None = File(None),
     promptPrefix: str = Form("一名人物用中文说"),
-    instanceType: str = Form("default"),
+    digitalPrompt: str = Form(
+        "人物自然地说话，他的身体和手部随着说话的节奏做着自然且随意的动作，"
+        "镜头保持稳定。"
+    ),
+    instanceType: str = Form("plus"),
+    reviewRequired: bool = Form(False),
     alignmentProvider: str = Form(""),
     csrf_ok: None = Depends(require_csrf),
     current_user: User = Depends(get_current_user),
@@ -162,6 +179,17 @@ def create_project(
         settings.task_create_rate_limit_per_minute,
     )
     try:
+        primary = (
+            sourceVideo
+            if workflowType == LTX_WORKFLOW
+            else sourceImage
+        )
+        if primary is None or not primary.filename:
+            raise LongAudioError(
+                "对口型工作流必须上传源视频"
+                if workflowType == LTX_WORKFLOW
+                else "数字人工作流必须上传源图片"
+            )
         project = create_long_audio_project(
             db,
             current_user,
@@ -169,13 +197,16 @@ def create_project(
             name=name,
             script_text=scriptText,
             audio=customAudio,
-            source_video=sourceVideo,
+            source_video=primary,
             prompt_prefix=promptPrefix,
             instance_type=instanceType,
             alignment_provider=(
                 alignmentProvider.strip()
                 or settings.long_audio_alignment_provider
             ),
+            workflow_type=workflowType,
+            review_required=reviewRequired,
+            digital_prompt=digitalPrompt,
         )
         db.commit()
     except (LongAudioError, UploadValidationError, OSError, ValueError) as exc:
@@ -284,6 +315,7 @@ def retry_project(
     )
     project.error_code = None
     project.error_message = None
+    sync_linked_batch_item(project)
     db.commit()
     return RedirectResponse(f"/long-audio/{project.id}", status_code=303)
 
@@ -304,12 +336,15 @@ def reanalyze_project(
         raise HTTPException(status_code=409, detail="当前状态不能重新分析")
     project.alignment_provider = (
         get_settings().long_audio_alignment_provider
+        if project.workflow_type == LTX_WORKFLOW
+        else "vad_silence"
     )
     project.plan_json = None
     project.status = LongAudioProjectStatus.PENDING_ANALYSIS.value
     project.confirmed_at = None
     project.error_code = None
     project.error_message = None
+    sync_linked_batch_item(project)
     db.commit()
     return RedirectResponse(f"/long-audio/{project.id}", status_code=303)
 

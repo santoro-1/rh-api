@@ -40,16 +40,17 @@
 
 <section class="panel">
   <div class="panel-heading"><h2>批次任务</h2></div>
-  <div id="batch-refresh-notice" class="batch-refresh-notice hidden">
-    任务结构或可用操作已经变化，请点击“刷新状态”查看最新内容。
+  <div id="batch-live-update-error" class="batch-refresh-notice hidden">
+    页面自动更新暂时失败，系统会继续重试；也可以点击“刷新状态”立即查看。
   </div>
-  <div class="table-wrap">
+  <div id="batch-items-content" class="table-wrap">
     <table class="batch-detail-table">
       <thead><tr><th>行</th><th>任务编号</th><th>主要素材</th><th>音频</th><th>状态</th><th>操作</th></tr></thead>
       <tbody>
         {% for item in batch.items %}
           {% set task = item.generation_task %}
           {% set audio_task = item.audio_task %}
+          {% set media_project = item.long_audio_project %}
           {% set manifest = manifests[item.id] %}
           <tr class="batch-parent-row">
             <td>{{ item.row_number }}</td>
@@ -80,14 +81,23 @@
                 >{{ task.error_message or "" }}</small>
               {% endif %}
               {% if audio_task and audio_task.error_message %}<br><small class="error-text">{{ audio_task.error_message }}</small>{% endif %}
+              {% if media_project and media_project.error_message %}<br><small class="error-text">{{ media_project.error_message }}</small>{% endif %}
             </td>
             <td>
               {% if task %}
                 <a href="/tasks/{{ task.id }}">查看视频任务</a>
               {% elif audio_task and audio_task.status == "AWAITING_REVIEW" %}
                 <span class="review-waiting-label">等待试听确认</span>
+              {% elif media_project and media_project.status == "REVIEW" %}
+                <a href="/long-audio/{{ media_project.id }}">试听并确认</a>
+              {% elif media_project and media_project.status == "CANCELLED" %}
+                <span class="muted">已取消（尚未提交生成）</span>
+              {% elif media_project and media_project.status == "FAILED" %}
+                <a href="/long-audio/{{ media_project.id }}">查看并重试</a>
               {% elif item.segments %}
                 <span>{{ item.segments|length }} 个子任务</span>
+              {% elif media_project %}
+                <span class="muted">正在自动处理</span>
               {% elif batch.workflow_type == "ltx_lip_sync" and audio_task and audio_task.status == "FAILED" and audio_task.output_path %}
                 <form method="post" enctype="multipart/form-data" action="/batches/{{ batch.id }}/items/{{ item.id }}/replace-video" class="compact-inline-form">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -162,13 +172,6 @@
                             </td>
                             <td class="segment-time-cell">
                               <strong>{{ "%.1f"|format(segment.start_seconds) }}–{{ "%.1f"|format(segment.end_seconds) }} 秒</strong>
-                              <span class="segment-alignment-label">
-                                {% if segment.alignment_method == "minimax_sentence_timestamp" %}
-                                  MiniMax 句级时间戳
-                                {% else %}
-                                  本地音频切分
-                                {% endif %}
-                              </span>
                             </td>
                             <td class="segment-status-cell">
                               {% set segment_status = child.status if child else segment.status %}
@@ -211,7 +214,17 @@
   </div>
 </section>
 
-<section class="panel button-row">
+<section id="batch-actions-content" class="panel button-row">
+  {% if request.query_params.get("cancelled") %}
+    <p class="status">已取消 {{ request.query_params.get("cancelled") }} 个任务；未能取消 {{ request.query_params.get("cancelFailed", "0") }} 个。</p>
+  {% endif %}
+  {% if can_cancel_batch %}
+    <form method="post" action="/batches/{{ batch.id }}/cancel"
+      onsubmit="return confirm('确定取消批次中所有尚未结束的生成任务吗？已提交任务会逐个请求 RunningHub 取消。');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button danger" type="submit">取消未完成的生成</button>
+    </form>
+  {% endif %}
   {% if summary.awaitingReview %}
     <form method="post" action="/batches/{{ batch.id }}/approve-audio"
       onsubmit="return confirm('确认通过当前全部待审核语音，并开始创建对应视频任务吗？');">
@@ -239,11 +252,27 @@
 <script>
 (() => {
   const batchId = {{ batch.id|tojson }};
-  const renderedChildTotal = {{ summary.childTotal }};
   const statusLabels = {{ status_labels|tojson }};
   const autoRetryLimit = {{ auto_retry_limit }};
   const summaryKeys = ["total", "childTotal", "queued", "processing", "audioPreparing", "awaitingReview", "success", "failed"];
   let previousStatus = {{ summary.status|tojson }};
+  let renderedViewRevision = {{ view_revision|tojson }};
+
+  async function refreshBatchContent(nextRevision) {
+    const response = await fetch(`/batches/${batchId}`, {
+      headers: {"Accept": "text/html"},
+    });
+    if (!response.ok) throw new Error("batch content refresh failed");
+    const html = await response.text();
+    const documentCopy = new DOMParser().parseFromString(html, "text/html");
+    for (const id of ["batch-items-content", "batch-actions-content"]) {
+      const current = document.getElementById(id);
+      const replacement = documentCopy.getElementById(id);
+      if (current && replacement) current.replaceWith(replacement);
+    }
+    renderedViewRevision = nextRevision;
+    document.getElementById("batch-live-update-error")?.classList.add("hidden");
+  }
 
   async function refreshBatchStatus() {
     try {
@@ -288,8 +317,12 @@
           }
         }
       }
-      if (data.childTotal !== renderedChildTotal || data.status !== previousStatus) {
-        document.getElementById("batch-refresh-notice").classList.remove("hidden");
+      if (data.viewRevision !== renderedViewRevision) {
+        try {
+          await refreshBatchContent(data.viewRevision);
+        } catch (_contentError) {
+          document.getElementById("batch-live-update-error")?.classList.remove("hidden");
+        }
       }
       previousStatus = data.status;
       if (data.status === "ACTIVE") setTimeout(refreshBatchStatus, 5000);

@@ -4,47 +4,63 @@
 <section class="page-heading">
   <div>
     <h1>长音频拆分</h1>
-    <p class="muted">先分析、试听并确认分段，再创建对口型子任务。原始音频只保存一份。</p>
+    <p class="muted">上传完整素材，系统会自动拆分并创建任务。</p>
   </div>
   <a class="button secondary" href="/generate/batch?workflow=ltx_lip_sync">返回普通生成</a>
 </section>
 
 <section class="panel stack-form">
   <div class="panel-heading">
-    <h2>创建预处理项目</h2>
-    <p class="muted">系统先用ASR字词时间戳对齐原脚本，再在句子边界切分；原脚本不会被识别文本替换。</p>
+    <h2>创建任务</h2>
   </div>
   <form id="long-audio-form" class="stack-form">
     <label>项目名称
       <input name="name" maxlength="100" value="长音频对口型任务" required>
     </label>
+    <label>生成方式
+      <select id="long-audio-workflow" name="workflowType">
+        <option value="ltx_lip_sync">视频对口型</option>
+        <option value="digital_human">数字人图生视频</option>
+      </select>
+    </label>
     <div class="two-columns">
-      <label>源视频
+      <label id="long-audio-video-field">源视频
         <input name="sourceVideo" type="file" accept=".mp4,.mov,.webm,video/*" required>
+      </label>
+      <label id="long-audio-image-field" class="hidden">源图片
+        <input name="sourceImage" type="file" accept=".jpg,.jpeg,.png,.webp,image/*">
       </label>
       <label>长音频
         <input name="customAudio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" required>
       </label>
     </div>
-    <label>完整口播脚本
+    <label id="long-audio-script-field">完整口播脚本
       <textarea name="scriptText" rows="9" maxlength="100000" required
         placeholder="粘贴与长音频内容、顺序一致的完整脚本。"></textarea>
-      <span class="field-help">脚本内容和音频顺序必须一致；ASR只负责定位每个字词的时间。</span>
+      <span class="field-help">脚本内容和音频顺序必须一致。</span>
     </label>
-    <div class="two-columns">
+    <div id="long-audio-ltx-options" class="two-columns">
       <label>人物与语言提示
         <input name="promptPrefix" maxlength="500" value="一名人物用中文说" required>
       </label>
       <label>运行实例
         <select name="instanceType">
+          <option value="plus" selected>Plus 运行（48G，默认）</option>
           <option value="default">Stand 运行（24G）</option>
-          <option value="plus">Plus 运行（48G）</option>
         </select>
       </label>
     </div>
+    <label id="long-audio-digital-options" class="hidden">数字人动作提示
+      <textarea name="digitalPrompt" rows="4" maxlength="2000">人物自然地说话，他的身体和手部随着说话的节奏做着自然且随意的动作，镜头保持稳定。</textarea>
+      <span class="field-help">数字人按每段音频说话。</span>
+    </label>
+    <label class="inline-check batch-confirm long-audio-review-toggle">
+      <input name="reviewRequired" type="checkbox" value="true">
+      <span>分段后暂停，先人工试听确认</span>
+    </label>
     <input name="alignmentProvider" type="hidden" value="{{ alignment_provider }}">
     <div id="long-audio-create-error" class="error hidden"></div>
-    <p id="long-audio-upload-status" class="muted">音频必须超过45秒，最长支持60分钟；源视频不能短于音频。</p>
+    <p id="long-audio-upload-status" class="muted">适用于超过45秒的音频。</p>
     <button id="long-audio-submit" type="submit">上传并开始分析</button>
   </form>
 </section>
@@ -52,16 +68,16 @@
 <section class="panel">
   <div class="panel-heading">
     <h2>最近项目</h2>
-    <p class="muted">未确认的原始素材会按照上传保留期限自动清理。</p>
   </div>
   {% if projects %}
     <div class="table-scroll">
       <table>
-        <thead><tr><th>项目</th><th>时长</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>项目</th><th>工作流</th><th>时长</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
         <tbody>
           {% for project in projects %}
           <tr>
             <td>{{ project.name }}</td>
+            <td>{{ "视频对口型" if project.workflow_type == "ltx_lip_sync" else "数字人图生视频" }}</td>
             <td>{{ project.duration_seconds|timecode }}</td>
             <td>{{ status_labels.get(project.status, project.status) }}</td>
             <td>{{ project.created_at|beijing_datetime }}</td>
@@ -72,7 +88,7 @@
       </table>
     </div>
   {% else %}
-    <p class="muted">还没有长音频预处理项目。</p>
+    <p class="muted">还没有相关任务。</p>
   {% endif %}
 </section>
 <script src="/static/long_audio.js" defer></script>

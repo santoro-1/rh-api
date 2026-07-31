@@ -33,6 +33,7 @@ from app.services.long_audio import (
     LongAudioError,
     apply_alignment_plans,
     materialize_long_audio_project,
+    sync_linked_batch_item,
 )
 from app.services.media_segmentation import SegmentPlan
 from app.services.storage import safe_relative_path
@@ -204,6 +205,8 @@ def _job_payload(project: LongAudioProject, action: str) -> dict[str, Any]:
             else None
         ),
         "name": project.name,
+        "workflowType": project.workflow_type,
+        "reviewRequired": project.review_required,
         "scriptText": project.script_text,
         "durationSeconds": project.duration_seconds,
         "alignmentProvider": project.alignment_provider,
@@ -411,7 +414,7 @@ async def complete_analysis(
     log_event(
         logger,
         "media.remote_analysis_completed",
-        "远程媒体节点已完成 ASR 对齐",
+        "远程媒体节点已完成分段分析",
         project_id=project.id,
         worker_id=worker_id,
     )
@@ -424,6 +427,7 @@ def _extract_segment_archive(
     *,
     segment_count: int,
     maximum_bytes: int,
+    include_video: bool = True,
 ) -> None:
     archive.file.seek(0, 2)
     compressed_size = archive.file.tell()
@@ -433,10 +437,13 @@ def _extract_segment_archive(
     if compressed_size > maximum_bytes:
         raise HTTPException(status_code=413, detail="切割结果压缩包超过上限")
 
+    kinds = [("audio", "mp3")]
+    if include_video:
+        kinds.append(("video", "mp4"))
     expected = {
         f"{kind}/segment-{index:03d}.{extension}"
         for index in range(1, segment_count + 1)
-        for kind, extension in (("audio", "mp3"), ("video", "mp4"))
+        for kind, extension in kinds
     }
     try:
         with zipfile.ZipFile(archive.file) as bundle:
@@ -511,6 +518,7 @@ def complete_cut(
                 maximum_bytes=settings.media_worker_archive_limit_mb
                 * 1024
                 * 1024,
+                include_video=project.workflow_type == "ltx_lip_sync",
             )
             batch = materialize_long_audio_project(
                 db,
@@ -558,6 +566,7 @@ async def fail_job(
     project.error_message = str(
         body.get("error") or "远程媒体节点处理失败"
     )[:4000]
+    sync_linked_batch_item(project)
     metrics = _metrics_json(body.get("metrics"))
     if metrics is not None:
         project.remote_metrics_json = metrics

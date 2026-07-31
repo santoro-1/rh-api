@@ -1,0 +1,3 @@
+-r asr_service/requirements.txt
+requests>=2.31,<3
+mutagen>=1.47,<2

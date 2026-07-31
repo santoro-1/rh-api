@@ -141,7 +141,11 @@ def _local_asr_command() -> tuple[str, list[str], dict[str, str]] | None:
             "检测到本地 ASR 端口已在监听，本次不重复启动",
         )
         return None
-    python = PROJECT_ROOT / ".asr-runtime" / "venv" / "Scripts" / "python.exe"
+    runtime_root = PROJECT_ROOT / "media_node" / ".runtime"
+    python = runtime_root / "venv" / "Scripts" / "python.exe"
+    if not python.is_file():
+        runtime_root = PROJECT_ROOT / ".asr-runtime"
+        python = runtime_root / "venv" / "Scripts" / "python.exe"
     if not python.is_file():
         return None
     try:
@@ -185,7 +189,7 @@ def _local_asr_command() -> tuple[str, list[str], dict[str, str]] | None:
         environment.pop(proxy_name, None)
     environment.setdefault(
         "MODELSCOPE_CACHE",
-        str(PROJECT_ROOT / ".asr-runtime" / "models"),
+        str(runtime_root / "models"),
     )
     environment.setdefault("ASR_MODEL", "paraformer-zh")
     environment.setdefault("ASR_VAD_MODEL", "fsmn-vad")
@@ -195,7 +199,7 @@ def _local_asr_command() -> tuple[str, list[str], dict[str, str]] | None:
         [
             "-m",
             "uvicorn",
-            "asr_service.app:app",
+            "media_node.asr_service.app:app",
             "--host",
             "127.0.0.1",
             "--port",

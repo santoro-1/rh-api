@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
@@ -15,6 +16,8 @@ from app.models import (
     GenerationBatchItem,
     GenerationSegment,
     GenerationTask,
+    LongAudioProject,
+    LongAudioProjectStatus,
     MiniMaxConfig,
     MiniMaxVoiceAsset,
     TaskStatus,
@@ -24,6 +27,11 @@ from app.models import (
 from app.services.security import encrypt_secret
 from app.services.speech.accounts import credential_fingerprint
 from app.services.batch_manifests import parse_manifest
+from app.services.long_audio import (
+    materialize_long_audio_project,
+    serialize_plans,
+)
+from app.services.media_segmentation import SegmentPlan
 from app.services.storage import task_upload_dir, to_relative_data_path
 from app.services.workflow_configs import save_workflow_config
 from tests.conftest import create_user, login
@@ -95,7 +103,8 @@ def test_batch_page_and_templates_support_excel_and_csv(client):
     assert "快速创建" in page.text
     assert "Excel / CSV 表格导入" in page.text
     assert "请注意上传顺序" in page.text
-    assert "音频时间由系统自动计算" in page.text
+    assert "长音频拆分后先试听确认" in page.text
+    assert "长音频拆分" not in page.text.split("<nav", 1)[-1].split("</nav>", 1)[0]
     assert "输入文案并选择音色" in page.text
     script = client.get("/static/batch_generate.js")
     assert script.status_code == 200
@@ -278,10 +287,10 @@ def test_legacy_ltx_upload_template_with_positive_prompt_still_parses():
     assert parsed.rows[0]["positive_prompt"] == "一名女性用中文说：“旧模板内容。”"
 
 
-def test_digital_batch_applies_uniform_dual_settings_and_full_audio_duration(
+def test_digital_batch_rejects_dual_mode_while_unavailable(
     client, monkeypatch
 ):
-    user = create_user("digital-batch-user")
+    create_user("digital-batch-user")
     login(client, "digital-batch-user")
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",
@@ -322,36 +331,11 @@ def test_digital_batch_applies_uniform_dual_settings_and_full_audio_duration(
         },
     }
     validation = client.post("/api/batches/validate", json=payload)
-    assert validation.status_code == 200
-    response = client.post("/api/batches", json=payload)
-    assert response.status_code == 201, response.text
-
-    with SessionLocal() as db:
-        batch = db.get(GenerationBatch, response.json()["batchId"])
-        tasks = (
-            db.query(GenerationTask)
-            .filter(GenerationTask.user_id == user.id)
-            .order_by(GenerationTask.created_at)
-            .all()
-        )
-        assert batch is not None
-        assert batch.total_items == 2
-        assert [task.status for task in tasks] == ["PENDING", "PENDING"]
-        first = json.loads(tasks[0].input_payload)
-        second = json.loads(tasks[1].input_payload)
-        assert first["parameters"]["person_mode"] == "0"
-        assert first["parameters"]["end_time"] == "0:16"
-        assert first["parameters"]["resolution"] == "768"
-        assert second["parameters"]["person_mode"] == "0"
-        assert set(first["assets"]) == set(second["assets"]) == {
-            "image",
-            "audio",
-            "left_audio",
-            "right_audio",
-        }
+    assert validation.status_code == 400
+    assert "双人数字人模式暂未开放" in validation.text
 
 
-def test_sequence_asset_ids_allow_same_audio_filename_in_separate_groups(
+def test_direct_batch_request_cannot_bypass_disabled_dual_mode(
     client, monkeypatch
 ):
     create_user("sequence-binding-user")
@@ -403,7 +387,8 @@ def test_sequence_asset_ids_allow_same_audio_filename_in_separate_groups(
         ],
     }
     response = client.post("/api/batches", json=payload)
-    assert response.status_code == 201, response.text
+    assert response.status_code == 400
+    assert "双人数字人模式暂未开放" in response.text
 
 
 def test_digital_batch_reuses_one_image_for_multiple_audio_rows(
@@ -559,6 +544,249 @@ def test_ltx_batch_reuses_one_video_for_multiple_audio_rows(
             "same-source.mp4",
         ]
         assert tasks[0].image_path != tasks[1].image_path
+
+
+def test_uploaded_batch_automatically_expands_only_long_audio_rows(
+    client, monkeypatch
+):
+    create_user("mixed-duration-batch-user")
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(
+            username="mixed-duration-batch-user"
+        ).one()
+        db.add(
+            save_workflow_config(
+                user,
+                "ltx_lip_sync",
+                ai_app_id="2080551073030434817",
+                instance_type="plus",
+                default_prompt="默认正向提示词",
+                is_enabled=True,
+            )
+        )
+        db.commit()
+    login(client, "mixed-duration-batch-user")
+
+    def duration_for_file(path):
+        content = Path(path).read_bytes()
+        return 65.0 if b"long-audio" in content else 30.0
+
+    monkeypatch.setattr(
+        "app.services.batch_generation.inspect_audio_duration",
+        duration_for_file,
+    )
+    monkeypatch.setattr(
+        "app.services.batch_generation.inspect_media_duration",
+        lambda path: 90.0,
+    )
+    video_id = _stage(
+        client,
+        "video",
+        "source.mp4",
+        b"\x00\x00\x00\x18ftypisomsource-video",
+        "video/mp4",
+    )
+    short_audio_id = _stage(
+        client,
+        "audio",
+        "short.mp3",
+        b"ID3short-audio",
+        "audio/mpeg",
+    )
+    long_audio_id = _stage(
+        client,
+        "audio",
+        "long.mp3",
+        b"ID3long-audio",
+        "audio/mpeg",
+    )
+    payload = {
+        "name": "长短音频混合批次",
+        "workflowType": "ltx_lip_sync",
+        "audioMode": "upload",
+        "requestKey": "mixed-duration-batch-request",
+        "longAudioReviewRequired": True,
+        "assetIds": [video_id, short_audio_id, long_audio_id],
+        "batchParameters": {
+            "instance_type": "plus",
+            "prompt_prefix": "一名人物用中文说",
+        },
+        "rows": [
+            {
+                "row_id": "TASK-001",
+                "source_video_asset_id": video_id,
+                "audio_asset_id": short_audio_id,
+                "speech_script": "这是短音频。",
+            },
+            {
+                "row_id": "TASK-002",
+                "source_video_asset_id": video_id,
+                "audio_asset_id": long_audio_id,
+                "speech_script": "这是需要自动拆分的完整长音频脚本。",
+            },
+        ],
+    }
+
+    response = client.post("/api/batches", json=payload)
+    assert response.status_code == 201, response.text
+    batch_id = response.json()["batchId"]
+    with SessionLocal() as db:
+        batch = db.get(GenerationBatch, batch_id)
+        items = (
+            db.query(GenerationBatchItem)
+            .filter_by(batch_id=batch_id)
+            .order_by(GenerationBatchItem.row_number)
+            .all()
+        )
+        project = db.query(LongAudioProject).one()
+        assert batch is not None
+        assert batch.total_items == 2
+        assert batch.review_required is True
+        assert items[0].generation_task is not None
+        assert items[1].generation_task is None
+        assert items[1].status == "SEGMENTING"
+        assert project.batch_item_id == items[1].id
+        assert project.batch_id is None
+        assert project.review_required is True
+        assert project.status == LongAudioProjectStatus.PENDING_ANALYSIS.value
+
+        project.plan_json = serialize_plans(
+            [
+                SegmentPlan(
+                    index=1,
+                    script_text="这是需要自动拆分的",
+                    start_seconds=0.0,
+                    end_seconds=35.0,
+                    alignment_method="test",
+                ),
+                SegmentPlan(
+                    index=2,
+                    script_text="完整长音频脚本。",
+                    start_seconds=35.0,
+                    end_seconds=65.0,
+                    alignment_method="test",
+                ),
+            ]
+        )
+        project.status = LongAudioProjectStatus.PENDING_CUT.value
+        db.commit()
+
+        def fake_audio_cut(source, target, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"ID3segment")
+
+        def fake_video_cut(source, target, **kwargs):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"\x00\x00\x00\x18ftypisomsegment")
+
+        monkeypatch.setattr(
+            "app.services.long_audio.cut_audio_segment",
+            fake_audio_cut,
+        )
+        monkeypatch.setattr(
+            "app.services.long_audio.cut_video_segment",
+            fake_video_cut,
+        )
+        monkeypatch.setattr(
+            "app.services.long_audio.inspect_audio_duration",
+            lambda path: 35.0 if "001" in Path(path).name else 30.0,
+        )
+        monkeypatch.setattr(
+            "app.services.long_audio.inspect_media_duration",
+            lambda path: 35.0 if "001" in Path(path).name else 30.0,
+        )
+        materialized = materialize_long_audio_project(
+            db,
+            project,
+            get_settings(),
+        )
+        db.commit()
+        db.refresh(project)
+        db.refresh(items[1])
+        assert materialized.id == batch_id
+        assert project.status == LongAudioProjectStatus.COMPLETED.value
+        assert project.batch_id is None
+        assert items[1].status == "SEGMENTS_CREATED"
+        assert len(items[1].segments) == 2
+        assert db.query(GenerationTask).count() == 3
+
+
+def test_cancelling_long_audio_review_stays_local_and_updates_batch_page(
+    client,
+):
+    user = create_user("cancel-long-review-user")
+    login(client, "cancel-long-review-user")
+    batch_id = "cancel-long-review-batch"
+    item_id = "cancel-long-review-item"
+    project_id = "cancel-long-review-project"
+    with SessionLocal() as db:
+        user = db.get(User, user.id)
+        batch = GenerationBatch(
+            id=batch_id,
+            user_id=user.id,
+            name="取消审核测试",
+            workflow_type="ltx_lip_sync",
+            audio_mode="upload",
+            review_required=True,
+            request_key="cancel-long-review-request",
+            status="ACTIVE",
+            total_items=1,
+        )
+        item = GenerationBatchItem(
+            id=item_id,
+            batch=batch,
+            row_number=1,
+            row_key="TASK-001",
+            manifest_json=json.dumps(
+                {
+                    "row_id": "TASK-001",
+                    "source_video_file": "source.mp4",
+                    "audio_file": "long.mp3",
+                    "speech_script": "等待审核的长音频。",
+                },
+                ensure_ascii=False,
+            ),
+            audio_status="AWAITING_REVIEW",
+            status="AWAITING_REVIEW",
+        )
+        project = LongAudioProject(
+            id=project_id,
+            user_id=user.id,
+            batch_item=item,
+            name="取消审核测试",
+            workflow_type="ltx_lip_sync",
+            review_required=True,
+            script_text="等待审核的长音频。",
+            audio_path="long-audio/cancel/audio.mp3",
+            audio_original_name="long.mp3",
+            video_path="long-audio/cancel/source.mp4",
+            video_original_name="source.mp4",
+            duration_seconds=60.0,
+            parameters_json="{}",
+            plan_json="[]",
+            alignment_provider="funasr_http",
+            status=LongAudioProjectStatus.REVIEW.value,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+        db.add_all([batch, item, project])
+        db.commit()
+
+    response = client.post(
+        f"/batches/{batch_id}/cancel",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        project = db.get(LongAudioProject, project_id)
+        item = db.get(GenerationBatchItem, item_id)
+        assert project.status == LongAudioProjectStatus.CANCELLED.value
+        assert item.status == "CANCELLED"
+        assert db.query(GenerationTask).count() == 0
+
+    page = client.get(f"/batches/{batch_id}")
+    assert page.status_code == 200
+    assert "已取消（尚未提交生成）" in page.text
+    assert "正在自动处理" not in page.text
 
 
 def test_minimax_batch_reuses_one_primary_asset_for_multiple_scripts(client):
@@ -806,6 +1034,9 @@ def test_batch_retry_and_terminal_delete(client, monkeypatch):
     }
     created = client.post("/api/batches", json=payload)
     batch_id = created.json()["batchId"]
+    initial_view_revision = client.get(
+        f"/api/batches/{batch_id}"
+    ).json()["viewRevision"]
     active_list = client.get("/batches")
     assert (
         f'action="/batches/{batch_id}/delete"'
@@ -835,6 +1066,7 @@ def test_batch_retry_and_terminal_delete(client, monkeypatch):
     assert "显存不足；失败节点：WanVideoEncode" in detail.text
     assert "自动重试 2/3" in detail.text
     status = client.get(f"/api/batches/{batch_id}").json()
+    assert status["viewRevision"] != initial_view_revision
     assert status["items"][0]["runninghubTaskId"] == "failed-batch-remote-id"
     assert status["items"][0]["errorMessage"] == (
         "显存不足；失败节点：WanVideoEncode"

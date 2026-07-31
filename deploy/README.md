@@ -26,9 +26,8 @@ systemd 服务、Nginx 配置和证书，不与服务器上的其他项目共用
 
 ## 长媒体处理位置
 
-生产服务器不安装、不启动 FunASR，也不监听 18084。仓库中保留的
-`install-asr.sh` 和 ASR systemd 单元只作为历史实验资产，安全更新脚本不会调用
-或安装它们。
+生产服务器不安装、不启动 FunASR，也不监听 18084。ASR 与 FFmpeg 长媒体处理
+统一由仓库 `media_node/` 下的 Windows 固定电脑节点负责。
 
 生产使用 pull 模式的 Windows 媒体节点：服务器提供受 Bearer Token 保护的领取、
 下载、续租和回传接口；电脑只主动访问 `https://video.lanyingjk01.com`，无需在
@@ -99,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
 
 脚本会先备份 `.env`，生成或保留独立的 `MEDIA_WORKER_TOKEN`，设置
 `MEDIA_PROCESSING_MODE=remote` 和 `LONG_AUDIO_ALIGNMENT_PROVIDER=funasr_http`，
-只重启本项目 Web 与媒体 Worker，并把需要复制到笔记本 `.env.worker` 的令牌输出
+只重启本项目 Web 与媒体 Worker，并把需要复制到固定电脑 `media_node/.env` 的令牌输出
 一次。令牌不得提交到 Git、聊天记录或截图中。
 
 需要暂时停用电脑节点、恢复服务器启发式本地处理时执行：

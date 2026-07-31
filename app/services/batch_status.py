@@ -129,6 +129,9 @@ def batch_query():
         selectinload(GenerationBatch.items)
         .selectinload(GenerationBatchItem.segments)
         .selectinload(GenerationSegment.generation_task),
+        selectinload(GenerationBatch.items).selectinload(
+            GenerationBatchItem.long_audio_project
+        ),
     )
 
 
@@ -167,6 +170,14 @@ def summarize_batch(batch: GenerationBatch) -> dict[str, Any]:
 
     tasks = _video_tasks(batch)
     audio_only = _audio_only_tasks(batch)
+    media_only = [
+        item
+        for item in batch.items
+        if item.generation_task is None
+        and not item.segments
+        and item.audio_task is None
+        and item.long_audio_project is not None
+    ]
     counts = {
         "queued": (
             sum(task.status == TaskStatus.PENDING.value for task in tasks)
@@ -185,6 +196,10 @@ def summarize_batch(batch: GenerationBatch) -> dict[str, Any]:
                 task.status in PROCESSING_AUDIO_STATUSES
                 for task in audio_only
             )
+            + sum(
+                item.status in {"SEGMENTING", "CREATING_SEGMENTS"}
+                for item in media_only
+            )
         ),
         "success": sum(
             task.status == TaskStatus.SUCCESS.value for task in tasks
@@ -197,10 +212,12 @@ def summarize_batch(batch: GenerationBatch) -> dict[str, Any]:
         + sum(
             task.status == AudioTaskStatus.FAILED.value
             for task in audio_only
-        ),
+        )
+        + sum(item.status == "FAILED" for item in media_only),
         "cancelled": sum(
             task.status == TaskStatus.CANCELLED.value for task in tasks
-        ),
+        )
+        + sum(item.status == "CANCELLED" for item in media_only),
         "audioPreparing": sum(
             task.status
             in PROCESSING_AUDIO_STATUSES | {AudioTaskStatus.PENDING.value}
@@ -209,7 +226,8 @@ def summarize_batch(batch: GenerationBatch) -> dict[str, Any]:
         "awaitingReview": sum(
             task.status == AudioTaskStatus.AWAITING_REVIEW.value
             for task in audio_only
-        ),
+        )
+        + sum(item.status == "AWAITING_REVIEW" for item in media_only),
     }
 
     # row_results evaluates one manifest row, not one provider call. A long
@@ -244,6 +262,12 @@ def summarize_batch(batch: GenerationBatch) -> dict[str, Any]:
             and not item_tasks
         ):
             row_results.append("FAILED")
+        elif (
+            item.long_audio_project
+            and item.status in {"FAILED", "CANCELLED"}
+            and not item_tasks
+        ):
+            row_results.append("FAILED")
         else:
             row_results.append("ACTIVE")
 
@@ -274,6 +298,54 @@ def summarize_batch(batch: GenerationBatch) -> dict[str, Any]:
     }
 
 
+def batch_view_revision(batch: GenerationBatch) -> str:
+    """Return a stable signature for server-rendered controls and child rows."""
+
+    structure = []
+    for item in batch.items:
+        task = item.generation_task
+        audio_task = item.audio_task
+        media_project = item.long_audio_project
+        structure.append(
+            {
+                "id": item.id,
+                "status": item.status,
+                "task": [task.id, task.status] if task else None,
+                "audioTask": (
+                    [
+                        audio_task.id,
+                        audio_task.status,
+                        audio_task.generation_version,
+                        len(audio_task.attempts),
+                    ]
+                    if audio_task
+                    else None
+                ),
+                "mediaProject": (
+                    [media_project.id, media_project.status]
+                    if media_project
+                    else None
+                ),
+                "segments": [
+                    [
+                        segment.id,
+                        segment.status,
+                        (
+                            [
+                                segment.generation_task.id,
+                                segment.generation_task.status,
+                            ]
+                            if segment.generation_task
+                            else None
+                        ),
+                    ]
+                    for segment in item.segments
+                ],
+            }
+        )
+    return json.dumps(structure, ensure_ascii=False, separators=(",", ":"))
+
+
 def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
     """Return the compact item/segment payload used by in-place polling."""
 
@@ -289,7 +361,7 @@ def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
             "errorMessage": (
                 item.generation_task.error_message
                 if item.generation_task
-                else None
+                else item.error_message
             ),
             "autoRetryCount": (
                 item.generation_task.runninghub_auto_retry_count

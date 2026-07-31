@@ -8,6 +8,9 @@
   const personModeSelect = document.getElementById("batch-person-mode");
   const instanceTypeSelect = document.getElementById("batch-instance-type");
   const resolutionInput = document.getElementById("batch-resolution");
+  const longAudioReviewRequired = document.getElementById(
+    "batch-long-audio-review-required",
+  );
   const quickConfirm = document.getElementById("quick-confirm");
   const advancedConfirm = document.getElementById("advanced-confirm");
   const voicePicker = document.getElementById("speech-voice-picker");
@@ -799,6 +802,10 @@
 
   function updateAudioModeUi() {
     const speech = isSpeechMode();
+    document.getElementById("long-audio-review-row").classList.toggle(
+      "hidden",
+      speech,
+    );
     document.getElementById("minimax-speech-settings").classList.toggle("hidden", !speech);
     document.getElementById("quick-direct-audio-group").classList.toggle("hidden", speech);
     document.getElementById("advanced-direct-audio-group").classList.toggle("hidden", speech);
@@ -867,6 +874,8 @@
       requestKey,
       batchParameters: batchParameters(),
       speechOptions: speechOptions(),
+      longAudioReviewRequired:
+        !isSpeechMode() && longAudioReviewRequired.checked,
       rows,
       assetIds: allAssetIds(entry),
     };
@@ -1123,6 +1132,7 @@
     resetWorkflowData();
     updateWorkflowUi(false);
   });
+  longAudioReviewRequired.addEventListener("change", resetConfirmation);
   personModeSelect.addEventListener("change", updateDualAudioUi);
   resolutionInput.addEventListener("input", resetConfirmation);
   instanceTypeSelect.addEventListener("change", resetConfirmation);

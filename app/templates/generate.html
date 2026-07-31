@@ -36,7 +36,7 @@
 <section id="workflow-digital_human" class="workflow-panel">
   <div class="panel-heading">
     <h2>数字人视频</h2>
-    <p class="muted">上传参考图片与音频，支持单人和双人模式。</p>
+    <p class="muted">上传参考图片与音频生成数字人视频。</p>
   </div>
   <form id="task-form" class="panel stack-form" enctype="multipart/form-data">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -47,10 +47,10 @@
 
     <p class="field-help">生成模式：稳定模式 v2（RunningHub 新版工作流默认，无需选择）。</p>
 
-    <label>单双人模式选择
+    <label>人物模式
       <select id="personMode" name="personMode" required {% if not has_api_key %}disabled{% endif %}>
-        <option value="0">双人模式</option>
         <option value="1" selected>单人模式</option>
+        <option value="0" disabled>双人模式（暂未开放）</option>
       </select>
     </label>
 
@@ -124,7 +124,7 @@
 <script>
 const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 const initialWorkflow = {{ initial_workflow|tojson }};
-const ltxDefaultInstance = {{ ltx_config.instance_type|tojson }};
+const ltxDefaultInstance = "plus";
 const instanceSelect = document.getElementById("task-instance-type");
 const workflowTabs = document.querySelectorAll(".workflow-tab");
 const workflowPanels = document.querySelectorAll(".workflow-panel");

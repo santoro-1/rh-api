@@ -7,6 +7,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import GenerationTask, TaskStatus
 from app.services.storage import task_output_dir, task_upload_dir
+from app.services.runninghub import RunningHubError
 from scripts import cleanup_files
 from tests.conftest import create_user, login
 
@@ -198,6 +199,68 @@ def test_other_user_cannot_retry_or_delete_task(client, monkeypatch):
         "/tasks/bulk-delete",
         data={"task_ids": [task_id]},
     ).status_code == 404
+
+
+def test_pending_task_can_be_cancelled_locally(client, monkeypatch):
+    task_id = _create_digital_task(client, monkeypatch, "cancel-pending-user")
+    response = client.post(
+        f"/tasks/{task_id}/cancel",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.CANCELLED.value
+        assert task.error_code == "CANCELLED_BY_USER"
+        assert task.runninghub_auto_retry_after is None
+        assert task.completed_at is not None
+
+
+def test_running_task_is_only_cancelled_after_runninghub_confirms(
+    client, monkeypatch
+):
+    task_id = _create_digital_task(client, monkeypatch, "cancel-remote-user")
+    _mark_task(task_id, TaskStatus.RUNNING.value, remote_id="remote-cancel-me")
+    calls = []
+
+    def fake_cancel(_self, remote_id):
+        calls.append(remote_id)
+
+    monkeypatch.setattr(
+        "app.services.task_cancellation.RunningHubClient.cancel_task",
+        fake_cancel,
+    )
+    response = client.post(
+        f"/tasks/{task_id}/cancel",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert calls == ["remote-cancel-me"]
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.CANCELLED.value
+
+
+def test_remote_cancel_failure_preserves_running_state(client, monkeypatch):
+    task_id = _create_digital_task(client, monkeypatch, "cancel-failure-user")
+    _mark_task(task_id, TaskStatus.RUNNING.value, remote_id="remote-still-running")
+
+    def fail_cancel(_self, _remote_id):
+        raise RunningHubError("RunningHub 未确认取消")
+
+    monkeypatch.setattr(
+        "app.services.task_cancellation.RunningHubClient.cancel_task",
+        fail_cancel,
+    )
+    response = client.post(
+        f"/tasks/{task_id}/cancel",
+        follow_redirects=False,
+    )
+    assert response.status_code == 409
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.runninghub_task_id == "remote-still-running"
 
 
 def test_task_history_filters_by_beijing_date(client, monkeypatch):

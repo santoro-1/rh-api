@@ -79,6 +79,7 @@ class LongAudioProjectStatus(str, Enum):
     CUTTING = "CUTTING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class User(Base):
@@ -463,6 +464,10 @@ class GenerationBatchItem(Base):
         cascade="all, delete-orphan",
         order_by="GenerationSegment.segment_index",
     )
+    long_audio_project: Mapped[Optional["LongAudioProject"]] = relationship(
+        back_populates="batch_item",
+        uselist=False,
+    )
 
     __table_args__ = (
         UniqueConstraint("batch_id", "row_number", name="uq_batch_items_row_number"),
@@ -506,7 +511,19 @@ class LongAudioProject(Base):
         unique=True,
         nullable=True,
     )
+    batch_item_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("generation_batch_items.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    workflow_type: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="ltx_lip_sync", index=True
+    )
+    review_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     script_text: Mapped[str] = mapped_column(Text, nullable=False)
     audio_path: Mapped[str] = mapped_column(String(500), nullable=False)
     audio_original_name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -559,6 +576,9 @@ class LongAudioProject(Base):
 
     user: Mapped[User] = relationship(back_populates="long_audio_projects")
     batch: Mapped[Optional["GenerationBatch"]] = relationship()
+    batch_item: Mapped[Optional["GenerationBatchItem"]] = relationship(
+        back_populates="long_audio_project"
+    )
 
 
 class GenerationSegment(Base):

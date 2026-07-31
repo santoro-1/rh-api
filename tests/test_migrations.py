@@ -59,11 +59,18 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('generation_tasks')"
             )
         }
-    assert revision == "0015_runninghub_auto_retry"
+        long_audio_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('long_audio_projects')"
+            )
+        }
+    assert revision == "0017_batch_long_audio"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
     assert "runninghub_auto_retry_after" in task_columns
+    assert "batch_item_id" in long_audio_columns
 
 
 def test_audio_review_migration_preserves_existing_batch_items():
@@ -182,7 +189,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0015_runninghub_auto_retry"
+        assert version == "0017_batch_long_audio"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:

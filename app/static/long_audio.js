@@ -16,6 +16,24 @@
 
   const createForm = document.getElementById("long-audio-form");
   if (createForm) {
+    const workflow = document.getElementById("long-audio-workflow");
+    const updateWorkflowFields = () => {
+      const digital = workflow.value === "digital_human";
+      const videoField = document.getElementById("long-audio-video-field");
+      const imageField = document.getElementById("long-audio-image-field");
+      const scriptField = document.getElementById("long-audio-script-field");
+      document.getElementById("long-audio-ltx-options").classList.toggle("hidden", digital);
+      document.getElementById("long-audio-digital-options").classList.toggle("hidden", !digital);
+      videoField.classList.toggle("hidden", digital);
+      imageField.classList.toggle("hidden", !digital);
+      scriptField.classList.toggle("hidden", digital);
+      videoField.querySelector("input").required = !digital;
+      imageField.querySelector("input").required = digital;
+      scriptField.querySelector("textarea").required = !digital;
+    };
+    workflow.addEventListener("change", updateWorkflowFields);
+    updateWorkflowFields();
+
     createForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const submit = document.getElementById("long-audio-submit");
@@ -50,17 +68,14 @@
   const processingPanel = document.getElementById("long-audio-processing-panel");
   const completedPanel = document.getElementById("long-audio-completed-panel");
   const failedPanel = document.getElementById("long-audio-failed-panel");
+  const reanalyzeForm = document.getElementById(
+    "long-audio-reanalyze-form",
+  );
   const errorBox = document.getElementById("long-audio-error");
   const player = document.getElementById("long-audio-player");
   const body = document.getElementById("long-audio-segment-body");
   let playEnd = null;
   let pollTimer = null;
-
-  const confidenceLabels = {
-    high: "高",
-    low: "低，请试听",
-    reviewed: "已人工确认",
-  };
 
   function formatSeconds(value) {
     const total = Math.max(Number(value) || 0, 0);
@@ -89,8 +104,9 @@
         <td><input class="segment-start" type="number" step="0.01" value="${Number(segment.startSeconds).toFixed(3)}" ${readonlyStart}></td>
         <td><input class="segment-end" type="number" step="0.01" value="${Number(segment.endSeconds).toFixed(3)}" ${readonlyEnd}></td>
         <td class="segment-duration">${formatSeconds(Number(segment.endSeconds) - Number(segment.startSeconds))}</td>
-        <td><span class="confidence ${escapeHtml(segment.confidence || "low")}">${escapeHtml(confidenceLabels[segment.confidence] || segment.confidence || "低，请试听")}</span></td>
-        <td><textarea class="segment-script" rows="5">${escapeHtml(segment.scriptText || "")}</textarea></td>
+        <td>${project.workflowType === "digital_human"
+          ? '<span class="muted">跟随音频</span><textarea class="segment-script hidden"></textarea>'
+          : `<textarea class="segment-script" rows="5">${escapeHtml(segment.scriptText || "")}</textarea>`}</td>
         <td><button type="button" class="secondary segment-play">播放本段</button></td>
       `;
       body.appendChild(row);
@@ -160,7 +176,7 @@
     error.classList.add("hidden");
     try {
       await savePlan();
-      status.textContent = "调整已保存。切割点和脚本已标记为人工确认。";
+      status.textContent = "调整已保存。";
     } catch (caught) {
       error.textContent = caught.message;
       error.classList.remove("hidden");
@@ -189,22 +205,8 @@
 
   function renderProject() {
     document.getElementById("long-audio-status-label").textContent = project.statusLabel;
-    document.getElementById("long-audio-provider").textContent = project.alignmentProvider;
     document.getElementById("long-audio-segment-count").textContent =
       project.segments?.length ? `${project.segments.length} 段` : "等待分析";
-    const worker = document.getElementById("long-audio-worker");
-    const workerMetrics = document.getElementById("long-audio-worker-metrics");
-    if (worker) worker.textContent = project.remoteWorkerId || "等待领取";
-    if (workerMetrics) {
-      const metrics = project.remoteMetrics || {};
-      const details = [];
-      if (metrics.phase) details.push(metrics.phase);
-      if (metrics.elapsedSeconds != null) details.push(`${Number(metrics.elapsedSeconds).toFixed(1)} 秒`);
-      if (metrics.workerTreeRssMb != null) details.push(`节点进程 ${Number(metrics.workerTreeRssMb).toFixed(0)} MB`);
-      else if (metrics.processRssMb != null) details.push(`Worker ${Number(metrics.processRssMb).toFixed(0)} MB`);
-      if (metrics.systemMemoryPercent != null) details.push(`整机内存 ${Number(metrics.systemMemoryPercent).toFixed(0)}%`);
-      workerMetrics.textContent = details.join(" · ");
-    }
     if (project.errorMessage) {
       errorBox.textContent = project.errorMessage;
       errorBox.classList.remove("hidden");
@@ -220,6 +222,7 @@
     processingPanel.classList.toggle("hidden", !processing);
     completedPanel.classList.toggle("hidden", !completed);
     failedPanel.classList.toggle("hidden", !failed);
+    reanalyzeForm?.classList.toggle("hidden", !(review || failed));
     if (review) renderSegments(project.segments || []);
     if (completed && project.batchId) {
       document.getElementById("long-audio-batch-link").href = `/batches/${project.batchId}`;

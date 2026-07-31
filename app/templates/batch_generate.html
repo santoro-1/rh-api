@@ -28,6 +28,10 @@
       </select>
     </label>
   </div>
+  <label id="long-audio-review-row" class="inline-check batch-confirm">
+    <input id="batch-long-audio-review-required" type="checkbox">
+    <span>长音频拆分后先试听确认</span>
+  </label>
   <details class="advanced-settings">
     <summary>高级设置</summary>
     <div class="advanced-settings-body stack-form">
@@ -38,10 +42,10 @@
         <label>最长分辨率
           <input id="batch-resolution" type="number" min="1" value="1024">
         </label>
-        <label>单双人模式
+        <label>人物模式
           <select id="batch-person-mode">
             <option value="单人">单人（默认）</option>
-            <option value="双人">双人</option>
+            <option value="双人" disabled>双人（暂未开放）</option>
           </select>
         </label>
       </div>
@@ -57,7 +61,7 @@
           <span class="field-help">系统会自动追加每条口播脚本，生成最终视频正向提示词。</span>
         </label>
       </div>
-      <p class="field-help">以上参数应用于整个任务；音频时间由系统自动计算，单次最多 {{ max_batch_items }} 条。</p>
+      <p class="field-help">以上设置应用于整个任务，单次最多 {{ max_batch_items }} 条。</p>
     </div>
   </details>
 </section>
@@ -352,7 +356,7 @@ window.batchGenerateConfig = {
   initialWorkflow: {{ initial_workflow|tojson }},
   maxBatchItems: {{ max_batch_items|tojson }},
   digitalDefaultPrompt: {{ digital_config.default_prompt|tojson }},
-  ltxDefaultInstance: {{ ltx_config.instance_type|tojson }},
+  ltxDefaultInstance: "plus",
   minimaxConfigured: {{ minimax_configured|tojson }},
 };
 </script>

@@ -98,6 +98,6 @@ trap - ERR
 echo "媒体处理模式已切换为：$MODE"
 echo "修改前 .env 备份：$backup"
 if [[ "$MODE" == "remote" ]]; then
-    echo "请立即复制下面一行到笔记本 .env.worker，随后清理终端滚屏："
+    echo "请立即复制下面一行到固定电脑 media_node/.env，随后清理终端滚屏："
     printf 'MEDIA_WORKER_TOKEN=%s\n' "$token"
 fi

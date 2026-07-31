@@ -11,7 +11,7 @@ from app.models import (
     User,
     VoiceAssetStatus,
 )
-from app.services.media_segmentation import plan_audio_segments
+from app.services.media_segmentation import plan_audio_segments, plan_silence_segments
 from app.services.security import encrypt_secret
 from app.services.speech.accounts import credential_fingerprint, save_minimax_config
 from app.services.workflow_configs import save_workflow_config
@@ -104,6 +104,14 @@ def test_local_segment_plan_preserves_script_and_hard_limit():
     assert all(plan.duration_seconds <= 45.0 for plan in plans)
     assert plans[0].end_seconds == 29.5
     assert plans[-1].end_seconds == 82.0
+
+
+def test_silence_plan_avoids_tiny_tail_and_never_needs_transcript():
+    plans = plan_silence_segments(91.0, silence_midpoints=[44.0])
+    assert all(plan.script_text == "" for plan in plans)
+    assert all(12.0 <= plan.duration_seconds <= 45.0 for plan in plans)
+    assert plans[0].start_seconds == 0
+    assert plans[-1].end_seconds == 91.0
 
 
 def test_minimax_account_binding_survives_key_rotation_but_not_account_switch():

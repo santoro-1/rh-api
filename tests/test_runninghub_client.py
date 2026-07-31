@@ -3,9 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import requests
 
 from app.config import get_settings
-from app.services.runninghub import RunningHubClient, RunningHubError
+from app.services.runninghub import (
+    RunningHubClient,
+    RunningHubError,
+    runninghub_upload_diagnostics,
+)
 from app.services.workflow import build_payload
 
 
@@ -25,7 +30,10 @@ class FakeSession:
 
     def post(self, *args, **kwargs):
         self.calls.append((args, kwargs))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def _test_media_path(name: str) -> Path:
@@ -62,8 +70,9 @@ def test_upload_rejects_missing_filename():
         "app-1",
         FakeSession([FakeResponse(200, {"code": 0, "data": {}})]),
     )
-    with pytest.raises(RunningHubError, match="fileName"):
+    with pytest.raises(RunningHubError, match="fileName") as error:
         client.upload_file(media)
+    assert error.value.retry_safe is True
 
 
 def test_upload_surfaces_business_error_message():
@@ -82,8 +91,52 @@ def test_upload_surfaces_business_error_message():
             ]
         ),
     )
-    with pytest.raises(RunningHubError, match="API Key不存在"):
+    with pytest.raises(RunningHubError, match="API Key不存在") as error:
         client.upload_file(media)
+    assert error.value.retry_safe is True
+
+
+def test_upload_network_error_keeps_safe_operator_diagnostics():
+    media = _test_media_path("network-timeout.png")
+    media.write_bytes(b"network-test")
+    session = FakeSession(
+        [
+            requests.ReadTimeout(
+                "proxy https://proxy-user:proxy-password@proxy.example/"
+                "?apiKey=secret-value timed out"
+            )
+        ]
+    )
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "app-1",
+        session,
+    )
+
+    with pytest.raises(RunningHubError) as error:
+        client.upload_file(media)
+
+    details = error.value.log_details()
+    assert error.value.retry_safe is True
+    assert details["runninghub_operation"] == "asset_upload"
+    assert details["endpoint_host"] == "rh.example"
+    assert details["network_error_type"] == "ReadTimeout"
+    assert details["asset_size_bytes"] == len(b"network-test")
+    assert details["elapsed_ms"] >= 0
+    assert "proxy-password" not in details["network_error"]
+    assert "secret-value" not in details["network_error"]
+    assert "***:***@" in details["network_error"]
+
+
+def test_large_upload_diagnostics_warn_without_rejecting_input():
+    details = runninghub_upload_diagnostics(240 * 1024 * 1024)
+
+    assert details["asset_size_mb"] == 240.0
+    assert "超过 RunningHub 官方建议的 30MB" in details["upload_size_warning"]
+    assert "upload_size_warning" not in runninghub_upload_diagnostics(
+        15 * 1024 * 1024
+    )
 
 
 def test_account_status_returns_current_task_count_without_exposing_key():
@@ -184,3 +237,27 @@ def test_workflow_submission_uses_workflow_v2_endpoint():
         session.calls[0][0][0]
         == "https://rh.example/openapi/v2/run/workflow/2080551073030434817"
     )
+
+
+def test_cancel_task_uses_official_endpoint_and_requires_success():
+    session = FakeSession(
+        [FakeResponse(200, {"code": 0, "msg": "success", "data": None})]
+    )
+    client = RunningHubClient("secret", "https://rh.example", "app-1", session)
+    client.cancel_task("remote-123")
+    args, kwargs = session.calls[0]
+    assert args[0] == "https://rh.example/task/openapi/cancel"
+    assert kwargs["json"] == {"apiKey": "secret", "taskId": "remote-123"}
+
+
+def test_cancel_task_surfaces_business_failure():
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "app-1",
+        FakeSession(
+            [FakeResponse(200, {"code": 1, "msg": "task cannot cancel"})]
+        ),
+    )
+    with pytest.raises(RunningHubError, match="task cannot cancel"):
+        client.cancel_task("remote-123")

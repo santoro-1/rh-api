@@ -64,6 +64,12 @@
     </div>
     <div class="task-actions">
       <a class="button secondary" href="/tasks/{{ task.id }}">详情</a>
+      {% if task.status in ["PENDING", "SUBMITTED", "RUNNING"] %}
+        <form method="post" action="/tasks/{{ task.id }}/cancel" onsubmit="return confirm('确定取消这个生成任务吗？');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button danger" type="submit">取消生成</button>
+        </form>
+      {% endif %}
       {% if task.status == "SUCCESS" %}<a class="button" href="/api/tasks/{{ task.id }}/download">下载</a>{% endif %}
       {% if task.status in ["FAILED", "DOWNLOAD_FAILED"] %}
         <form method="post" action="/tasks/{{ task.id }}/retry" onsubmit="return confirm('重试会重新进入队列并生成新的 RunningHub 任务 ID；生成失败时可能再次产生费用。确定重试吗？')">

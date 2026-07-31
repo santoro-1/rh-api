@@ -22,13 +22,15 @@ from app.models import (
     User,
 )
 from app.services.alignment import get_alignment_provider
-from app.services.audio import inspect_audio_duration
+from app.services.audio import format_duration_timecode, inspect_audio_duration
 from app.services.media_segmentation import (
     MAX_SEGMENT_SECONDS,
     SegmentPlan,
     cut_audio_segment,
     cut_video_segment,
+    detect_silence_midpoints,
     inspect_media_duration,
+    plan_silence_segments,
 )
 from app.services.storage import (
     long_audio_project_dir,
@@ -48,6 +50,8 @@ from app.workflows.base import WorkflowAsset
 
 
 LTX_WORKFLOW = "ltx_lip_sync"
+DIGITAL_HUMAN_WORKFLOW = "digital_human"
+SUPPORTED_WORKFLOWS = {LTX_WORKFLOW, DIGITAL_HUMAN_WORKFLOW}
 MAX_LONG_AUDIO_SECONDS = 60 * 60
 
 
@@ -57,6 +61,37 @@ class LongAudioError(ValueError):
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def sync_linked_batch_item(project: LongAudioProject) -> None:
+    """Keep an automatic batch row readable while media work is in flight."""
+
+    item = project.batch_item
+    if item is None:
+        return
+    if project.status == LongAudioProjectStatus.REVIEW.value:
+        item.status = "AWAITING_REVIEW"
+        item.audio_status = "AWAITING_REVIEW"
+    elif project.status == LongAudioProjectStatus.FAILED.value:
+        item.status = "FAILED"
+        item.audio_status = "FAILED"
+        item.error_code = project.error_code
+        item.error_message = project.error_message
+    elif project.status == LongAudioProjectStatus.CANCELLED.value:
+        item.status = "CANCELLED"
+        item.audio_status = "CANCELLED"
+        item.error_code = None
+        item.error_message = None
+    elif project.status == LongAudioProjectStatus.COMPLETED.value:
+        item.status = "SEGMENTS_CREATED"
+        item.audio_status = "AUDIO_READY"
+        item.error_code = None
+        item.error_message = None
+    else:
+        item.status = "SEGMENTING"
+        item.audio_status = "SEGMENTING"
+        item.error_code = None
+        item.error_message = None
 
 
 def _confidence_for_method(method: str) -> str:
@@ -124,22 +159,41 @@ def create_long_audio_project(
     prompt_prefix: str,
     instance_type: str,
     alignment_provider: str = "funasr_http",
+    workflow_type: str = LTX_WORKFLOW,
+    review_required: bool = False,
+    digital_prompt: str = (
+        "人物自然地说话，他的身体和手部随着说话的节奏做着自然且随意的动作，"
+        "镜头保持稳定。"
+    ),
+    digital_resolution: int = 1024,
+    digital_person_mode: int = 1,
 ) -> LongAudioProject:
-    ensure_user_can_create_workflow(user, LTX_WORKFLOW)
+    if workflow_type not in SUPPORTED_WORKFLOWS:
+        raise LongAudioError("不支持的长音频工作流")
+    ensure_user_can_create_workflow(user, workflow_type)
     clean_name = name.strip()
     clean_script = script_text.strip()
     clean_prefix = prompt_prefix.strip().rstrip("：:")
     if not 1 <= len(clean_name) <= 100:
         raise LongAudioError("项目名称需为 1–100 个字符")
-    if not clean_script:
+    if workflow_type == LTX_WORKFLOW and not clean_script:
         raise LongAudioError("完整口播脚本不能为空")
     if len(clean_script) > 100_000:
         raise LongAudioError("完整口播脚本不能超过 100000 个字符")
-    if not clean_prefix or len(clean_prefix) > 500:
-        raise LongAudioError("人物与语言提示需为 1–500 个字符")
+    if workflow_type == LTX_WORKFLOW and (
+        not clean_prefix or len(clean_prefix) > 500
+    ):
+        raise LongAudioError("人物与语言提示需为 1—500 个字符")
     if instance_type not in {"default", "plus"}:
         raise LongAudioError("实例类型只能为普通版 default 或 Plus")
-    get_alignment_provider(alignment_provider)
+    if workflow_type == LTX_WORKFLOW:
+        get_alignment_provider(alignment_provider)
+    else:
+        if digital_person_mode != 1:
+            raise LongAudioError("双人数字人模式暂未开放")
+        clean_digital_prompt = digital_prompt.strip()
+        if not clean_digital_prompt or len(clean_digital_prompt) > 2000:
+            raise LongAudioError("数字人动作提示需为 1—2000 个字符")
 
     project_id = str(uuid.uuid4())
     directory = long_audio_project_dir(settings, user.id, project_id)
@@ -147,20 +201,22 @@ def create_long_audio_project(
         audio_path, audio_name = save_upload(
             audio, directory, "audio", settings
         )
+        visual_kind = "video" if workflow_type == LTX_WORKFLOW else "image"
         video_path, video_name = save_upload(
-            source_video, directory, "video", settings
+            source_video, directory, visual_kind, settings
         )
         duration = inspect_audio_duration(audio_path)
         if duration <= MAX_SEGMENT_SECONDS + 0.01:
             raise LongAudioError("音频不超过 45 秒，请直接使用普通上传入口")
         if duration > MAX_LONG_AUDIO_SECONDS:
             raise LongAudioError("第一版长音频最多支持 60 分钟")
-        video_duration = inspect_media_duration(video_path)
-        if video_duration + 0.05 < duration:
-            raise LongAudioError(
-                f"源视频时长不足：视频 {video_duration:.1f} 秒，"
-                f"音频 {duration:.1f} 秒"
-            )
+        if workflow_type == LTX_WORKFLOW:
+            video_duration = inspect_media_duration(video_path)
+            if video_duration + 0.05 < duration:
+                raise LongAudioError(
+                    f"源视频时长不足：视频 {video_duration:.1f} 秒，"
+                    f"音频 {duration:.1f} 秒"
+                )
     except Exception:
         remove_directory(directory)
         raise
@@ -169,6 +225,8 @@ def create_long_audio_project(
         id=project_id,
         user_id=user.id,
         name=clean_name,
+        workflow_type=workflow_type,
+        review_required=review_required,
         script_text=clean_script,
         audio_path=to_relative_data_path(audio_path, settings),
         audio_original_name=audio_name,
@@ -178,11 +236,24 @@ def create_long_audio_project(
         parameters_json=json.dumps(
             {
                 "prompt_prefix": clean_prefix,
-                "instance_type": instance_type,
+                "instance_type": (
+                    instance_type if workflow_type == LTX_WORKFLOW else "default"
+                ),
+                "digital_prompt": (
+                    clean_digital_prompt
+                    if workflow_type == DIGITAL_HUMAN_WORKFLOW
+                    else ""
+                ),
+                "resolution": digital_resolution,
+                "person_mode": digital_person_mode,
             },
             ensure_ascii=False,
         ),
-        alignment_provider=alignment_provider,
+        alignment_provider=(
+            alignment_provider
+            if workflow_type == LTX_WORKFLOW
+            else "vad_silence"
+        ),
         status=LongAudioProjectStatus.PENDING_ANALYSIS.value,
         expires_at=_now() + timedelta(days=settings.upload_retention_days),
     )
@@ -197,14 +268,21 @@ def analyze_long_audio_project(
     audio_path = safe_relative_path(project.audio_path, settings.data_dir)
     if not audio_path.is_file():
         raise LongAudioError("原始长音频文件不存在")
-    provider = get_alignment_provider(project.alignment_provider)
-    result = provider.align(audio_path, project.script_text)
-    apply_alignment_plans(
-        project,
-        settings,
-        list(result.plans),
-        provider=result.provider,
-    )
+    if project.workflow_type == DIGITAL_HUMAN_WORKFLOW:
+        plans = plan_silence_segments(
+            project.duration_seconds,
+            detect_silence_midpoints(audio_path),
+        )
+        apply_alignment_plans(project, settings, plans, provider="vad_silence")
+    else:
+        provider = get_alignment_provider(project.alignment_provider)
+        result = provider.align(audio_path, project.script_text)
+        apply_alignment_plans(
+            project,
+            settings,
+            list(result.plans),
+            provider=result.provider,
+        )
 
 
 def apply_alignment_plans(
@@ -236,15 +314,23 @@ def apply_alignment_plans(
         previous_end = plan.end_seconds
     if abs(previous_end - project.duration_seconds) > 0.1:
         raise LongAudioError("对齐服务没有覆盖完整音频")
-    if _normalized_script(
-        "".join(plan.script_text for plan in plans)
-    ) != _normalized_script(project.script_text):
-        raise LongAudioError("对齐服务没有完整映射原始脚本")
+    if project.workflow_type == LTX_WORKFLOW:
+        if _normalized_script(
+            "".join(plan.script_text for plan in plans)
+        ) != _normalized_script(project.script_text):
+            raise LongAudioError("对齐服务没有完整映射原始脚本")
     project.plan_json = serialize_plans(plans)
     project.alignment_provider = provider
-    project.status = LongAudioProjectStatus.REVIEW.value
+    project.status = (
+        LongAudioProjectStatus.REVIEW.value
+        if project.review_required
+        else LongAudioProjectStatus.PENDING_CUT.value
+    )
+    if not project.review_required:
+        project.confirmed_at = _now()
     project.error_code = None
     project.error_message = None
+    sync_linked_batch_item(project)
 
 
 def _normalized_script(value: str) -> str:
@@ -273,7 +359,7 @@ def validate_reviewed_plan(
         except (TypeError, ValueError) as exc:
             raise LongAudioError(f"第 {position} 段时间格式错误") from exc
         text = str(raw.get("scriptText") or "").strip()
-        if not text:
+        if project.workflow_type == LTX_WORKFLOW and not text:
             raise LongAudioError(f"第 {position} 段脚本不能为空")
         expected_start = 0.0 if position == 1 else previous_end
         if abs(start - expected_start) > 0.05:
@@ -303,9 +389,10 @@ def validate_reviewed_plan(
         end_seconds=project.duration_seconds,
         alignment_method="manual_review",
     )
-    joined = "".join(plan.script_text for plan in plans)
-    if _normalized_script(joined) != _normalized_script(project.script_text):
-        raise LongAudioError("所有分段脚本拼接后必须与原始脚本一致")
+    if project.workflow_type == LTX_WORKFLOW:
+        joined = "".join(plan.script_text for plan in plans)
+        if _normalized_script(joined) != _normalized_script(project.script_text):
+            raise LongAudioError("所有分段脚本拼接后必须与原始脚本一致")
     return plans
 
 
@@ -328,7 +415,7 @@ def save_reviewed_plan(
 
 
 def confirm_long_audio_project(project: LongAudioProject) -> None:
-    if project.batch_id:
+    if project.status == LongAudioProjectStatus.COMPLETED.value:
         return
     if project.status not in {
         LongAudioProjectStatus.REVIEW.value,
@@ -340,6 +427,7 @@ def confirm_long_audio_project(project: LongAudioProject) -> None:
     project.confirmed_at = _now()
     project.error_code = None
     project.error_message = None
+    sync_linked_batch_item(project)
 
 
 def materialize_long_audio_project(
@@ -349,14 +437,24 @@ def materialize_long_audio_project(
     *,
     precut_directory: Path | None = None,
 ) -> GenerationBatch:
-    if project.batch_id and project.batch is not None:
+    if (
+        project.status == LongAudioProjectStatus.COMPLETED.value
+        and project.batch_item is not None
+    ):
+        return project.batch_item.batch
+    if (
+        project.status == LongAudioProjectStatus.COMPLETED.value
+        and project.batch_id
+        and project.batch is not None
+    ):
         return project.batch
     user = project.user
-    ensure_user_can_create_workflow(user, LTX_WORKFLOW)
+    workflow_type = project.workflow_type or LTX_WORKFLOW
+    ensure_user_can_create_workflow(user, workflow_type)
     plans = load_plans(project)
     audio_source = safe_relative_path(project.audio_path, settings.data_dir)
-    video_source = safe_relative_path(project.video_path, settings.data_dir)
-    if not audio_source.is_file() or not video_source.is_file():
+    visual_source = safe_relative_path(project.video_path, settings.data_dir)
+    if not audio_source.is_file() or not visual_source.is_file():
         raise LongAudioError("长音频项目的原始素材已丢失")
     try:
         parameters = json.loads(project.parameters_json)
@@ -365,50 +463,64 @@ def materialize_long_audio_project(
     prompt_prefix = str(
         parameters.get("prompt_prefix") or "一名人物用中文说"
     ).strip().rstrip("：:")
-    instance_type = str(parameters.get("instance_type") or "default")
+    instance_type = str(parameters.get("instance_type") or "plus")
+    digital_prompt = str(
+        parameters.get("digital_prompt")
+        or "人物自然地说话，表情自然，动作自然，镜头保持稳定。"
+    ).strip()
 
-    request_key = f"long-audio:{project.id}"
-    existing = db.scalar(
-        select(GenerationBatch).where(
-            GenerationBatch.user_id == project.user_id,
-            GenerationBatch.request_key == request_key,
+    if project.batch_item is not None:
+        item = project.batch_item
+        batch = item.batch
+        item.status = "CREATING_SEGMENTS"
+        item.audio_status = "SEGMENTING"
+    else:
+        request_key = f"long-audio:{project.id}"
+        existing = db.scalar(
+            select(GenerationBatch).where(
+                GenerationBatch.user_id == project.user_id,
+                GenerationBatch.request_key == request_key,
+            )
         )
-    )
-    if existing is not None:
-        project.batch_id = existing.id
-        project.status = LongAudioProjectStatus.COMPLETED.value
-        project.completed_at = project.completed_at or _now()
-        return existing
+        if existing is not None:
+            project.batch_id = existing.id
+            project.status = LongAudioProjectStatus.COMPLETED.value
+            project.completed_at = project.completed_at or _now()
+            return existing
 
-    batch = GenerationBatch(
-        id=str(uuid.uuid4()),
-        user_id=project.user_id,
-        name=project.name,
-        workflow_type=LTX_WORKFLOW,
-        audio_mode="upload",
-        review_required=False,
-        request_key=request_key,
-        status="ACTIVE",
-        total_items=1,
-    )
-    item = GenerationBatchItem(
-        id=str(uuid.uuid4()),
-        batch=batch,
-        row_number=1,
-        row_key=f"LONG-{project.id[:8]}",
-        manifest_json=json.dumps(
-            {
-                "row_id": f"LONG-{project.id[:8]}",
-                "speech_script": project.script_text,
-                "source_video_file": project.video_original_name,
-                "audio_file": project.audio_original_name,
-                "long_audio_project_id": project.id,
-            },
-            ensure_ascii=False,
-        ),
-        audio_status="AUDIO_READY",
-        status="CREATING_SEGMENTS",
-    )
+        batch = GenerationBatch(
+            id=str(uuid.uuid4()),
+            user_id=project.user_id,
+            name=project.name,
+            workflow_type=workflow_type,
+            audio_mode="upload",
+            review_required=False,
+            request_key=request_key,
+            status="ACTIVE",
+            total_items=1,
+        )
+        item = GenerationBatchItem(
+            id=str(uuid.uuid4()),
+            batch=batch,
+            row_number=1,
+            row_key=f"LONG-{project.id[:8]}",
+            manifest_json=json.dumps(
+                {
+                    "row_id": f"LONG-{project.id[:8]}",
+                    "speech_script": project.script_text,
+                    (
+                        "source_video_file"
+                        if workflow_type == LTX_WORKFLOW
+                        else "source_image_file"
+                    ): project.video_original_name,
+                    "audio_file": project.audio_original_name,
+                    "long_audio_project_id": project.id,
+                },
+                ensure_ascii=False,
+            ),
+            audio_status="AUDIO_READY",
+            status="CREATING_SEGMENTS",
+        )
 
     created_directories: list[Path] = []
     prepared_segments: list[
@@ -421,7 +533,14 @@ def materialize_long_audio_project(
             upload_dir = task_upload_dir(settings, user.id, task_id)
             created_directories.append(upload_dir)
             segment_audio = upload_dir / f"segment-{plan.index:03d}.mp3"
-            segment_video = upload_dir / f"segment-{plan.index:03d}.mp4"
+            visual_suffix = (
+                ".mp4"
+                if workflow_type == LTX_WORKFLOW
+                else (Path(project.video_original_name).suffix or ".png")
+            )
+            segment_visual = upload_dir / (
+                f"segment-{plan.index:03d}{visual_suffix}"
+            )
             if precut_directory is None:
                 cut_audio_segment(
                     audio_source,
@@ -435,18 +554,19 @@ def materialize_long_audio_project(
                     / "audio"
                     / f"segment-{plan.index:03d}.mp3"
                 )
-                source_video = (
-                    precut_directory
-                    / "video"
-                    / f"segment-{plan.index:03d}.mp4"
+                source_video = precut_directory / "video" / (
+                    f"segment-{plan.index:03d}.mp4"
                 )
-                if not source_audio.is_file() or not source_video.is_file():
+                if not source_audio.is_file() or (
+                    workflow_type == LTX_WORKFLOW and not source_video.is_file()
+                ):
                     raise LongAudioError(
                         f"远程节点没有返回第 {plan.index} 段完整素材"
                     )
                 segment_audio.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source_audio, segment_audio)
-                shutil.copyfile(source_video, segment_video)
+                if workflow_type == LTX_WORKFLOW:
+                    shutil.copyfile(source_video, segment_visual)
             segment_duration = inspect_audio_duration(segment_audio)
             if segment_duration <= 0 or segment_duration > MAX_SEGMENT_SECONDS + 0.2:
                 raise LongAudioError(
@@ -456,22 +576,28 @@ def materialize_long_audio_project(
                 raise LongAudioError(
                     f"第 {plan.index} 段远程音频时长与分段方案不一致"
                 )
-            if precut_directory is None:
+            if workflow_type == LTX_WORKFLOW and precut_directory is None:
                 cut_video_segment(
-                    video_source,
-                    segment_video,
+                    visual_source,
+                    segment_visual,
                     start_seconds=plan.start_seconds,
                     duration_seconds=segment_duration,
                 )
-            else:
-                video_duration = inspect_media_duration(segment_video)
+            elif workflow_type == LTX_WORKFLOW:
+                video_duration = inspect_media_duration(segment_visual)
                 if video_duration + 0.1 < segment_duration:
                     raise LongAudioError(
                         f"第 {plan.index} 段远程视频短于对应音频"
                     )
+            else:
+                shutil.copyfile(visual_source, segment_visual)
             audio_relative = to_relative_data_path(segment_audio, settings)
-            video_relative = to_relative_data_path(segment_video, settings)
-            prompt = f"{prompt_prefix}：“{plan.script_text}”"
+            visual_relative = to_relative_data_path(segment_visual, settings)
+            prompt = (
+                f"{prompt_prefix}：“{plan.script_text}”"
+                if workflow_type == LTX_WORKFLOW
+                else digital_prompt
+            )
             segment = GenerationSegment(
                 id=str(uuid.uuid4()),
                 batch_item_id=item.id,
@@ -480,38 +606,65 @@ def materialize_long_audio_project(
                 start_seconds=plan.start_seconds,
                 end_seconds=plan.end_seconds,
                 audio_path=audio_relative,
-                video_path=video_relative,
+                video_path=(
+                    visual_relative if workflow_type == LTX_WORKFLOW else None
+                ),
                 prompt=prompt,
                 alignment_method=plan.alignment_method,
                 status="TASK_CREATED",
             )
+            primary_name = (
+                f"{Path(project.video_original_name).stem}-"
+                f"{plan.index:03d}{visual_suffix}"
+            )
+            assets = [
+                WorkflowAsset(
+                    name=(
+                        "video"
+                        if workflow_type == LTX_WORKFLOW
+                        else "image"
+                    ),
+                    kind=(
+                        "video"
+                        if workflow_type == LTX_WORKFLOW
+                        else "image"
+                    ),
+                    relative_path=visual_relative,
+                    original_name=primary_name,
+                ),
+                WorkflowAsset(
+                    name="audio",
+                    kind="audio",
+                    relative_path=audio_relative,
+                    original_name=(
+                        f"{Path(project.audio_original_name).stem}-"
+                        f"{plan.index:03d}.mp3"
+                    ),
+                ),
+            ]
+            task_parameters = {
+                "prompt": prompt,
+                "instance_type": instance_type,
+            }
+            if workflow_type == DIGITAL_HUMAN_WORKFLOW:
+                task_parameters.update(
+                    {
+                        "start_time": "0:00",
+                        "end_time": format_duration_timecode(segment_duration),
+                        "person_mode": str(
+                            parameters.get("person_mode") or "1"
+                        ),
+                        "resolution": str(
+                            parameters.get("resolution") or "1024"
+                        ),
+                        "instance_type": "default",
+                    }
+                )
             validated = validate_task_input(
                 user,
-                LTX_WORKFLOW,
-                [
-                    WorkflowAsset(
-                        name="video",
-                        kind="video",
-                        relative_path=video_relative,
-                        original_name=(
-                            f"{Path(project.video_original_name).stem}-"
-                            f"{plan.index:03d}.mp4"
-                        ),
-                    ),
-                    WorkflowAsset(
-                        name="audio",
-                        kind="audio",
-                        relative_path=audio_relative,
-                        original_name=(
-                            f"{Path(project.audio_original_name).stem}-"
-                            f"{plan.index:03d}.mp3"
-                        ),
-                    ),
-                ],
-                {
-                    "prompt": prompt,
-                    "instance_type": instance_type,
-                },
+                workflow_type,
+                assets,
+                task_parameters,
                 {
                     "has_custom_audio": True,
                     "audio_duration_seconds": segment_duration,
@@ -540,11 +693,14 @@ def materialize_long_audio_project(
                 created_at=created_at,
             )
         item.status = "SEGMENTS_CREATED"
-        project.batch_id = batch.id
+        if project.batch_item_id is None:
+            project.batch_id = batch.id
+            project.batch_item = item
         project.status = LongAudioProjectStatus.COMPLETED.value
         project.completed_at = _now()
         project.error_code = None
         project.error_message = None
+        sync_linked_batch_item(project)
         db.flush()
     except Exception:
         for directory in created_directories:

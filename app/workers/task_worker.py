@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
@@ -11,7 +12,11 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import GenerationTask, RunningHubConfig, TaskStatus, User
-from app.services.runninghub import RunningHubClient, RunningHubError
+from app.services.runninghub import (
+    RunningHubClient,
+    RunningHubError,
+    runninghub_upload_diagnostics,
+)
 from app.services.logging_config import (
     configure_logging,
     log_event,
@@ -190,7 +195,56 @@ def _schedule_runninghub_auto_retry(
     return previous_remote_id, delay_seconds
 
 
-def _mark_failed(task: GenerationTask, code: str, message: str) -> None:
+def _handle_safe_pre_submission_failure(
+    db: Session,
+    task: GenerationTask,
+    *,
+    code: str,
+    message: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> None:
+    """Retry failures that happened before a remote task could be created."""
+
+    task.error_code = code
+    scheduled = _schedule_runninghub_auto_retry(task, message=message)
+    if scheduled is not None:
+        _, delay_seconds = scheduled
+        db.commit()
+        log_event(
+            logger,
+            "video.pre_submit_retry_scheduled",
+            "RunningHub 素材上传失败，已安排安全自动重试",
+            level=logging.WARNING,
+            workflow=task.workflow_type,
+            auto_retry_count=task.runninghub_auto_retry_count,
+            auto_retry_limit=get_settings().runninghub_auto_retry_limit,
+            retry_after_seconds=delay_seconds,
+            error_code=code,
+            error=message,
+            **(diagnostics or {}),
+            **_video_log_context(task),
+        )
+        return
+    _mark_failed(
+        task,
+        code,
+        (
+            f"{message}\n"
+            f"已用完 {get_settings().runninghub_auto_retry_limit} "
+            "次自动重试，请检查网络或 RunningHub 服务后再决定是否人工重试。"
+        ),
+        diagnostics=diagnostics,
+    )
+    db.commit()
+
+
+def _mark_failed(
+    task: GenerationTask,
+    code: str,
+    message: str,
+    *,
+    diagnostics: dict[str, Any] | None = None,
+) -> None:
     """Persist a terminal local failure and emit one operator event."""
 
     task.status = TaskStatus.FAILED.value
@@ -207,6 +261,7 @@ def _mark_failed(task: GenerationTask, code: str, message: str) -> None:
         runninghub_task_id=task.runninghub_task_id,
         error_code=code,
         error=message,
+        **(diagnostics or {}),
         **_video_log_context(task),
     )
 
@@ -364,6 +419,7 @@ def _handle_remote_status(
                 level=logging.WARNING,
                 runninghub_task_id=task.runninghub_task_id,
                 error=str(exc),
+                **exc.log_details(),
                 **_video_log_context(task),
             )
         return
@@ -472,6 +528,7 @@ def _handle_remote_status(
             level=logging.WARNING,
             runninghub_task_id=task.runninghub_task_id,
             error=str(exc),
+            **exc.log_details(),
             **_video_log_context(task),
         )
         return
@@ -503,6 +560,7 @@ def _return_to_capacity_queue(
     level: int = logging.INFO,
     remote_current_tasks: int | None = None,
     concurrency_limit: int | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> None:
     task.status = TaskStatus.PENDING.value
     task.error_code = None
@@ -518,6 +576,7 @@ def _return_to_capacity_queue(
         remote_current_tasks=remote_current_tasks,
         concurrency_limit=concurrency_limit,
         retry_after_seconds=int(REMOTE_CAPACITY_RECHECK_SECONDS),
+        **(diagnostics or {}),
         **_video_log_context(task),
     )
 
@@ -538,8 +597,8 @@ def _remote_capacity_is_available(
             reason="读取 RunningHub 账号并发状态失败，任务将保留排队",
             event_code="video.capacity_check_error",
             level=logging.WARNING,
+            diagnostics=exc.log_details(),
         )
-        logger.warning("RunningHub 容量检查失败：%s", exc)
         return False
     if current_tasks >= limit:
         _return_to_capacity_queue(
@@ -616,10 +675,23 @@ def process_task(db: Session, task_id: str) -> None:
             workflow=task.workflow_type,
             **_video_log_context(task),
         )
-        uploaded_files = {
-            asset.name: client.upload_file(resolve_asset_path(asset, settings))
-            for asset in workflow.assets_for_task(task)
-        }
+        uploaded_files = {}
+        for asset in workflow.assets_for_task(task):
+            asset_path = resolve_asset_path(asset, settings)
+            try:
+                uploaded_files[asset.name] = client.upload_file(asset_path)
+            except RunningHubError as exc:
+                exc.diagnostics.setdefault("asset_slot", asset.name)
+                exc.diagnostics.setdefault(
+                    "asset_original_name",
+                    asset.original_name,
+                )
+                if asset_path.is_file():
+                    for key, value in runninghub_upload_diagnostics(
+                        asset_path.stat().st_size
+                    ).items():
+                        exc.diagnostics.setdefault(key, value)
+                raise
         payload = workflow.build_payload(
             task,
             uploaded_files,
@@ -658,7 +730,21 @@ def process_task(db: Session, task_id: str) -> None:
                 event_code="video.capacity_waiting",
             )
             return
-        _mark_failed(task, "SUBMIT_FAILED", str(exc))
+        if exc.retry_safe and task.runninghub_task_id is None:
+            _handle_safe_pre_submission_failure(
+                db,
+                task,
+                code="SUBMIT_FAILED",
+                message=str(exc),
+                diagnostics=exc.log_details(),
+            )
+            return
+        _mark_failed(
+            task,
+            "SUBMIT_FAILED",
+            str(exc),
+            diagnostics=exc.log_details(),
+        )
         db.commit()
     except (OSError, ValueError) as exc:
         _mark_failed(task, "SUBMIT_FAILED", str(exc))

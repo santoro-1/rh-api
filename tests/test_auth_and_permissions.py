@@ -149,6 +149,14 @@ def test_admin_can_download_retained_service_logs(client):
         "2026-07-28 ERROR audio: failed\n",
         encoding="utf-8",
     )
+    (logs_dir / "video_worker.log").write_text(
+        (
+            "2026-07-29 WARNING worker: [EVENT "
+            "video.pre_submit_retry_scheduled] retry "
+            '{"network_error_type":"ReadTimeout","elapsed_ms":600001}\n'
+        ),
+        encoding="utf-8",
+    )
     (logs_dir / "unrelated.log").write_text(
         "must not be exported\n",
         encoding="utf-8",
@@ -163,6 +171,7 @@ def test_admin_can_download_retained_service_logs(client):
         assert set(archive.namelist()) == {
             "web/web.log",
             "audio_worker/audio_worker.log.2026-07-28",
+            "video_worker/video_worker.log",
         }
         assert archive.read("web/web.log").decode("utf-8").splitlines()[-1].endswith(
             "started"
@@ -170,6 +179,11 @@ def test_admin_can_download_retained_service_logs(client):
         assert archive.read(
             "audio_worker/audio_worker.log.2026-07-28"
         ).decode("utf-8").splitlines()[-1].endswith("failed")
+        video_log = archive.read(
+            "video_worker/video_worker.log"
+        ).decode("utf-8")
+        assert '"network_error_type":"ReadTimeout"' in video_log
+        assert '"elapsed_ms":600001' in video_log
 
 
 def test_task_list_auto_refreshes_only_while_tasks_are_active(client):

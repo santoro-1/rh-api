@@ -246,9 +246,25 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
         git -c core.quotePath=false diff --name-only --diff-filter=D `
             $deployedRevision $commit
     }
+    $allowedDeletedFiles = @(
+        "asr_service/README.md",
+        "asr_service/app.py",
+        "asr_service/requirements.txt",
+        "deploy/scripts/install-asr.sh",
+        "deploy/systemd/runninghub-video-asr.service",
+        "scripts/remote_media_node.py",
+        "scripts/remote_media_worker.py",
+        "启动ASR服务.cmd",
+        "启动远程媒体节点.cmd"
+    )
     if ($deletedFiles) {
         Write-Host $deletedFiles
-        throw "本次包含删除文件。为避免脚本误删服务器内容，请先人工审查这些路径；本脚本不会自动删除。"
+        foreach ($relativePath in ($deletedFiles -split "`n")) {
+            if ($relativePath -notin $allowedDeletedFiles) {
+                throw "本次包含未获批准的删除文件：$relativePath"
+            }
+        }
+        Write-Host "删除项仅包含已迁移到 media_node/ 的旧媒体节点文件。"
     }
     $addedFilesText = Invoke-LocalText -Description "检查新增文件" -Command {
         git -c core.quotePath=false diff --name-only --diff-filter=A `

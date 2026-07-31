@@ -49,6 +49,11 @@ from app.services.task_management import (
     TaskManagementError,
     prepare_task_retry,
 )
+from app.services.runninghub import RunningHubError
+from app.services.task_cancellation import (
+    TaskCancellationError,
+    cancel_generation_task,
+)
 from app.web import templates
 from app.services.workflow_configs import get_user_workflow_config
 from app.workflows import get_workflow, list_workflows
@@ -259,6 +264,8 @@ def create_task(
     check_rate_limit(request, f"task-create:{current_user.id}", settings.task_create_rate_limit_per_minute)
     try:
         ensure_user_can_create_workflow(current_user, DIGITAL_HUMAN_WORKFLOW)
+        if str(personMode).strip() != "1":
+            raise TaskCreationError("双人数字人模式暂未开放")
     except TaskCreationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -465,6 +472,27 @@ def retry_task(
     except TaskManagementError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
+    return RedirectResponse(f"/tasks/{task.id}", status_code=303)
+
+
+@router.post("/tasks/{task_id}/cancel")
+def cancel_task(
+    task_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del csrf_ok
+    task = db.scalar(_task_query().where(GenerationTask.id == task_id))
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    ensure_task_access(task, current_user)
+    try:
+        cancel_generation_task(db, task)
+        db.commit()
+    except (TaskCancellationError, RunningHubError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return RedirectResponse(f"/tasks/{task.id}", status_code=303)
 
 

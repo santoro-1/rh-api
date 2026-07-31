@@ -15,6 +15,8 @@ from app.models import (
     AudioGenerationTask,
     GenerationBatch,
     GenerationBatchItem,
+    LongAudioProject,
+    LongAudioProjectStatus,
     MiniMaxConfig,
     MiniMaxVoiceAsset,
     StagedAsset,
@@ -28,8 +30,13 @@ from app.services.batch_manifests import (
     LTX_LIP_SYNC_WORKFLOW,
     canonical_filename,
 )
-from app.services.media_segmentation import MAX_SEGMENT_SECONDS
+from app.services.long_audio import MAX_LONG_AUDIO_SECONDS
+from app.services.media_segmentation import (
+    MAX_SEGMENT_SECONDS,
+    inspect_media_duration,
+)
 from app.services.storage import (
+    long_audio_project_dir,
     materialize_staged_asset,
     remove_directory,
     safe_relative_path,
@@ -105,6 +112,7 @@ class BatchPlan:
     rows: list[BatchRowPlan]
     assets: list[StagedAsset]
     speech_options: SpeechBatchOptions | None = None
+    review_required: bool = False
 
 
 def _person_mode(value: str) -> str:
@@ -112,8 +120,8 @@ def _person_mode(value: str) -> str:
     if not normalized or normalized in {"1", "单人", "single"}:
         return "1"
     if normalized in {"0", "双人", "dual"}:
-        return "0"
-    raise ValueError("单双人模式只能填写单人或双人")
+        raise ValueError("双人数字人模式暂未开放")
+    raise ValueError("人物模式不合法")
 
 
 def _instance_type(value: str, fallback: str) -> str:
@@ -282,6 +290,7 @@ def validate_batch(
     batch_parameters: dict[str, str] | None = None,
     audio_mode: str = "upload",
     speech_options: dict[str, Any] | None = None,
+    review_required: bool = False,
 ) -> BatchPlan:
     """Return every row error together; no task is written during validation."""
 
@@ -507,9 +516,9 @@ def validate_batch(
                         staged["audio"].relative_path, settings.data_dir
                     )
                     duration = inspect_audio_duration(audio_path)
-                    if duration > MAX_SEGMENT_SECONDS + 0.01:
+                    if duration > MAX_LONG_AUDIO_SECONDS:
                         raise ValueError(
-                            "上传音频不能超过 45 秒，请先拆成多行任务"
+                            "单个音频最长支持 60 分钟"
                         )
                 else:
                     duration = 1.0
@@ -526,7 +535,13 @@ def validate_batch(
                     "person_mode": batch_person_mode,
                     "instance_type": "default",
                 }
-                metadata = {"audio_duration_seconds": duration}
+                metadata = {
+                    "audio_duration_seconds": duration,
+                    "requires_segmentation": (
+                        audio_mode == "upload"
+                        and duration > MAX_SEGMENT_SECONDS + 0.01
+                    ),
+                }
             else:
                 staged = {
                     "video": (
@@ -560,10 +575,20 @@ def validate_batch(
                         staged["audio"].relative_path, settings.data_dir
                     )
                     duration = inspect_audio_duration(audio_path)
-                    if duration > MAX_SEGMENT_SECONDS + 0.01:
+                    if duration > MAX_LONG_AUDIO_SECONDS:
                         raise ValueError(
-                            "上传音频不能超过 45 秒，请先拆成多行任务"
+                            "单个音频最长支持 60 分钟"
                         )
+                    if duration > MAX_SEGMENT_SECONDS + 0.01:
+                        video_path = safe_relative_path(
+                            staged["video"].relative_path,
+                            settings.data_dir,
+                        )
+                        video_duration = inspect_media_duration(video_path)
+                        if video_duration + 0.05 < duration:
+                            raise ValueError(
+                                "源视频时长不能短于对应音频"
+                            )
                 prompt_prefix = str(
                     row.get("prompt_prefix")
                     or batch_parameters.get("prompt_prefix")
@@ -590,7 +615,12 @@ def validate_batch(
                 metadata = {
                     "has_custom_audio": True,
                     **(
-                        {"audio_duration_seconds": duration}
+                        {
+                            "audio_duration_seconds": duration,
+                            "requires_segmentation": (
+                                duration > MAX_SEGMENT_SECONDS + 0.01
+                            ),
+                        }
                         if audio_mode == "upload"
                         else {}
                     ),
@@ -680,6 +710,14 @@ def validate_batch(
         rows=plans,
         assets=assets,
         speech_options=resolved_speech_options,
+        review_required=(
+            bool(review_required)
+            if audio_mode == "upload"
+            else bool(
+                resolved_speech_options
+                and resolved_speech_options.review_required
+            )
+        ),
     )
 
 
@@ -719,9 +757,7 @@ def create_batch(
         name=clean_name,
         workflow_type=plan.workflow_type,
         audio_mode=plan.audio_mode,
-        review_required=bool(
-            plan.speech_options and plan.speech_options.review_required
-        ),
+        review_required=plan.review_required,
         request_key=request_key,
         status="ACTIVE",
         total_items=len(plan.rows),
@@ -736,6 +772,9 @@ def create_batch(
             voice = plan.speech_options.voice
 
         for index, row_plan in enumerate(plan.rows):
+            requires_segmentation = bool(
+                row_plan.asset_metadata.get("requires_segmentation")
+            )
             item = GenerationBatchItem(
                 id=str(uuid.uuid4()),
                 batch=batch,
@@ -743,10 +782,20 @@ def create_batch(
                 row_key=row_plan.row_key,
                 manifest_json=json.dumps(row_plan.manifest, ensure_ascii=False),
                 audio_status=(
-                    "AUDIO_READY" if plan.audio_mode == "upload" else "PENDING"
+                    (
+                        "SEGMENTING"
+                        if requires_segmentation
+                        else "AUDIO_READY"
+                    )
+                    if plan.audio_mode == "upload"
+                    else "PENDING"
                 ),
                 status=(
-                    "TASK_CREATED"
+                    (
+                        "SEGMENTING"
+                        if requires_segmentation
+                        else "TASK_CREATED"
+                    )
                     if plan.audio_mode == "upload"
                     else "AUDIO_PENDING"
                 ),
@@ -755,7 +804,18 @@ def create_batch(
             db.flush()
 
             task_id = str(uuid.uuid4())
-            upload_dir = task_upload_dir(settings, user.id, task_id)
+            long_project_id = (
+                str(uuid.uuid4()) if requires_segmentation else None
+            )
+            upload_dir = (
+                long_audio_project_dir(
+                    settings,
+                    user.id,
+                    long_project_id,
+                )
+                if long_project_id
+                else task_upload_dir(settings, user.id, task_id)
+            )
             created_directories.append(upload_dir)
             final_assets = []
             for asset_name, staged in row_plan.staged_assets.items():
@@ -774,7 +834,77 @@ def create_batch(
                     )
                 )
 
-            if plan.audio_mode == "upload":
+            if plan.audio_mode == "upload" and requires_segmentation:
+                assert long_project_id is not None
+                primary = next(
+                    asset
+                    for asset in final_assets
+                    if asset.name in {"image", "video"}
+                )
+                audio = next(
+                    asset for asset in final_assets if asset.name == "audio"
+                )
+                project = LongAudioProject(
+                    id=long_project_id,
+                    user_id=user.id,
+                    batch_item_id=item.id,
+                    name=f"{clean_name} · {row_plan.row_key}"[:100],
+                    workflow_type=plan.workflow_type,
+                    review_required=plan.review_required,
+                    script_text=str(
+                        row_plan.manifest.get("speech_script") or ""
+                    ).strip(),
+                    audio_path=audio.relative_path,
+                    audio_original_name=audio.original_name,
+                    video_path=primary.relative_path,
+                    video_original_name=primary.original_name,
+                    duration_seconds=float(
+                        row_plan.asset_metadata["audio_duration_seconds"]
+                    ),
+                    parameters_json=json.dumps(
+                        {
+                            "prompt_prefix": str(
+                                row_plan.parameters.get("prompt_prefix")
+                                or "一名人物用中文说"
+                            ),
+                            "instance_type": str(
+                                row_plan.parameters.get("instance_type")
+                                or "plus"
+                            ),
+                            "digital_prompt": (
+                                str(row_plan.parameters.get("prompt") or "")
+                                if plan.workflow_type
+                                == DIGITAL_HUMAN_WORKFLOW
+                                else ""
+                            ),
+                            "resolution": str(
+                                row_plan.parameters.get("resolution")
+                                or "1024"
+                            ),
+                            "person_mode": "1",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    alignment_provider=(
+                        settings.long_audio_alignment_provider
+                        if plan.workflow_type == LTX_LIP_SYNC_WORKFLOW
+                        else "vad_silence"
+                    ),
+                    status=LongAudioProjectStatus.PENDING_ANALYSIS.value,
+                    expires_at=(
+                        datetime.now(timezone.utc)
+                        + timedelta(days=settings.upload_retention_days)
+                    ),
+                )
+                db.add(project)
+                item.manifest_json = json.dumps(
+                    {
+                        **row_plan.manifest,
+                        "long_audio_project_id": project.id,
+                    },
+                    ensure_ascii=False,
+                )
+            elif plan.audio_mode == "upload":
                 validated = validate_task_input(
                     user,
                     plan.workflow_type,

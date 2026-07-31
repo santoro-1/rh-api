@@ -18,6 +18,8 @@ RunningHubTest/
 # Python environments
 .venv/
 .asr-runtime/
+media_node/.runtime/
+media_node/data/
 venv/
 env/
 

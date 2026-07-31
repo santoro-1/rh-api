@@ -18,6 +18,7 @@ from app.services.logging_config import (
 from app.services.long_audio import (
     analyze_long_audio_project,
     materialize_long_audio_project,
+    sync_linked_batch_item,
 )
 
 
@@ -105,7 +106,11 @@ def process_next(db: Session) -> bool:
         if action == LongAudioProjectStatus.ANALYZING.value:
             analyze_long_audio_project(project, get_settings())
             event = "media.analysis_completed"
-            message = "长音频分段分析完成，等待用户试听确认"
+            message = (
+                "长音频分段分析完成，等待用户试听确认"
+                if project.status == LongAudioProjectStatus.REVIEW.value
+                else "长音频分段分析完成，已自动进入切割队列"
+            )
         else:
             batch = materialize_long_audio_project(db, project, get_settings())
             event = "media.handoff_completed"
@@ -139,6 +144,7 @@ def process_next(db: Session) -> bool:
                 else "CUT_FAILED"
             )
             failed.error_message = str(exc)
+            sync_linked_batch_item(failed)
             db.commit()
         log_event(
             logger,
