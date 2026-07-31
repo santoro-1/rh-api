@@ -63,6 +63,7 @@ def prepare_task_retry(
         remove_directory(task_output_dir(settings, task.user_id, task.id))
         task.runninghub_task_id = None
         task.runninghub_submitted_at = None
+        task.runninghub_failed_reason = None
         task.runninghub_usage = None
         task.result_path = None
         task.output_metadata = None
@@ -72,4 +73,7 @@ def prepare_task_retry(
 
     task.error_code = None
     task.error_message = None
+    task.runninghub_failed_reason = None
+    task.runninghub_auto_retry_count = 0
+    task.runninghub_auto_retry_after = None
     task.completed_at = None

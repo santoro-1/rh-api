@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -102,9 +103,30 @@ def _tasks_redirect(start_date: str, end_date: str) -> str:
     return f"/tasks?{urlencode(query)}" if query else "/tasks"
 
 
+def _task_failed_reason(task: GenerationTask) -> dict | None:
+    if not task.runninghub_failed_reason:
+        return None
+    try:
+        value = json.loads(task.runninghub_failed_reason)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _task_attempt_history(task: GenerationTask) -> list[dict]:
+    if not task.runninghub_attempt_history:
+        return []
+    try:
+        value = json.loads(task.runninghub_attempt_history)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
 def _serialize_task(task: GenerationTask) -> dict:
     return {
         "taskId": task.id,
+        "runninghubTaskId": task.runninghub_task_id,
         "status": task.status,
         "statusText": STATUS_LABELS.get(task.status, task.status),
         "createdAt": task.created_at.isoformat(),
@@ -112,6 +134,15 @@ def _serialize_task(task: GenerationTask) -> dict:
         "completedAt": task.completed_at.isoformat() if task.completed_at else None,
         "errorCode": task.error_code,
         "errorMessage": task.error_message,
+        "failedReason": _task_failed_reason(task),
+        "attemptHistory": _task_attempt_history(task),
+        "autoRetryCount": task.runninghub_auto_retry_count,
+        "autoRetryLimit": get_settings().runninghub_auto_retry_limit,
+        "autoRetryAfter": (
+            task.runninghub_auto_retry_after.isoformat()
+            if task.runninghub_auto_retry_after
+            else None
+        ),
         "workflowType": task.workflow_type,
         "downloadUrl": (
             f"/api/tasks/{task.id}/download"
@@ -690,5 +721,8 @@ def task_detail_page(
             "workflow_names": {
                 workflow.key: workflow.display_name for workflow in list_workflows()
             },
+            "failed_reason": _task_failed_reason(task),
+            "attempt_history": _task_attempt_history(task),
+            "auto_retry_limit": get_settings().runninghub_auto_retry_limit,
         },
     )

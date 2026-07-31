@@ -68,6 +68,8 @@ class Settings:
     default_use_personal_queue: bool
     poll_interval_seconds: int
     runninghub_task_timeout_seconds: int
+    runninghub_auto_retry_limit: int
+    runninghub_auto_retry_base_delay_seconds: int
     max_image_size_mb: int
     max_audio_size_mb: int
     max_video_size_mb: int
@@ -167,6 +169,18 @@ class Settings:
             raise ValueError(
                 "MEDIA_WORKER_ARCHIVE_LIMIT_MB 必须为 1-500"
             )
+        runninghub_auto_retry_limit = _as_int(
+            "RUNNINGHUB_AUTO_RETRY_LIMIT", 3
+        )
+        if not 0 <= runninghub_auto_retry_limit <= 10:
+            raise ValueError("RUNNINGHUB_AUTO_RETRY_LIMIT 必须为 0-10")
+        runninghub_auto_retry_base_delay_seconds = _as_int(
+            "RUNNINGHUB_AUTO_RETRY_BASE_DELAY_SECONDS", 60
+        )
+        if not 1 <= runninghub_auto_retry_base_delay_seconds <= 3600:
+            raise ValueError(
+                "RUNNINGHUB_AUTO_RETRY_BASE_DELAY_SECONDS 必须为 1-3600"
+            )
 
         return cls(
             app_env=app_env,
@@ -187,6 +201,10 @@ class Settings:
             poll_interval_seconds=_as_int("POLL_INTERVAL_SECONDS", 5),
             runninghub_task_timeout_seconds=_as_int(
                 "RUNNINGHUB_TASK_TIMEOUT_SECONDS", 3600
+            ),
+            runninghub_auto_retry_limit=runninghub_auto_retry_limit,
+            runninghub_auto_retry_base_delay_seconds=(
+                runninghub_auto_retry_base_delay_seconds
             ),
             max_image_size_mb=_as_int("MAX_IMAGE_SIZE_MB", 20),
             max_audio_size_mb=_as_int("MAX_AUDIO_SIZE_MB", 100),

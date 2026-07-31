@@ -147,7 +147,9 @@
         groups.push("advancedLeftAudio", "advancedRightAudio");
       }
     }
-    return groups.flatMap((group) => assetGroups[group].map((asset) => asset.assetId));
+    return Array.from(new Set(
+      groups.flatMap((group) => assetGroups[group].map((asset) => asset.assetId)),
+    ));
   }
 
   function resetConfirmation() {
@@ -164,17 +166,54 @@
     group.startsWith("advanced") ? renderAdvancedAssets() : renderQuick();
   }
 
+  function reuseAsset(group, index, fillGroup = false) {
+    const assets = assetGroups[group];
+    const source = assets[index];
+    if (!source) return;
+    const targetCount = fillGroup
+      ? (
+        group.startsWith("advanced")
+          ? advancedRows.length
+          : quickRowCount()
+      )
+      : assets.length + 1;
+    if (targetCount > config.maxBatchItems) {
+      const errorId = group.startsWith("advanced") ? "advanced-errors" : "quick-errors";
+      showErrors(errorId, [{message: `单批最多 ${config.maxBatchItems} 条任务`}]);
+      return;
+    }
+    if (fillGroup) {
+      while (assets.length < targetCount) {
+        assets.push({...source, reused: true});
+      }
+    } else {
+      assets.splice(index + 1, 0, {...source, reused: true});
+    }
+    resetConfirmation();
+    group.startsWith("advanced") ? renderAdvancedAssets() : renderQuick();
+  }
+
   function renderOrderedGroup(group) {
     const list = groupElements[group];
     const assets = assetGroups[group];
+    const targetCount = quickRowCount();
     list.innerHTML = assets.length
       ? assets.map((asset, index) => `
         <li class="ordered-upload-item" draggable="true" data-group="${group}" data-index="${index}">
           <span class="order-number">${index + 1}</span>
-          <span class="ordered-file-name" title="${escapeHtml(asset.originalName)}">${escapeHtml(asset.originalName)}</span>
+          <span class="ordered-file-name" title="${escapeHtml(asset.originalName)}">
+            ${escapeHtml(asset.originalName)}
+            ${asset.reused ? '<small class="asset-reused-label">复用</small>' : ""}
+          </span>
           <span class="order-actions">
             <button type="button" class="order-button" data-action="up" aria-label="上移">↑</button>
             <button type="button" class="order-button" data-action="down" aria-label="下移">↓</button>
+            <button type="button" class="order-button reuse" data-action="reuse" title="不重新上传，复制一条素材引用">复用</button>
+            ${
+              targetCount > assets.length
+                ? '<button type="button" class="order-button reuse" data-action="fill" title="用本素材补齐到当前任务数量">补齐</button>'
+                : ""
+            }
             <button type="button" class="order-button remove" data-action="remove" aria-label="移除">×</button>
           </span>
         </li>`).join("")
@@ -303,19 +342,25 @@
       row_id: `TASK-${String(index + 1).padStart(3, "0")}`,
       ...(digital
         ? {
+            image_asset_id: primary.assetId,
             image_file: primary.originalName,
+            audio_asset_id: isSpeechMode() ? "" : assetGroups.audio[index].assetId,
             audio_file: isSpeechMode() ? "" : assetGroups.audio[index].originalName,
             speech_script: isSpeechMode() ? quickScripts[index].trim() : "",
             prompt: quickPrompts[index].trim(),
             ...(dual
               ? {
+                  left_audio_asset_id: assetGroups.leftAudio[index].assetId,
                   left_audio_file: assetGroups.leftAudio[index].originalName,
+                  right_audio_asset_id: assetGroups.rightAudio[index].assetId,
                   right_audio_file: assetGroups.rightAudio[index].originalName,
                 }
               : {}),
           }
         : {
+            source_video_asset_id: primary.assetId,
             source_video_file: primary.originalName,
+            audio_asset_id: isSpeechMode() ? "" : assetGroups.audio[index].assetId,
             audio_file: isSpeechMode() ? "" : assetGroups.audio[index].originalName,
             speech_script: quickScripts[index].trim(),
           }),
@@ -570,8 +615,15 @@
       .map(({group, title}) => {
         const items = assetGroups[group].map((asset, index) =>
           `<span class="asset-chip"><strong>${index + 1}.</strong> ${escapeHtml(asset.originalName)}
+            ${asset.reused ? '<small class="asset-reused-label">复用</small>' : ""}
             <button type="button" class="advanced-order-asset" data-action="up" data-group="${group}" data-index="${index}" aria-label="上移">↑</button>
             <button type="button" class="advanced-order-asset" data-action="down" data-group="${group}" data-index="${index}" aria-label="下移">↓</button>
+            <button type="button" class="advanced-order-asset reuse" data-action="reuse" data-group="${group}" data-index="${index}" title="不重新上传，复制一条素材引用">复用</button>
+            ${
+              advancedRows.length > assetGroups[group].length
+                ? `<button type="button" class="advanced-order-asset reuse" data-action="fill" data-group="${group}" data-index="${index}" title="用本素材补齐到任务行数">填满</button>`
+                : ""
+            }
             <button type="button" class="advanced-order-asset" data-action="remove" data-group="${group}" data-index="${index}" aria-label="移除">×</button>
           </span>`
         ).join("");
@@ -764,17 +816,17 @@
           : "表格只有“任务编号、口播脚本”两列；视频和音频按页面序号对应。"
       );
     document.getElementById("advanced-upload-help").textContent =
-      "每类素材都按第 1、2、3……项与表格第 1、2、3……行对应；可用箭头调整顺序。";
+      "每类素材序号与表格行序号一致；同一素材可“复用”或“填满”到多行。";
     document.getElementById("quick-upload-help").textContent = speech
-      ? "按最终任务顺序上传图片或视频，再在下方逐行填写对应口播脚本。"
+      ? "按最终任务顺序准备图片或视频；同一画面可点击“复用”，无需重复上传。"
       : (
         workflowSelect.value === "digital_human"
-          ? "先上传图片，再按完全相同的顺序上传对应音频；无需填写口播脚本。"
-          : "先上传视频，再按完全相同的顺序上传对应音频；每条任务只填写一次口播脚本。"
+          ? "先上传图片和音频；一张图片对应多条音频时，点击图片旁的“复用”或“补齐”。"
+          : "先上传视频和音频；一段视频对应多条音频时，点击视频旁的“复用”或“补齐”。"
       );
     document.getElementById("quick-order-guidance").textContent = speech
-      ? "系统按照页面显示的第 1、2、3……项创建任务。建议画面文件名带 01、02、03 序号；上传后可拖动或使用箭头调整顺序。"
-      : "系统按照页面显示的第 1、2、3……项逐一配对。建议文件名加上 01、02、03 序号；上传后可拖动或使用箭头调整顺序。";
+      ? "系统按照页面序号创建任务；同一画面可复用，上传后可调整顺序。"
+      : "系统按照页面序号逐一配对；同一素材可复用，文件名相同也不会混淆。";
     if (speech && workflowSelect.value === "digital_human") {
       personModeSelect.value = "单人";
     }
@@ -914,6 +966,14 @@
         renderQuick();
         return;
       }
+      if (button.dataset.action === "reuse" || button.dataset.action === "fill") {
+        reuseAsset(
+          item.dataset.group,
+          fromIndex,
+          button.dataset.action === "fill",
+        );
+        return;
+      }
       moveAsset(item.dataset.group, fromIndex, fromIndex + (button.dataset.action === "up" ? -1 : 1));
     });
     list.addEventListener("dragstart", (event) => {
@@ -956,6 +1016,9 @@
     const index = Number(button.dataset.index);
     if (button.dataset.action === "remove") {
       assetGroups[group].splice(index, 1);
+    } else if (button.dataset.action === "reuse" || button.dataset.action === "fill") {
+      reuseAsset(group, index, button.dataset.action === "fill");
+      return;
     } else {
       const target = index + (button.dataset.action === "up" ? -1 : 1);
       if (target >= 0 && target < assetGroups[group].length) {

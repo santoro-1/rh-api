@@ -336,6 +336,18 @@ class GenerationTask(Base):
     )
     error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    runninghub_failed_reason: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    runninghub_attempt_history: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    runninghub_auto_retry_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    runninghub_auto_retry_after: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     runninghub_usage: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     result_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     output_metadata: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

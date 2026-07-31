@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -24,6 +25,7 @@ class FakeRunningHub:
         current_task_count: int = 0,
         capacity_error: bool = False,
         query_not_found: bool = False,
+        query_result: dict | None = None,
     ):
         self.submissions = 0
         self.query_calls = 0
@@ -32,6 +34,7 @@ class FakeRunningHub:
         self.current_task_count = current_task_count
         self.capacity_error = capacity_error
         self.query_not_found = query_not_found
+        self.query_result = query_result
 
     def get_account_current_task_count(self):
         self.capacity_checks += 1
@@ -61,6 +64,8 @@ class FakeRunningHub:
                 "查询任务失败：Task not found | 任务不存在或已过期",
                 error_code="1004",
             )
+        if self.query_result is not None:
+            return self.query_result
         return {"taskId": task_id, "status": "RUNNING", "usage": None}
 
 
@@ -124,6 +129,87 @@ def test_worker_closes_remote_task_removed_after_manual_cancel(monkeypatch):
         assert task.completed_at is not None
     assert fake.query_calls == 1
     assert fake.submissions == 0
+
+
+def test_worker_persists_failure_and_retries_three_times_with_backoff(
+    monkeypatch,
+):
+    user = create_user("failed-detail-worker-user")
+    _add_task(
+        user.id,
+        "failed-detail-task",
+        TaskStatus.RUNNING.value,
+        "failed-remote-id",
+    )
+    failed_reason = {
+        "exception_type": "torch.OutOfMemoryError",
+        "node_name": "WanVideoEncode",
+        "node_id": "298",
+        "exception_message": "显存耗尽导致进程中断，请降低分辨率",
+        "traceback": '["technical stack"]',
+    }
+    fake = FakeRunningHub(
+        query_result={
+            "taskId": "failed-remote-id",
+            "status": "FAILED",
+            "errorCode": "805",
+            "errorMessage": "工作流运行失败",
+            "failedReason": failed_reason,
+            "usage": {"taskCostTime": "0"},
+        }
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+
+    with SessionLocal() as db:
+        task_worker.process_task(db, "failed-detail-task")
+        task = db.get(GenerationTask, "failed-detail-task")
+        assert task.status == TaskStatus.PENDING.value
+        assert task.error_code == "805"
+        assert "显存耗尽导致进程中断" in task.error_message
+        assert "失败节点：WanVideoEncode" in task.error_message
+        assert "节点 ID：298" in task.error_message
+        assert "第 1/3 次自动重试" in task.error_message
+        assert json.loads(task.runninghub_failed_reason) == failed_reason
+        assert len(json.loads(task.runninghub_attempt_history)) == 1
+        assert task.runninghub_auto_retry_count == 1
+        assert task.runninghub_auto_retry_after is not None
+
+        # The shared FIFO must not claim a retry before its backoff expires.
+        assert task_worker.claim_next_pending_task(db) is None
+
+        for retry_number in range(1, 4):
+            task = db.get(GenerationTask, "failed-detail-task")
+            task.runninghub_auto_retry_after = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            )
+            db.commit()
+            assert (
+                task_worker.claim_next_pending_task(db)
+                == "failed-detail-task"
+            )
+            task_worker.process_task(db, "failed-detail-task")
+            assert (
+                db.get(GenerationTask, "failed-detail-task").status
+                == TaskStatus.SUBMITTED.value
+            )
+            task_worker.process_task(db, "failed-detail-task")
+
+            task = db.get(GenerationTask, "failed-detail-task")
+            if retry_number < 3:
+                assert task.status == TaskStatus.PENDING.value
+                assert task.runninghub_auto_retry_count == retry_number + 1
+            else:
+                assert task.status == TaskStatus.FAILED.value
+                assert task.runninghub_auto_retry_count == 3
+                assert "已用完 3 次自动重试" in task.error_message
+                assert task.runninghub_auto_retry_after is None
+                assert len(json.loads(task.runninghub_attempt_history)) == 4
+
+        # Once all retries are exhausted, later Worker passes are inert.
+        task_worker.process_task(db, "failed-detail-task")
+
+    assert fake.query_calls == 4
+    assert fake.submissions == 3
 
 
 def test_worker_recovers_unsubmitted_uploading_task():

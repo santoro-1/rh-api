@@ -333,12 +333,39 @@ def validate_batch(
     seen_row_keys: set[str] = set()
     workflow_config = get_user_workflow_config(user, workflow_type)
     ordered_primary_assets: list[StagedAsset] = []
+    primary_asset_id_key = (
+        "image_asset_id"
+        if workflow_type == DIGITAL_HUMAN_WORKFLOW
+        else "source_video_asset_id"
+    )
+    uses_primary_sequence_bindings = all(
+        str(row.get(primary_asset_id_key) or "").strip()
+        for row in rows
+    )
     if audio_mode == "minimax":
-        expected_kind = "image" if workflow_type == DIGITAL_HUMAN_WORKFLOW else "video"
+        expected_kind = (
+            "image"
+            if workflow_type == DIGITAL_HUMAN_WORKFLOW
+            else "video"
+        )
         ordered_primary_assets = [
             asset for asset in assets if asset.kind == expected_kind
         ]
-        if len(ordered_primary_assets) != len(rows) or len(assets) != len(rows):
+        if uses_primary_sequence_bindings:
+            if len(ordered_primary_assets) != len(assets):
+                raise BatchValidationError(
+                    [
+                        {
+                            "rowNumber": 0,
+                            "rowId": "",
+                            "message": "完整流程素材类型与当前工作流不一致",
+                        }
+                    ]
+                )
+        elif (
+            len(ordered_primary_assets) != len(rows)
+            or len(assets) != len(rows)
+        ):
             raise BatchValidationError(
                 [
                     {
@@ -420,7 +447,10 @@ def validate_batch(
                 staged = {
                     "image": (
                         ordered_primary_assets[position - 1]
-                        if audio_mode == "minimax"
+                        if (
+                            audio_mode == "minimax"
+                            and not uses_primary_sequence_bindings
+                        )
                         else _resolve_asset_reference(
                             assets_by_id,
                             index,
@@ -501,7 +531,10 @@ def validate_batch(
                 staged = {
                     "video": (
                         ordered_primary_assets[position - 1]
-                        if audio_mode == "minimax"
+                        if (
+                            audio_mode == "minimax"
+                            and not uses_primary_sequence_bindings
+                        )
                         else _resolve_asset_reference(
                             assets_by_id,
                             index,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from app.config import get_settings
@@ -65,11 +66,38 @@ def _mark_task(
 def test_failed_task_can_retry_with_saved_uploads(client, monkeypatch):
     task_id = _create_digital_task(client, monkeypatch, "retry-user")
     _mark_task(task_id, TaskStatus.FAILED.value, remote_id="old-remote-id")
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, task_id)
+        task.runninghub_failed_reason = json.dumps(
+            {
+                "exception_type": "torch.OutOfMemoryError",
+                "node_name": "WanVideoEncode",
+                "node_id": "298",
+                "exception_message": "显存不足",
+            },
+            ensure_ascii=False,
+        )
+        task.runninghub_auto_retry_count = 3
+        task.runninghub_auto_retry_after = datetime.now(timezone.utc)
+        db.commit()
 
     history = client.get("/tasks")
     assert history.status_code == 200
     assert f'action="/tasks/{task_id}/retry"' in history.text
     assert f'action="/tasks/{task_id}/delete"' in history.text
+    assert "生成新的 RunningHub 任务 ID" in history.text
+
+    detail = client.get(f"/tasks/{task_id}")
+    assert detail.status_code == 200
+    assert "查看 RunningHub 原始失败详情" in detail.text
+    assert "WanVideoEncode" in detail.text
+    status = client.get(f"/api/tasks/{task_id}")
+    assert status.status_code == 200
+    assert status.json()["failedReason"]["node_id"] == "298"
+    assert status.json()["runninghubTaskId"] == "old-remote-id"
+    assert status.json()["autoRetryCount"] == 3
+    assert status.json()["autoRetryLimit"] == 3
+    assert status.json()["autoRetryAfter"] is not None
 
     response = client.post(
         f"/tasks/{task_id}/retry",
@@ -84,6 +112,9 @@ def test_failed_task_can_retry_with_saved_uploads(client, monkeypatch):
         assert task.runninghub_submitted_at is None
         assert task.error_code is None
         assert task.error_message is None
+        assert task.runninghub_failed_reason is None
+        assert task.runninghub_auto_retry_count == 0
+        assert task.runninghub_auto_retry_after is None
         assert task.completed_at is None
 
 

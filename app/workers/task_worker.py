@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -78,12 +78,125 @@ def _make_client(config: RunningHubConfig) -> RunningHubClient:
     )
 
 
+def _runninghub_failed_reason(result: dict) -> dict | None:
+    failed_reason = result.get("failedReason")
+    return failed_reason if isinstance(failed_reason, dict) and failed_reason else None
+
+
+def _runninghub_failure_message(result: dict) -> str:
+    """Turn RunningHub's structured failure into a useful operator message."""
+
+    failed_reason = _runninghub_failed_reason(result) or {}
+    lines = [
+        str(result.get("errorMessage") or "RunningHub 工作流运行失败").strip()
+    ]
+    exception_message = str(
+        failed_reason.get("exception_message") or ""
+    ).strip()
+    if exception_message and exception_message not in lines:
+        lines.append(exception_message)
+
+    location: list[str] = []
+    exception_type = str(
+        failed_reason.get("exception_type") or ""
+    ).strip()
+    node_name = str(failed_reason.get("node_name") or "").strip()
+    node_id = str(failed_reason.get("node_id") or "").strip()
+    if exception_type:
+        location.append(f"异常类型：{exception_type}")
+    if node_name:
+        location.append(f"失败节点：{node_name}")
+    if node_id:
+        location.append(f"节点 ID：{node_id}")
+    if location:
+        lines.append("；".join(location))
+    return "\n".join(line for line in lines if line)
+
+
+def _runninghub_attempt_history(task: GenerationTask) -> list[dict]:
+    if not task.runninghub_attempt_history:
+        return []
+    try:
+        value = json.loads(task.runninghub_attempt_history)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _record_runninghub_failure(
+    task: GenerationTask,
+    result: dict,
+    *,
+    message: str,
+) -> None:
+    history = _runninghub_attempt_history(task)
+    history.append(
+        {
+            "taskId": task.runninghub_task_id,
+            "status": "FAILED",
+            "errorCode": str(result.get("errorCode") or "") or None,
+            "errorMessage": message,
+            "failedReason": _runninghub_failed_reason(result),
+            "usage": result.get("usage"),
+            "submittedAt": (
+                task.runninghub_submitted_at.isoformat()
+                if task.runninghub_submitted_at
+                else None
+            ),
+            "failedAt": _now().isoformat(),
+        }
+    )
+    # Keep enough evidence for repeated manual retry cycles without allowing
+    # one pathological task to grow its database row forever.
+    history = history[-50:]
+    task.runninghub_attempt_history = json.dumps(
+        history,
+        ensure_ascii=False,
+    )
+
+
+def _schedule_runninghub_auto_retry(
+    task: GenerationTask,
+    *,
+    message: str,
+) -> tuple[str, int] | None:
+    settings = get_settings()
+    limit = settings.runninghub_auto_retry_limit
+    completed_retries = int(task.runninghub_auto_retry_count or 0)
+    if completed_retries >= limit:
+        return None
+
+    retry_number = completed_retries + 1
+    delay_seconds = (
+        settings.runninghub_auto_retry_base_delay_seconds
+        * (2 ** (retry_number - 1))
+    )
+    previous_remote_id = str(task.runninghub_task_id or "")
+    task.runninghub_auto_retry_count = retry_number
+    task.runninghub_auto_retry_after = _now() + timedelta(
+        seconds=delay_seconds
+    )
+    task.status = TaskStatus.PENDING.value
+    task.error_message = (
+        f"{message}\n"
+        f"系统已安排第 {retry_number}/{limit} 次自动重试，"
+        f"约 {delay_seconds} 秒后重新进入 RunningHub 队列。"
+    )
+    task.runninghub_task_id = None
+    task.runninghub_submitted_at = None
+    task.result_path = None
+    task.output_metadata = None
+    task.completed_at = None
+    return previous_remote_id, delay_seconds
+
+
 def _mark_failed(task: GenerationTask, code: str, message: str) -> None:
     """Persist a terminal local failure and emit one operator event."""
 
     task.status = TaskStatus.FAILED.value
     task.error_code = code
     task.error_message = message
+    task.runninghub_auto_retry_after = None
     task.completed_at = _now()
     log_event(
         logger,
@@ -91,6 +204,7 @@ def _mark_failed(task: GenerationTask, code: str, message: str) -> None:
         "视频任务失败",
         level=logging.WARNING,
         workflow=task.workflow_type,
+        runninghub_task_id=task.runninghub_task_id,
         error_code=code,
         error=message,
         **_video_log_context(task),
@@ -165,7 +279,13 @@ def claim_next_pending_task(db: Session) -> str | None:
     # skipped without blocking eligible rows created later by other users.
     pending_tasks = db.execute(
         select(GenerationTask.id, GenerationTask.user_id)
-        .where(GenerationTask.status == TaskStatus.PENDING.value)
+        .where(
+            GenerationTask.status == TaskStatus.PENDING.value,
+            or_(
+                GenerationTask.runninghub_auto_retry_after.is_(None),
+                GenerationTask.runninghub_auto_retry_after <= _now(),
+            ),
+        )
         .order_by(GenerationTask.created_at)
     ).all()
     for task_id, user_id in pending_tasks:
@@ -252,6 +372,12 @@ def _handle_remote_status(
     previous_status = task.status
     task.error_code = str(result.get("errorCode") or "") or None
     task.error_message = str(result.get("errorMessage") or "") or None
+    failed_reason = _runninghub_failed_reason(result)
+    task.runninghub_failed_reason = (
+        json.dumps(failed_reason, ensure_ascii=False)
+        if failed_reason is not None
+        else None
+    )
     usage = result.get("usage")
     task.runninghub_usage = json.dumps(usage, ensure_ascii=False) if usage is not None else None
 
@@ -272,10 +398,42 @@ def _handle_remote_status(
             )
         return
     if status == "FAILED":
+        failure_message = _runninghub_failure_message(result)
+        _record_runninghub_failure(
+            task,
+            result,
+            message=failure_message,
+        )
+        scheduled = _schedule_runninghub_auto_retry(
+            task,
+            message=failure_message,
+        )
+        if scheduled is not None:
+            previous_remote_id, delay_seconds = scheduled
+            db.commit()
+            log_event(
+                logger,
+                "video.auto_retry_scheduled",
+                "RunningHub 任务失败，已安排自动重试",
+                level=logging.WARNING,
+                workflow=task.workflow_type,
+                previous_runninghub_task_id=previous_remote_id,
+                auto_retry_count=task.runninghub_auto_retry_count,
+                auto_retry_limit=get_settings().runninghub_auto_retry_limit,
+                retry_after_seconds=delay_seconds,
+                error_code=task.error_code,
+                error=failure_message,
+                **_video_log_context(task),
+            )
+            return
         _mark_failed(
             task,
             task.error_code or "RUNNINGHUB_FAILED",
-            task.error_message or "RunningHub 工作流运行失败",
+            (
+                f"{failure_message}\n"
+                f"已用完 {get_settings().runninghub_auto_retry_limit} "
+                "次自动重试，请人工检查后再决定是否重试。"
+            ),
         )
         db.commit()
         return
@@ -322,6 +480,8 @@ def _handle_remote_status(
     task.status = TaskStatus.SUCCESS.value
     task.error_code = None
     task.error_message = None
+    task.runninghub_failed_reason = None
+    task.runninghub_auto_retry_after = None
     task.completed_at = _now()
     db.commit()
     log_event(
@@ -474,6 +634,9 @@ def process_task(db: Session, task_id: str) -> None:
         task.status = TaskStatus.SUBMITTED.value
         task.error_code = None
         task.error_message = None
+        task.runninghub_failed_reason = None
+        task.runninghub_usage = None
+        task.runninghub_auto_retry_after = None
         db.commit()
         log_event(
             logger,
