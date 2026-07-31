@@ -15,7 +15,16 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import get_settings
 from app.database import engine
-from app.routes import admin, auth, batches, long_audio, operations, tasks, voices
+from app.routes import (
+    admin,
+    auth,
+    batches,
+    long_audio,
+    media_worker_api,
+    operations,
+    tasks,
+    voices,
+)
 from app.services.logging_config import configure_logging, log_event
 
 
@@ -69,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(batches.router)
     app.include_router(voices.router)
     app.include_router(long_audio.router)
+    app.include_router(media_worker_api.router)
     app.include_router(operations.router)
 
     @app.get("/healthz", include_in_schema=False)

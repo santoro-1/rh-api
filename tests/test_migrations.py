@@ -53,7 +53,7 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
         revision = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-    assert revision == "0012_long_audio_projects"
+    assert revision == "0013_remote_media_worker"
 
 
 def test_audio_review_migration_preserves_existing_batch_items():
@@ -172,7 +172,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0012_long_audio_projects"
+        assert version == "0013_remote_media_worker"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:

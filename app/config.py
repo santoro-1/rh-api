@@ -87,6 +87,10 @@ class Settings:
     asr_base_url: str
     asr_shared_token: str
     asr_request_timeout_seconds: int
+    media_processing_mode: str
+    media_worker_token: str
+    media_worker_lease_seconds: int
+    media_worker_archive_limit_mb: int
     log_retention_days: int
     log_max_bytes: int
 
@@ -132,6 +136,37 @@ class Settings:
         instance_type = os.getenv("DEFAULT_RUNNINGHUB_INSTANCE_TYPE", "default").strip()
         if instance_type not in {"default", "plus"}:
             raise ValueError("DEFAULT_RUNNINGHUB_INSTANCE_TYPE 只能为 default 或 plus")
+        media_processing_mode = os.getenv(
+            "MEDIA_PROCESSING_MODE", "local"
+        ).strip().lower()
+        if media_processing_mode not in {"local", "remote"}:
+            raise ValueError("MEDIA_PROCESSING_MODE 只能为 local 或 remote")
+        media_worker_token = os.getenv("MEDIA_WORKER_TOKEN", "").strip()
+        if (
+            app_env == "production"
+            and media_processing_mode == "remote"
+            and (
+                len(media_worker_token) < 32
+                or media_worker_token.lower().startswith(
+                    ("change-", "replace-")
+                )
+            )
+        ):
+            raise ValueError(
+                "远程媒体节点模式必须设置至少 32 个字符的 MEDIA_WORKER_TOKEN"
+            )
+        media_worker_lease_seconds = _as_int(
+            "MEDIA_WORKER_LEASE_SECONDS", 1800
+        )
+        if media_worker_lease_seconds < 120:
+            raise ValueError("MEDIA_WORKER_LEASE_SECONDS 不能小于 120")
+        media_worker_archive_limit_mb = _as_int(
+            "MEDIA_WORKER_ARCHIVE_LIMIT_MB", 500
+        )
+        if not 1 <= media_worker_archive_limit_mb <= 500:
+            raise ValueError(
+                "MEDIA_WORKER_ARCHIVE_LIMIT_MB 必须为 1-500"
+            )
 
         return cls(
             app_env=app_env,
@@ -190,6 +225,10 @@ class Settings:
             asr_request_timeout_seconds=_as_int(
                 "ASR_REQUEST_TIMEOUT_SECONDS", 1800
             ),
+            media_processing_mode=media_processing_mode,
+            media_worker_token=media_worker_token,
+            media_worker_lease_seconds=media_worker_lease_seconds,
+            media_worker_archive_limit_mb=media_worker_archive_limit_mb,
             log_retention_days=_as_int("LOG_RETENTION_DAYS", 7),
             log_max_bytes=_as_int("LOG_MAX_BYTES", 10 * 1024 * 1024),
         )

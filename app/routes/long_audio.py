@@ -69,6 +69,10 @@ def _plan_payload(project: LongAudioProject) -> list[dict[str, Any]]:
 
 
 def _project_payload(project: LongAudioProject) -> dict[str, Any]:
+    try:
+        remote_metrics = json.loads(project.remote_metrics_json or "null")
+    except json.JSONDecodeError:
+        remote_metrics = None
     return {
         "projectId": project.id,
         "name": project.name,
@@ -80,6 +84,13 @@ def _project_payload(project: LongAudioProject) -> dict[str, Any]:
         "errorCode": project.error_code,
         "errorMessage": project.error_message,
         "batchId": project.batch_id,
+        "remoteWorkerId": project.remote_worker_id,
+        "remoteLeaseExpiresAt": (
+            project.remote_lease_expires_at.isoformat()
+            if project.remote_lease_expires_at
+            else None
+        ),
+        "remoteMetrics": remote_metrics,
         "expiresAt": project.expires_at.isoformat(),
         "createdAt": project.created_at.isoformat(),
     }

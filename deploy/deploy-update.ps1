@@ -19,8 +19,7 @@ $script:CoreServices = @(
     "runninghub-video-worker.service"
 )
 $script:MediaService = "runninghub-video-media.service"
-$script:AsrService = "runninghub-video-asr.service"
-$script:OptionalServices = @($script:MediaService, $script:AsrService)
+$script:OptionalServices = @($script:MediaService)
 $script:Services = @($script:CoreServices) + $script:OptionalServices
 $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $script:LocalTemp = $null
@@ -279,7 +278,7 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
     }
 
     Confirm-Exact `
-        -Prompt "下一步会创建本项目备份、上传 commit $shortCommit，并在不中断现有服务的情况下安装或验证项目独立 ASR 环境；不会启动 ASR，也不会停止服务。" `
+        -Prompt "下一步会创建本项目备份并上传 commit $shortCommit；不会安装服务器 ASR，也不会停止服务。" `
         -Expected "BACKUP $shortCommit"
 
     Write-Step "打包当前 Git commit（不包含 .env、数据库、上传、输出和日志）"
@@ -362,11 +361,6 @@ sudo -u '$LinuxUser' env \
   PATH='$AppDir/tools/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin' \
   RUNNINGHUB_APP_DIR='$script:RemoteTemp/stage' \
   /bin/bash '$script:RemoteTemp/stage/deploy/scripts/preflight.sh'
-env \
-  RUNNINGHUB_APP_DIR='$AppDir' \
-  RUNNINGHUB_RELEASE_DIR='$script:RemoteTemp/stage' \
-  RUNNINGHUB_LINUX_USER='$LinuxUser' \
-  /bin/bash '$script:RemoteTemp/stage/deploy/scripts/install-asr.sh'
 migration_check='$script:RemoteTemp/migration-check.db'
 sqlite3 -readonly '$AppDir/data/app.db' \
   '.timeout 30000' ".backup '`$migration_check'"
@@ -387,7 +381,7 @@ echo '发布包校验和预检通过'
 
     Assert-QueuesIdle
     Confirm-Exact `
-        -Prompt "即将只停止本项目 runninghub-video 服务，安装或更新媒体 Worker 与 ASR 单元，覆盖项目代码，执行数据库迁移，再启动五个服务。其他服务、Nginx、证书均不修改。" `
+        -Prompt "即将只停止本项目 runninghub-video 服务，更新媒体 Worker，覆盖项目代码，执行数据库迁移，再启动四个服务。不会安装或启动服务器 ASR，其他服务、Nginx、证书均不修改。" `
         -Expected "DEPLOY $shortCommit"
 
     Write-Step "更新本项目代码（服务器写操作 3）"
@@ -395,23 +389,14 @@ echo '发布包校验和预检通过'
 set -euo pipefail
 core_services='$($script:CoreServices -join " ")'
 media_service='$script:MediaService'
-asr_service='$script:AsrService'
 services="`$core_services"
 media_unit='/etc/systemd/system/runninghub-video-media.service'
 media_unit_backup='$script:RemoteTemp/runninghub-video-media.service.before'
 media_unit_existed=0
-asr_unit='/etc/systemd/system/runninghub-video-asr.service'
-asr_unit_backup='$script:RemoteTemp/runninghub-video-asr.service.before'
-asr_unit_existed=0
 if systemctl cat "`$media_service" >/dev/null 2>&1; then
   media_unit_existed=1
   services="`$services `$media_service"
   cp -a -- "`$media_unit" "`$media_unit_backup"
-fi
-if systemctl cat "`$asr_service" >/dev/null 2>&1; then
-  asr_unit_existed=1
-  services="`$services `$asr_service"
-  cp -a -- "`$asr_unit" "`$asr_unit_backup"
 fi
 old_revision='$deployedRevision'
 rollback_code='$BackupDir/runninghub-video-code-pre-$shortCommit-$timestamp.tar.gz'
@@ -422,7 +407,7 @@ rollback() {
   trap - ERR
   set +e
   echo '发布失败，正在恢复发布前代码和数据库。' >&2
-  systemctl stop `$core_services "`$media_service" "`$asr_service" >/dev/null 2>&1 || true
+  systemctl stop `$core_services "`$media_service" >/dev/null 2>&1 || true
   if [ -f "`$pre_deploy_db" ]; then
     if [ -f '$AppDir/data/app.db' ]; then
       sqlite3 -readonly '$AppDir/data/app.db' \
@@ -454,21 +439,12 @@ rollback() {
     systemctl disable "`$media_service" >/dev/null 2>&1 || true
     rm -f -- "`$media_unit"
   fi
-  if [ "`$asr_unit_existed" -eq 1 ]; then
-    cp -a -- "`$asr_unit_backup" "`$asr_unit"
-  else
-    systemctl disable "`$asr_service" >/dev/null 2>&1 || true
-    rm -f -- "`$asr_unit"
-  fi
   printf '%s\n' "`$old_revision" > '$AppDir/.deployed-revision'
   chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
   systemctl daemon-reload
   rollback_services="`$core_services"
   if [ "`$media_unit_existed" -eq 1 ]; then
     rollback_services="`$rollback_services `$media_service"
-  fi
-  if [ "`$asr_unit_existed" -eq 1 ]; then
-    rollback_services="`$rollback_services `$asr_service"
   fi
   systemctl start `$rollback_services
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -489,8 +465,6 @@ chmod 600 "`$pre_deploy_db"
 sudo -u '$LinuxUser' tar -C '$AppDir' -xf '$script:RemoteTemp/release.tar'
 install -m 644 -o root -g root \
   '$AppDir/deploy/systemd/runninghub-video-media.service' "`$media_unit"
-install -m 644 -o root -g root \
-  '$AppDir/deploy/systemd/runninghub-video-asr.service' "`$asr_unit"
 printf '%s\n' '$commit' > '$AppDir/.deployed-revision'
 chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
 chmod 600 '$AppDir/.env'
@@ -504,8 +478,8 @@ sudo -u '$LinuxUser' env \
     '$AppDir/.venv/bin/python' -m alembic -c alembic.ini upgrade head
 )
 systemctl daemon-reload
-services="`$core_services `$media_service `$asr_service"
-systemctl enable "`$media_service" "`$asr_service" >/dev/null
+services="`$core_services `$media_service"
+systemctl enable "`$media_service" >/dev/null
 systemctl start `$services
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
   if curl --connect-timeout 2 --max-time 5 -fsS \
@@ -514,17 +488,6 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
   fi
   if [ "`$attempt" -eq 10 ]; then
     echo '新版本健康检查失败' >&2
-    false
-  fi
-  sleep 1
-done
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  if curl --connect-timeout 2 --max-time 5 -fsS \
-    http://127.0.0.1:18084/healthz >/dev/null; then
-    break
-  fi
-  if [ "`$attempt" -eq 10 ]; then
-    echo 'ASR 服务健康检查失败' >&2
     false
   fi
   sleep 1
@@ -551,14 +514,6 @@ curl --connect-timeout 3 --max-time 8 -fsS \
 echo
 curl --connect-timeout 3 --max-time 10 -fsS 'https://$Domain/healthz'
 echo
-curl --connect-timeout 3 --max-time 8 -fsS \
-  http://127.0.0.1:18084/healthz
-echo
-ss -ltn | awk '
-  `$1 == "LISTEN" && `$4 == "127.0.0.1:18084" { found=1 }
-  END { exit(found ? 0 : 1) }
-'
-echo 'ASR internal port 127.0.0.1:18084 LISTEN'
 timeout 15 nginx -t
 for port in 18080 18081 18082; do
   ss -ltn | awk -v expected=":`$port" '
