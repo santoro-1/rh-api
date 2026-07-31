@@ -20,13 +20,51 @@
         <dt>源视频</dt><dd>{{ task.image_original_name }}</dd>
         <dt>音频方式</dt><dd>{{ task.audio_original_name }}</dd>
       {% endif %}
-      <dt>RunningHub Task ID</dt><dd>{{ task.runninghub_task_id or "尚未提交" }}</dd>
+      <dt>RunningHub Task ID</dt><dd id="runninghub-task-id">{{ task.runninghub_task_id or "尚未提交" }}</dd>
+      <dt>自动重试</dt>
+      <dd>
+        已使用 <span id="auto-retry-count">{{ task.runninghub_auto_retry_count }}</span>/{{ auto_retry_limit }} 次
+        <span id="auto-retry-wait" class="{% if not task.runninghub_auto_retry_after %}hidden{% endif %}">· 正在等待下一次重试</span>
+      </dd>
       <dt>提示词</dt><dd class="pre-wrap">{{ task.prompt }}</dd>
     </dl>
   </section>
   <section class="panel">
     <h2>生成结果</h2>
     <p id="error-message" class="error {% if not task.error_message %}hidden{% endif %}">{{ task.error_message or "" }}</p>
+    {% if failed_reason %}
+      <details class="failure-details">
+        <summary>查看 RunningHub 原始失败详情</summary>
+        <dl>
+          {% if failed_reason.get("exception_type") %}<dt>异常类型</dt><dd>{{ failed_reason.get("exception_type") }}</dd>{% endif %}
+          {% if failed_reason.get("node_name") %}<dt>失败节点</dt><dd>{{ failed_reason.get("node_name") }}</dd>{% endif %}
+          {% if failed_reason.get("node_id") %}<dt>节点 ID</dt><dd>{{ failed_reason.get("node_id") }}</dd>{% endif %}
+          {% if failed_reason.get("exception_message") %}<dt>详细说明</dt><dd class="pre-wrap">{{ failed_reason.get("exception_message") }}</dd>{% endif %}
+        </dl>
+        {% if failed_reason.get("traceback") %}
+          <details>
+            <summary>查看技术堆栈</summary>
+            <pre class="failure-traceback">{{ failed_reason.get("traceback") }}</pre>
+          </details>
+        {% endif %}
+      </details>
+    {% endif %}
+    {% if attempt_history %}
+      <details class="failure-details">
+        <summary>查看以前失败的 {{ attempt_history|length }} 次 RunningHub 运行</summary>
+        <ol>
+          {% for attempt in attempt_history %}
+            <li>
+              <strong>{{ attempt.get("taskId") or "未知任务 ID" }}</strong>
+              {% if attempt.get("errorCode") %} · 错误码 {{ attempt.get("errorCode") }}{% endif %}
+              {% if attempt.get("failedReason") and attempt.get("failedReason").get("node_name") %}
+                · 节点 {{ attempt.get("failedReason").get("node_name") }}
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ol>
+      </details>
+    {% endif %}
     <div id="result-container">
       {% if task.status == "SUCCESS" and task.result_path %}
         <video class="video" controls src="/api/tasks/{{ task.id }}/preview"></video>
@@ -38,15 +76,26 @@
 {% if task.status in ["PENDING", "UPLOADING", "SUBMITTED", "RUNNING"] %}
 <script>
 const labels = {{ status_labels|tojson }};
+const renderedAutoRetryCount = {{ task.runninghub_auto_retry_count }};
 async function refreshTask() {
   const response = await fetch("/api/tasks/{{ task.id }}");
   if (!response.ok) return;
   const data = await response.json();
   document.getElementById("status-text").textContent = data.statusText || labels[data.status] || data.status;
+  document.getElementById("runninghub-task-id").textContent = data.runninghubTaskId || "尚未提交";
+  document.getElementById("auto-retry-count").textContent = data.autoRetryCount || 0;
+  document.getElementById("auto-retry-wait").classList.toggle("hidden", !data.autoRetryAfter);
   const error = document.getElementById("error-message");
   error.textContent = data.errorMessage || ""; error.classList.toggle("hidden", !data.errorMessage);
+  if ((data.autoRetryCount || 0) !== renderedAutoRetryCount) {
+    location.reload();
+    return;
+  }
   if (data.status === "SUCCESS" && data.downloadUrl) { location.reload(); return; }
-  if (["FAILED", "DOWNLOAD_FAILED", "CANCELLED"].includes(data.status)) return;
+  if (["FAILED", "DOWNLOAD_FAILED", "CANCELLED"].includes(data.status)) {
+    location.reload();
+    return;
+  }
   setTimeout(refreshTask, 5000);
 }
 setTimeout(refreshTask, 5000);

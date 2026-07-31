@@ -27,6 +27,8 @@
 .order-number { display:grid; place-items:center; width:26px; height:26px; border-radius:50%; color:white; background:#1769d1; font-size:.8rem; font-weight:700; }
 .ordered-file-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .order-actions { display:flex; gap:3px; }
+.order-button.reuse, .advanced-order-asset.reuse { color:#176b38; }
+.asset-reused-label { margin-left:.3rem; color:#176b38; font-weight:700; }
 .order-button { min-width:28px; padding:4px 7px; color:#1d4e89; background:#e3efff; }
 .order-button.remove { color:#9f241b; background:#fff0ee; }
 .empty-upload-item { padding:12px; color:#64748b; text-align:center; }
@@ -119,7 +121,10 @@
 .live-log-state .indicator { flex:0 0 auto; width:.55rem; height:.55rem; border-radius:50%; background:#22a05a; box-shadow:0 0 0 .2rem #22a05a22; }
 .live-log-state.failed { color:#a02727; }
 .live-log-state.failed .indicator { background:#d14343; box-shadow:0 0 0 .2rem #d1434322; }
-.error-text { color:#b42318; white-space:normal; }
+.error-text { color:#b42318; white-space:pre-wrap; }
+.error { white-space:pre-wrap; }
+.failure-details { margin-top:12px; }
+.failure-traceback { max-height:320px; overflow:auto; padding:12px; color:#334155; background:#f1f5f9; border-radius:7px; white-space:pre-wrap; word-break:break-word; }
 .voice-studio-panel { margin-top:0; }
 .voice-advanced-wrapper { margin-top:1rem; }
 .voice-advanced-wrapper > summary { display:flex; align-items:center; justify-content:space-between; gap:14px; cursor:pointer; }

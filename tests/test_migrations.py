@@ -53,7 +53,17 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
         revision = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-    assert revision == "0013_remote_media_worker"
+        task_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('generation_tasks')"
+            )
+        }
+    assert revision == "0015_runninghub_auto_retry"
+    assert "runninghub_failed_reason" in task_columns
+    assert "runninghub_attempt_history" in task_columns
+    assert "runninghub_auto_retry_count" in task_columns
+    assert "runninghub_auto_retry_after" in task_columns
 
 
 def test_audio_review_migration_preserves_existing_batch_items():
@@ -172,7 +182,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0013_remote_media_worker"
+        assert version == "0015_runninghub_auto_retry"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:

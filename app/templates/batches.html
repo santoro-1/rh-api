@@ -12,7 +12,7 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>创建时间</th>{% if current_user.is_admin %}<th>用户</th>{% endif %}<th>批次</th><th>工作流</th><th>进度</th><th>状态</th></tr>
+        <tr><th>创建时间</th>{% if current_user.is_admin %}<th>用户</th>{% endif %}<th>批次</th><th>工作流</th><th>进度</th><th>状态</th><th>操作</th></tr>
       </thead>
       <tbody>
         {% for batch in batches %}
@@ -24,9 +24,20 @@
             <td>{{ "数字人视频" if batch.workflow_type == "digital_human" else "视频对口型" }}<br><small>{{ "脚本语音" if batch.audio_mode == "minimax" else "上传音频" }}</small></td>
             <td>{{ summary.finished }}/{{ summary.total }}（{{ summary.progress }}%）</td>
             <td>{{ {"ACTIVE":"处理中","SUCCESS":"全部成功","PARTIAL_FAILED":"部分失败","FAILED":"失败"}[summary.status] }}</td>
+            <td>
+              {% if deletable_batches[batch.id] %}
+                <form method="post" action="/batches/{{ batch.id }}/delete"
+                  onsubmit="return confirm('删除后，批次记录、关联任务、上传素材和本地结果都会被清除，且无法恢复。确定删除吗？');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button class="link-button danger-text" type="submit">删除记录</button>
+                </form>
+              {% else %}
+                <span class="muted">处理中不可删除</span>
+              {% endif %}
+            </td>
           </tr>
         {% else %}
-          <tr><td colspan="{{ 6 if current_user.is_admin else 5 }}" class="empty-cell">还没有批次记录</td></tr>
+          <tr><td colspan="{{ 7 if current_user.is_admin else 6 }}" class="empty-cell">还没有批次记录</td></tr>
         {% endfor %}
       </tbody>
     </table>

@@ -24,7 +24,7 @@ fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup="/var/backups/runninghub-video/remote-worker-env-$timestamp"
-install -d -m 700 -o root -g root /var/backups/runninghub-video
+install -d -m 700 -o rhvideo -g rhvideo /var/backups/runninghub-video
 install -m 600 -o root -g root "$APP_DIR/.env" "$backup"
 
 restore_on_error() {

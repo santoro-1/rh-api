@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy.orm import Session
 
@@ -34,6 +34,13 @@ class RetrySummary:
 
     retried: int
     skipped: int
+
+
+DELETABLE_AUDIO_TASK_STATUSES = {
+    AudioTaskStatus.AWAITING_REVIEW.value,
+    AudioTaskStatus.SUCCESS.value,
+    AudioTaskStatus.FAILED.value,
+}
 
 
 def _video_tasks(batch: GenerationBatch):
@@ -99,56 +106,48 @@ def _deletion_directories(
     settings: Settings,
 ) -> list[tuple[Path, Path]]:
     tasks = _video_tasks(batch)
-    directories = [
+    task_ids = {task.id for task in tasks}
+    for item in batch.items:
+        if item.audio_task is not None:
+            task_ids.add(item.audio_task.planned_generation_task_id)
+        for segment in item.segments:
+            for relative_path in (segment.audio_path, segment.video_path):
+                if not relative_path:
+                    continue
+                normalized = str(relative_path).replace("\\", "/")
+                parts = PurePosixPath(normalized).parts
+                if (
+                    len(parts) >= 3
+                    and parts[0] == "uploads"
+                    and parts[1] == str(batch.user_id)
+                ):
+                    task_ids.add(parts[2])
+    return [
         (
-            task_upload_dir(settings, task.user_id, task.id),
-            task_output_dir(settings, task.user_id, task.id),
+            task_upload_dir(settings, batch.user_id, task_id),
+            task_output_dir(settings, batch.user_id, task_id),
         )
-        for task in tasks
+        for task_id in sorted(task_ids)
     ]
-    directories.extend(
-        (
-            task_upload_dir(
-                settings,
-                audio_task.user_id,
-                audio_task.planned_generation_task_id,
-            ),
-            task_output_dir(
-                settings,
-                audio_task.user_id,
-                audio_task.planned_generation_task_id,
-            ),
-        )
+
+
+def batch_is_deletable(batch: GenerationBatch) -> bool:
+    """Allow terminal batches and locally stuck rows with no active worker."""
+
+    if any(
+        task.status not in TERMINAL_TASK_STATUSES
+        for task in _video_tasks(batch)
+    ):
+        return False
+    return all(
+        item.audio_task is None
+        or item.audio_task.status in DELETABLE_AUDIO_TASK_STATUSES
         for item in batch.items
-        if (audio_task := item.audio_task) is not None
-        and item.generation_task is None
     )
-    return directories
 
 
-def _ensure_terminal(batch: GenerationBatch) -> None:
-    unfinished = [
-        item
-        for item in batch.items
-        if (
-            item.generation_task is not None
-            and item.generation_task.status not in TERMINAL_TASK_STATUSES
-        )
-        or any(
-            segment.generation_task is None
-            or segment.generation_task.status not in TERMINAL_TASK_STATUSES
-            for segment in item.segments
-        )
-        or (
-            item.generation_task is None
-            and not item.segments
-            and (
-                item.audio_task is None
-                or item.audio_task.status != AudioTaskStatus.FAILED.value
-            )
-        )
-    ]
-    if unfinished:
+def _ensure_deletable(batch: GenerationBatch) -> None:
+    if not batch_is_deletable(batch):
         raise BatchLifecycleError(
             "批次仍有排队或运行任务，不能删除"
         )
@@ -159,9 +158,9 @@ def delete_terminal_batch(
     batch: GenerationBatch,
     settings: Settings,
 ) -> None:
-    """Delete one terminal batch atomically, then clean its local directories."""
+    """Delete one safe batch atomically, then clean its local directories."""
 
-    _ensure_terminal(batch)
+    _ensure_deletable(batch)
     tasks = _video_tasks(batch)
     directories = _deletion_directories(batch, settings)
     for task in tasks:

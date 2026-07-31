@@ -305,6 +305,7 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
 set -euo pipefail
 umask 077
 install -d -m 700 -o '$LinuxUser' -g '$LinuxUser' '$script:RemoteTemp'
+install -d -m 700 -o '$LinuxUser' -g '$LinuxUser' '$BackupDir'
 sudo -u '$LinuxUser' /bin/bash '$AppDir/deploy/scripts/backup.sh'
 code_backup='$BackupDir/runninghub-video-code-pre-$shortCommit-$timestamp.tar.gz'
 tar -C '$AppDir' \

@@ -98,6 +98,14 @@ def test_remote_media_worker_switch_is_explicit_and_reversible():
     assert '"$CONFIRM" != "--confirm"' in switcher
     assert '"$MODE" != "remote" && "$MODE" != "local"' in switcher
     assert "remote-worker-env-" in switcher
+    assert (
+        "install -d -m 700 -o rhvideo -g rhvideo "
+        "/var/backups/runninghub-video"
+    ) in switcher
+    assert (
+        "install -d -m 700 -o root -g root "
+        "/var/backups/runninghub-video"
+    ) not in switcher
     assert "restore_on_error" in switcher
     assert "切换失败，正在恢复修改前 .env" in switcher
     assert "for attempt in {1..20}" in switcher
@@ -236,6 +244,10 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert "--max-time 8" in updater
     assert "ServerAliveCountMax=3" in updater
     assert "install -d -m 700 -o '$LinuxUser' -g '$LinuxUser'" in updater
+    assert (
+        "install -d -m 700 -o '$LinuxUser' -g '$LinuxUser' '$BackupDir'"
+        in updater
+    )
     assert "chown '${LinuxUser}:$LinuxUser'" in updater
     assert "chmod 600" in updater
     assert "sudo -u '$LinuxUser' env" in updater

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy import select
@@ -94,6 +95,24 @@ def item_display_status(item: GenerationBatchItem) -> str:
     if item.audio_task:
         return item.audio_task.status
     return item.status
+
+
+def _attempt_history(task) -> list[dict]:
+    if task is None or not task.runninghub_attempt_history:
+        return []
+    try:
+        value = json.loads(task.runninghub_attempt_history)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _last_failed_task_id(task) -> str | None:
+    history = _attempt_history(task)
+    if not history:
+        return None
+    task_id = history[-1].get("taskId")
+    return str(task_id) if task_id else None
 
 
 def batch_query():
@@ -262,6 +281,32 @@ def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
         {
             "id": item.id,
             "status": item_display_status(item),
+            "runninghubTaskId": (
+                item.generation_task.runninghub_task_id
+                if item.generation_task
+                else None
+            ),
+            "errorMessage": (
+                item.generation_task.error_message
+                if item.generation_task
+                else None
+            ),
+            "autoRetryCount": (
+                item.generation_task.runninghub_auto_retry_count
+                if item.generation_task
+                else 0
+            ),
+            "autoRetryAfter": (
+                item.generation_task.runninghub_auto_retry_after.isoformat()
+                if (
+                    item.generation_task
+                    and item.generation_task.runninghub_auto_retry_after
+                )
+                else None
+            ),
+            "lastFailedRunninghubTaskId": _last_failed_task_id(
+                item.generation_task
+            ),
             "segments": [
                 {
                     "id": segment.id,
@@ -274,6 +319,19 @@ def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
                         segment.generation_task.runninghub_task_id
                         if segment.generation_task
                         else None
+                    ),
+                    "errorMessage": (
+                        segment.generation_task.error_message
+                        if segment.generation_task
+                        else None
+                    ),
+                    "autoRetryCount": (
+                        segment.generation_task.runninghub_auto_retry_count
+                        if segment.generation_task
+                        else 0
+                    ),
+                    "lastFailedRunninghubTaskId": _last_failed_task_id(
+                        segment.generation_task
                     ),
                 }
                 for segment in item.segments

@@ -43,6 +43,7 @@ from app.services.batch_generation import (
 from app.services.batch_lifecycle import (
     BatchFileCleanupError,
     BatchLifecycleError,
+    batch_is_deletable,
     delete_terminal_batch,
     retry_failed_batch,
 )
@@ -494,6 +495,9 @@ def batches_page(
         statement = statement.where(GenerationBatch.user_id == current_user.id)
     batches = db.scalars(statement).unique().all()
     summaries = {batch.id: summarize_batch(batch) for batch in batches}
+    deletable_batches = {
+        batch.id: batch_is_deletable(batch) for batch in batches
+    }
     return templates.TemplateResponse(
         request,
         "batches.html",
@@ -501,6 +505,7 @@ def batches_page(
             "current_user": current_user,
             "batches": batches,
             "summaries": summaries,
+            "deletable_batches": deletable_batches,
         },
     )
 
@@ -533,6 +538,8 @@ def batch_detail_page(
             "active_statuses": ACTIVE_VIDEO_STATUSES,
             "retryable_statuses": RETRYABLE_TASK_STATUSES,
             "status_labels": STATUS_LABELS,
+            "auto_retry_limit": get_settings().runninghub_auto_retry_limit,
+            "can_delete_batch": batch_is_deletable(batch),
         },
     )
 

@@ -4,7 +4,12 @@
 <section class="page-heading">
   <div>
     <h1>{{ batch.name }}</h1>
-    <p class="muted">{{ "数字人视频" if batch.workflow_type == "digital_human" else "视频对口型" }} · {{ "脚本生成语音" if batch.audio_mode == "minimax" else "上传音频" }} · {{ batch.created_at|beijing_datetime }}</p>
+    <p class="muted">
+      所属账号：<strong>{{ batch.user.username }}</strong> ·
+      {{ "数字人视频" if batch.workflow_type == "digital_human" else "视频对口型" }} ·
+      {{ "脚本生成语音" if batch.audio_mode == "minimax" else "上传音频" }} ·
+      {{ batch.created_at|beijing_datetime }}
+    </p>
   </div>
   <div class="button-row">
     {% if summary.success %}
@@ -27,7 +32,7 @@
 </section>
 
 {% if request.query_params.get("retried") %}
-  <p class="error">已重新排队 {{ request.query_params.get("retried") }} 条，跳过 {{ request.query_params.get("skipped", "0") }} 条素材不可用任务。</p>
+  <p class="error">已重新排队 {{ request.query_params.get("retried") }} 条；每次重试都会生成新的 RunningHub 任务 ID。跳过 {{ request.query_params.get("skipped", "0") }} 条素材不可用任务。</p>
 {% endif %}
 {% if request.query_params.get("approved") %}
   <p class="success-text">已通过 {{ request.query_params.get("approved") }} 条语音，正在进入视频任务创建流程。</p>
@@ -60,6 +65,20 @@
             <td>
               {% set item_status = item_statuses[item.id] %}
               <span data-item-status="{{ item.id }}">{{ status_labels.get(item_status, item_status) }}</span>
+              {% if task %}
+                <br><small class="muted">
+                  RunningHub ID：
+                  <span data-item-runninghub-id="{{ item.id }}">{{ task.runninghub_task_id or "等待提交" }}</span>
+                </small>
+                <br><small
+                  class="muted {% if not task.runninghub_auto_retry_count %}hidden{% endif %}"
+                  data-item-retry="{{ item.id }}"
+                >自动重试 {{ task.runninghub_auto_retry_count }}/{{ auto_retry_limit }}</small>
+                <br><small
+                  class="error-text {% if not task.error_message %}hidden{% endif %}"
+                  data-item-error="{{ item.id }}"
+                >{{ task.error_message or "" }}</small>
+              {% endif %}
               {% if audio_task and audio_task.error_message %}<br><small class="error-text">{{ audio_task.error_message }}</small>{% endif %}
             </td>
             <td>
@@ -156,6 +175,14 @@
                               <span class="segment-status-value" data-segment-status="{{ segment.id }}">{{ status_labels.get(segment_status, segment_status) }}</span>
                               <span class="segment-remote-label">RunningHub 任务 ID</span>
                               <span class="segment-remote-id" data-runninghub-id="{{ segment.id }}">{{ child.runninghub_task_id if child and child.runninghub_task_id else "等待提交" }}</span>
+                              <small
+                                class="muted {% if not child or not child.runninghub_auto_retry_count %}hidden{% endif %}"
+                                data-segment-retry="{{ segment.id }}"
+                              >自动重试 {{ child.runninghub_auto_retry_count if child else 0 }}/{{ auto_retry_limit }}</small>
+                              <small
+                                class="error-text {% if not child or not child.error_message %}hidden{% endif %}"
+                                data-segment-error="{{ segment.id }}"
+                              >{{ child.error_message if child and child.error_message else "" }}</small>
                             </td>
                             <td class="segment-actions">
                               <div class="segment-action-links">
@@ -193,18 +220,19 @@
     </form>
   {% endif %}
   {% if summary.failed %}
-    <form method="post" action="/batches/{{ batch.id }}/retry">
+    <form method="post" action="/batches/{{ batch.id }}/retry"
+      onsubmit="return confirm('将重新提交批次中的失败任务，并为每条任务生成新的 RunningHub ID；可能再次产生费用。确定重试吗？');">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit">重试批次中的失败任务</button>
     </form>
   {% endif %}
-  {% if summary.finished == summary.total %}
+  {% if can_delete_batch %}
     <form method="post" action="/batches/{{ batch.id }}/delete" onsubmit="return confirm('确认删除整个批次及全部任务和文件吗？');">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button class="button danger" type="submit">删除整个批次</button>
     </form>
   {% else %}
-    <span class="muted">批次仍有活动任务，完成后才能整批删除。</span>
+    <span class="muted">批次仍有排队或运行中的任务，暂时不能删除。</span>
   {% endif %}
 </section>
 
@@ -213,6 +241,7 @@
   const batchId = {{ batch.id|tojson }};
   const renderedChildTotal = {{ summary.childTotal }};
   const statusLabels = {{ status_labels|tojson }};
+  const autoRetryLimit = {{ auto_retry_limit }};
   const summaryKeys = ["total", "childTotal", "queued", "processing", "audioPreparing", "awaitingReview", "success", "failed"];
   let previousStatus = {{ summary.status|tojson }};
 
@@ -229,12 +258,34 @@
       }
       for (const item of data.items || []) {
         const itemStatus = document.querySelector(`[data-item-status="${item.id}"]`);
+        const itemRemoteId = document.querySelector(`[data-item-runninghub-id="${item.id}"]`);
+        const itemRetry = document.querySelector(`[data-item-retry="${item.id}"]`);
+        const itemError = document.querySelector(`[data-item-error="${item.id}"]`);
         if (itemStatus) itemStatus.textContent = statusLabels[item.status] || item.status;
+        if (itemRemoteId) itemRemoteId.textContent = item.runninghubTaskId || "等待提交";
+        if (itemRetry) {
+          itemRetry.textContent = `自动重试 ${item.autoRetryCount || 0}/${autoRetryLimit}`;
+          itemRetry.classList.toggle("hidden", !item.autoRetryCount);
+        }
+        if (itemError) {
+          itemError.textContent = item.errorMessage || "";
+          itemError.classList.toggle("hidden", !item.errorMessage);
+        }
         for (const segment of item.segments || []) {
           const status = document.querySelector(`[data-segment-status="${segment.id}"]`);
           const remoteId = document.querySelector(`[data-runninghub-id="${segment.id}"]`);
+          const segmentRetry = document.querySelector(`[data-segment-retry="${segment.id}"]`);
+          const segmentError = document.querySelector(`[data-segment-error="${segment.id}"]`);
           if (status) status.textContent = statusLabels[segment.status] || segment.status;
           if (remoteId) remoteId.textContent = segment.runninghubTaskId || "等待提交";
+          if (segmentRetry) {
+            segmentRetry.textContent = `自动重试 ${segment.autoRetryCount || 0}/${autoRetryLimit}`;
+            segmentRetry.classList.toggle("hidden", !segment.autoRetryCount);
+          }
+          if (segmentError) {
+            segmentError.textContent = segment.errorMessage || "";
+            segmentError.classList.toggle("hidden", !segment.errorMessage);
+          }
         }
       }
       if (data.childTotal !== renderedChildTotal || data.status !== previousStatus) {
