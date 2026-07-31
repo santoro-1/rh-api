@@ -36,8 +36,18 @@ function Invoke-LocalText {
         [Parameter(Mandatory = $true)][scriptblock]$Command,
         [Parameter(Mandatory = $true)][string]$Description
     )
-    $output = & $Command 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    # Windows PowerShell 5.1 otherwise decodes UTF-8 native command output
+    # with the active legacy code page. Git paths containing Chinese then
+    # become mojibake and no longer match the explicit deletion allowlist.
+    $previousOutputEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+    try {
+        $output = & $Command 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        [Console]::OutputEncoding = $previousOutputEncoding
+    }
+    if ($exitCode -ne 0) {
         throw "$Description 失败：`n$($output -join [Environment]::NewLine)"
     }
     return (($output | ForEach-Object { "$_" }) -join "`n").Trim()
