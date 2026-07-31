@@ -100,6 +100,8 @@ def test_remote_media_worker_switch_is_explicit_and_reversible():
     assert "remote-worker-env-" in switcher
     assert "restore_on_error" in switcher
     assert "切换失败，正在恢复修改前 .env" in switcher
+    assert "for attempt in {1..20}" in switcher
+    assert "Web 或媒体 Worker 在 20 秒内没有就绪" in switcher
     assert 'upsert_env "MEDIA_PROCESSING_MODE" "remote"' in switcher
     assert 'upsert_env "MEDIA_PROCESSING_MODE" "local"' in switcher
     assert 'upsert_env "LONG_AUDIO_ALIGNMENT_PROVIDER" "funasr_http"' in switcher

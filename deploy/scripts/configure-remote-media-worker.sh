@@ -79,11 +79,20 @@ else
 fi
 
 systemctl restart runninghub-video-web.service runninghub-video-media.service
-systemctl is-active --quiet runninghub-video-web.service
-systemctl is-active --quiet runninghub-video-media.service
-curl --connect-timeout 3 --max-time 8 -fsS \
-    -H 'Host: video.lanyingjk01.com' \
-    http://127.0.0.1:18083/healthz >/dev/null
+for attempt in {1..20}; do
+    if systemctl is-active --quiet runninghub-video-web.service &&
+       systemctl is-active --quiet runninghub-video-media.service &&
+       curl --connect-timeout 2 --max-time 5 -fsS \
+           -H 'Host: video.lanyingjk01.com' \
+           http://127.0.0.1:18083/healthz >/dev/null; then
+        break
+    fi
+    if [[ "$attempt" -eq 20 ]]; then
+        echo "Web 或媒体 Worker 在 20 秒内没有就绪" >&2
+        false
+    fi
+    sleep 1
+done
 trap - ERR
 
 echo "媒体处理模式已切换为：$MODE"
