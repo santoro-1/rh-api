@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import subprocess
+import zipfile
 from pathlib import Path
 
 from app.services.processes import hidden_creation_flags
+from media_node.create_portable_zip import create_archive
 from scripts.local_services import _process_alive
 
 
@@ -61,6 +63,56 @@ def test_windows_media_node_is_isolated_and_has_one_launcher():
     assert not (
         PROJECT_ROOT / "deploy" / "systemd" / "runninghub-video-asr.service"
     ).exists()
+
+
+def test_windows_media_node_has_a_self_contained_portable_builder():
+    node = PROJECT_ROOT / "media_node"
+    builder = (node / "build-portable-media-node.ps1").read_text(
+        encoding="utf-8"
+    )
+    zip_builder = (node / "create_portable_zip.py").read_text(
+        encoding="utf-8"
+    )
+    launcher = (node / "launcher.py").read_text(encoding="utf-8")
+    worker = (node / "worker.py").read_text(encoding="utf-8")
+    environment = (node / ".env.example").read_text(encoding="utf-8")
+    portable_start = (node / "portable" / "启动媒体节点.cmd").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'Join-Path $sourceRuntime "Scripts\\python.exe"' in builder
+    assert "sys.base_prefix" in builder
+    assert "Get-Command ffmpeg.exe" in builder
+    assert "Get-Command ffprobe.exe" in builder
+    assert 'Join-Path $projectRoot "app"' in builder
+    assert 'Join-Path $nodeRoot ".runtime\\models"' in builder
+    assert "create_portable_zip.py" in builder
+    assert "allowZip64=True" in zip_builder
+    assert "path.relative_to(root).as_posix()" in zip_builder
+    assert "IncludeLocalConfig" in builder
+    assert '"MEDIA_WORKER_ID="' in builder
+    assert '"$revision-dirty"' in builder
+    assert "MEDIA_NODE_PORTABLE" in launcher
+    assert "MEDIA_NODE_PYTHON" in launcher
+    assert "python\\python.exe" in portable_start
+    assert "ffmpeg\\bin" in portable_start
+    assert 'os.getenv("MEDIA_WORKER_ID", "").strip()' in worker
+    assert "MEDIA_WORKER_ID=\n" in environment
+
+
+def test_portable_zip_preserves_chinese_launcher_names(tmp_path):
+    source = tmp_path / "portable-node"
+    source.mkdir()
+    (source / "启动媒体节点.cmd").write_text("echo ok", encoding="utf-8")
+    (source / "使用说明.txt").write_text("说明", encoding="utf-8")
+    archive = tmp_path / "portable-node.zip"
+
+    create_archive(source, archive)
+
+    with zipfile.ZipFile(archive) as package:
+        assert package.testzip() is None
+        assert "portable-node/启动媒体节点.cmd" in package.namelist()
+        assert "portable-node/使用说明.txt" in package.namelist()
 
 
 def test_remote_media_worker_switch_is_explicit_and_reversible():

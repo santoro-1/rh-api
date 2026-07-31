@@ -20,6 +20,7 @@ RunningHubTest/
 .asr-runtime/
 media_node/.runtime/
 media_node/data/
+dist/
 venv/
 env/
 

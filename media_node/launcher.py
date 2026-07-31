@@ -55,13 +55,20 @@ def _start_asr() -> subprocess.Popen[bytes] | None:
         print("检测到本机 ASR 已运行，将直接复用。")
         return None
     runtime_root = NODE_ROOT / ".runtime"
-    python = runtime_root / "venv" / "Scripts" / "python.exe"
+    configured_python = os.getenv("MEDIA_NODE_PYTHON", "").strip()
+    python = (
+        Path(configured_python).expanduser().resolve()
+        if configured_python
+        else runtime_root / "venv" / "Scripts" / "python.exe"
+    )
     if not python.is_file():
         legacy_runtime = PROJECT_ROOT / ".asr-runtime"
         legacy_python = legacy_runtime / "venv" / "Scripts" / "python.exe"
         if legacy_python.is_file():
             runtime_root = legacy_runtime
             python = legacy_python
+        elif os.getenv("MEDIA_NODE_PORTABLE", "").strip() == "1":
+            python = Path(sys.executable).resolve()
     if not python.is_file():
         raise RuntimeError(
             "缺少媒体节点运行环境，请先执行 media_node/安装媒体节点.ps1"

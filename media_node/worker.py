@@ -577,10 +577,9 @@ def run() -> int:
         raise RemoteWorkerError(
             "media_node/.env 中的 MEDIA_WORKER_TOKEN 至少需要 32 个字符"
         )
-    worker_id = os.getenv(
-        "MEDIA_WORKER_ID",
-        f"{socket.gethostname()}-media",
-    ).strip()
+    worker_id = os.getenv("MEDIA_WORKER_ID", "").strip()
+    if not worker_id:
+        worker_id = f"{socket.gethostname()}-media"
     poll_seconds = max(_env_int("MEDIA_WORKER_POLL_SECONDS", 10), 2)
     heartbeat_seconds = max(
         _env_int("MEDIA_WORKER_HEARTBEAT_SECONDS", 60), 10
