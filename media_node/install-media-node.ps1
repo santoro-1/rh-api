@@ -49,6 +49,13 @@ Invoke-Checked -Executable $venvPython `
         "-i", $PypiIndexUrl
     ) `
     -Description "Install media-node dependencies"
+Invoke-Checked -Executable $venvPython `
+    -Arguments @(
+        "-s",
+        "-c",
+        "import fastapi, funasr, modelscope, mutagen, psutil, requests, torch, uvicorn"
+    ) `
+    -Description "Verify isolated media-node dependencies"
 
 foreach ($command in @("ffmpeg", "ffprobe")) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {

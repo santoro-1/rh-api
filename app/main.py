@@ -24,6 +24,7 @@ from app.routes import (
     operations,
     tasks,
     voices,
+    workbench,
 )
 from app.services.logging_config import configure_logging, log_event
 
@@ -80,6 +81,7 @@ def create_app() -> FastAPI:
     app.include_router(long_audio.router)
     app.include_router(media_worker_api.router)
     app.include_router(operations.router)
+    app.include_router(workbench.router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthcheck():

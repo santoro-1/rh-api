@@ -11,6 +11,9 @@
   const longAudioReviewRequired = document.getElementById(
     "batch-long-audio-review-required",
   );
+  const videoReviewRequired = document.getElementById(
+    "batch-video-review-required",
+  );
   const quickConfirm = document.getElementById("quick-confirm");
   const advancedConfirm = document.getElementById("advanced-confirm");
   const voicePicker = document.getElementById("speech-voice-picker");
@@ -876,6 +879,7 @@
       speechOptions: speechOptions(),
       longAudioReviewRequired:
         !isSpeechMode() && longAudioReviewRequired.checked,
+      videoReviewRequired: videoReviewRequired.checked,
       rows,
       assetIds: allAssetIds(entry),
     };
@@ -1133,6 +1137,7 @@
     updateWorkflowUi(false);
   });
   longAudioReviewRequired.addEventListener("change", resetConfirmation);
+  videoReviewRequired.addEventListener("change", resetConfirmation);
   personModeSelect.addEventListener("change", updateDualAudioUi);
   resolutionInput.addEventListener("input", resetConfirmation);
   instanceTypeSelect.addEventListener("change", resetConfirmation);

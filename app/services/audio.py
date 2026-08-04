@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import subprocess
 import re
 import subprocess
 import logging
@@ -137,3 +138,47 @@ def inspect_audio_duration(path: Path) -> float:
     if duration <= 0:
         raise AudioInspectionError("音频时长必须大于 0")
     return duration
+
+
+def add_silence_tail(
+    source: Path,
+    target: Path,
+    *,
+    padding_seconds: float,
+) -> None:
+    """Create a temporary provider input with a silent editing/generation tail."""
+
+    if padding_seconds <= 0:
+        raise ValueError("静音补偿时长必须大于 0")
+    duration = inspect_audio_duration(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(source),
+            "-af",
+            f"apad=pad_dur={padding_seconds:.3f}",
+            "-t",
+            f"{duration + padding_seconds:.3f}",
+            "-vn",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        check=False,
+        creationflags=hidden_creation_flags(),
+    )
+    if completed.returncode != 0 or not target.is_file():
+        target.unlink(missing_ok=True)
+        raise AudioInspectionError("给数字人音频补尾部静音失败")

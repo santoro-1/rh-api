@@ -2,9 +2,19 @@
 
 这是一个 FastAPI + SQLite + Jinja2 的单服务器应用：浏览器仅访问本站；Web 进程创建任务；独立 Worker 使用服务端保存且加密的 RunningHub API Key 上传素材、提交工作流、轮询状态并把视频下载到服务器。当前支持数字人视频和 LTX 2.3 视频对口型两个工作流。
 
-版本变化见 [CHANGELOG.md](CHANGELOG.md)，当前技术状态和后续交接边界见
-[PROJECT_STATUS.md](PROJECT_STATUS.md)。模块边界、状态约束、数据库迁移红线和
-每次修改的检查清单见 [MAINTENANCE.md](MAINTENANCE.md)。
+## 文档导航
+
+- [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)：当前架构、业务流程、本地开发、状态机、
+  测试、媒体节点、生产发布和扩展方式的统一开发入口。
+- [CHANGELOG.md](CHANGELOG.md)：面向版本的功能变化、兼容性说明和验证记录。
+- [WORKBENCH_INTEGRATION_20260803.md](WORKBENCH_INTEGRATION_20260803.md)：本轮数字人账号、任务分流、剪映工作台拉取和本地验收记录。
+- [MAINTENANCE.md](MAINTENANCE.md)：模块边界、迁移红线、日志规范和修改检查清单。
+- [deploy/README.md](deploy/README.md)：生产预检、发布、验收、备份和恢复。
+- [media_node/README.md](media_node/README.md)：固定电脑媒体节点的安装、迁移及完整包/
+  小更新包分发。
+- [WORKFLOW_EXTENSION.md](WORKFLOW_EXTENSION.md)：新增 RunningHub 工作流适配器的最小步骤。
+- [PROJECT_STATUS.md](PROJECT_STATUS.md)：阶段快照和历史交接；当前技术事实以开发者指南
+  和代码为准。
 
 ## 本地前置条件
 
@@ -49,6 +59,8 @@
 同时启动 Web、语音 Worker、媒体 Worker 和视频 Worker；如果 `.asr-runtime`
 中的独立环境已经安装完成，也会启动本地 ASR 服务。随后自动打开默认批量生成页。
 无需保留 PowerShell 窗口；重复双击不会重复启动同一套服务。
+
+剪映工作台可以直接使用本网站现有账号登录，并通过 `/api/workbench/tasks` 拉取当前账号自己的后处理任务。批次详情中的“后处理清单”是给人查看的中文页面；对应 `/api/batches/.../postproduction` 仍保留为机器接口。只有文本语音且未切分的单条视频标记为可自动后期，上传音频和多片段视频都要求人工粗剪或确认。
 
 需要停止时双击 `停止系统.cmd`。管理员登录后可从“运行状态”页面查看四个服务的
 心跳、CPU、内存、磁盘、FFmpeg、语音/媒体/视频队列数量和最近日志。日志位于
@@ -132,6 +144,10 @@ FFmpeg 同时抢占大量资源。
 - 校验通过后，每行创建一条独立 `PENDING` 任务，并按清单顺序进入原有 FIFO 队列。
 - 批次详情和历史列表提供汇总进度、失败项重试和手动删除。终态批次以及没有活动
   视频/语音 Worker 的本地卡住批次可以删除；仍在排队或远程运行的任务禁止删除。
+- 只有“输入文案生成语音，并且实际语音不超过 45 秒”会在单个视频成功后进入自动
+  BGM/字幕分支。MiniMax 返回的原始字幕时间戳会保留在后处理清单中。
+- 上传音频或语音超过 45 秒产生多个视频片段时，生成结果进入人工处理。视频 Worker
+  生成的拼接文件只作为片段顺序检查预览，不作为正式成片；原始分段始终全部保留。
 
 页面提供两种长期并存的音频入口：
 

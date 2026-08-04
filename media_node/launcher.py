@@ -127,6 +127,15 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except ModuleNotFoundError as exc:
+        print(
+            "远程媒体节点缺少 Python 依赖："
+            f"{exc.name}。请在项目根目录重新运行 "
+            "media_node\\install-media-node.ps1。",
+            file=sys.stderr,
+        )
+        input("按回车键关闭窗口……")
+        raise SystemExit(1)
     except Exception as exc:
         print(f"远程媒体节点启动失败：{exc}", file=sys.stderr)
         input("按回车键关闭窗口……")

@@ -611,6 +611,14 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
     task.error_message = None
     task.completed_at = _now()
     task.batch_item.status = "SEGMENTS_CREATED"
+    # One uncut TTS result is the automatic post-production branch.  It must
+    # use the provider result directly so it does not masquerade as a
+    # segmented rough-cut preview.
+    task.batch_item.merged_video_status = (
+        "MERGE_PENDING" if len(plans) > 1 else "NOT_APPLICABLE"
+    )
+    task.batch_item.merged_video_path = None
+    task.batch_item.merged_video_error = None
     db.commit()
     log_event(
         logger,

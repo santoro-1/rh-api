@@ -403,6 +403,9 @@ class GenerationBatch(Base):
     review_required: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    video_review_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     request_key: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE")
     total_items: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -445,6 +448,19 @@ class GenerationBatchItem(Base):
     )
     error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    merged_video_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="NOT_APPLICABLE"
+    )
+    merged_video_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    merged_video_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    merged_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    merged_reviewed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, or_, select, update
@@ -23,11 +25,17 @@ from app.services.logging_config import (
     start_heartbeat,
     write_heartbeat,
 )
+from app.services.audio import add_silence_tail
 from app.services.security import decrypt_secret
 from app.services.storage import create_download_target, to_relative_data_path
 from app.services.workflow_configs import get_user_workflow_config
+from app.services.video_merge import (
+    process_pending_video_merges,
+    recover_interrupted_video_merges,
+)
 from app.workflows import get_workflow
 from app.workflows.base import WorkflowAdapter, resolve_asset_path
+from app.workflows.digital_human import generation_tail_padding_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -676,22 +684,33 @@ def process_task(db: Session, task_id: str) -> None:
             **_video_log_context(task),
         )
         uploaded_files = {}
-        for asset in workflow.assets_for_task(task):
-            asset_path = resolve_asset_path(asset, settings)
-            try:
-                uploaded_files[asset.name] = client.upload_file(asset_path)
-            except RunningHubError as exc:
-                exc.diagnostics.setdefault("asset_slot", asset.name)
-                exc.diagnostics.setdefault(
-                    "asset_original_name",
-                    asset.original_name,
-                )
-                if asset_path.is_file():
-                    for key, value in runninghub_upload_diagnostics(
-                        asset_path.stat().st_size
-                    ).items():
-                        exc.diagnostics.setdefault(key, value)
-                raise
+        with tempfile.TemporaryDirectory(prefix="runninghub-upload-") as work_dir:
+            for asset in workflow.assets_for_task(task):
+                asset_path = resolve_asset_path(asset, settings)
+                upload_path = asset_path
+                if task.workflow_type == "digital_human" and asset.name == "audio":
+                    padding_seconds = generation_tail_padding_seconds(task)
+                    if padding_seconds > 0:
+                        upload_path = Path(work_dir) / "audio-with-tail.mp3"
+                        add_silence_tail(
+                            asset_path,
+                            upload_path,
+                            padding_seconds=padding_seconds,
+                        )
+                try:
+                    uploaded_files[asset.name] = client.upload_file(upload_path)
+                except RunningHubError as exc:
+                    exc.diagnostics.setdefault("asset_slot", asset.name)
+                    exc.diagnostics.setdefault(
+                        "asset_original_name",
+                        asset.original_name,
+                    )
+                    if upload_path.is_file():
+                        for key, value in runninghub_upload_diagnostics(
+                            upload_path.stat().st_size
+                        ).items():
+                            exc.diagnostics.setdefault(key, value)
+                    raise
         payload = workflow.build_payload(
             task,
             uploaded_files,
@@ -770,6 +789,7 @@ def run_once() -> int:
         while pending_task_id := claim_next_pending_task(db):
             process_task(db, pending_task_id)
             processed += 1
+        processed += process_pending_video_merges(db, get_settings())
     return processed
 
 
@@ -781,8 +801,11 @@ def main() -> None:
     settings.outputs_dir.mkdir(parents=True, exist_ok=True)
     with SessionLocal() as db:
         recovered = recover_interrupted_tasks(db)
+        recovered_merges = recover_interrupted_video_merges(db)
         if recovered:
             logger.info("恢复了 %s 个未提交的中断任务", recovered)
+        if recovered_merges:
+            logger.info("恢复了 %s 个中断的完整视频合并任务", recovered_merges)
     log_event(
         logger,
         "video.worker_started",

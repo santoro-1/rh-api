@@ -4,8 +4,37 @@ import json
 from typing import Any
 
 from app.models import GenerationTask
-from app.services.audio import format_timecode, validate_time_range
+from app.services.audio import (
+    format_duration_timecode,
+    format_timecode,
+    validate_time_range,
+)
 from app.workflows.base import WorkflowAsset, WorkflowOutput
+
+
+DIGITAL_HUMAN_MAX_SECONDS = 45.0
+DIGITAL_HUMAN_TAIL_PADDING_SECONDS = 0.5
+
+
+def generation_tail_padding_seconds(task: GenerationTask) -> float:
+    """Return safe padding for full-range batch inputs without crossing 45 s."""
+
+    if not (
+        getattr(task, "batch_item_id", None)
+        or getattr(task, "segment_id", None)
+    ):
+        return 0.0
+    if task.start_seconds > 0.001:
+        return 0.0
+    if task.end_seconds + 0.01 < task.audio_duration_seconds:
+        return 0.0
+    return max(
+        0.0,
+        min(
+            DIGITAL_HUMAN_TAIL_PADDING_SECONDS,
+            DIGITAL_HUMAN_MAX_SECONDS - task.audio_duration_seconds,
+        ),
+    )
 
 
 class DigitalHumanWorkflow:
@@ -170,6 +199,11 @@ class DigitalHumanWorkflow:
             "end_time": str(values.get("end_time") or format_timecode(task.end_seconds)),
             "prompt": str(values.get("prompt") or task.prompt),
         }
+        tail_padding = generation_tail_padding_seconds(task)
+        if tail_padding > 0:
+            values["end_time"] = format_duration_timecode(
+                task.audio_duration_seconds + tail_padding
+            )
         nodes = [
             {
                 "nodeId": node_id,

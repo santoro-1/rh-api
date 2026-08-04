@@ -5,7 +5,13 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from app.services.processes import hidden_creation_flags
+from media_node.apply_portable_update import (
+    PortableUpdateError,
+    apply_update,
+)
 from media_node.create_portable_zip import create_archive
 from scripts.local_services import _process_alive
 
@@ -87,17 +93,37 @@ def test_windows_media_node_has_a_self_contained_portable_builder():
     assert 'Join-Path $projectRoot "app"' in builder
     assert 'Join-Path $nodeRoot ".runtime\\models"' in builder
     assert "create_portable_zip.py" in builder
+    assert "UpdateOnly" in builder
+    assert '"rh-media-$packageKind-$revision"' in builder
+    assert '"--flat"' in builder
     assert "allowZip64=True" in zip_builder
     assert "path.relative_to(root).as_posix()" in zip_builder
+    assert '"import fastapi, funasr, modelscope, mutagen' in builder
+    assert '$env:PYTHONNOUSERSITE = "1"' in builder
+    assert builder.count('"-s"') >= 2
     assert "IncludeLocalConfig" in builder
     assert '"MEDIA_WORKER_ID="' in builder
     assert '"$revision-dirty"' in builder
     assert "MEDIA_NODE_PORTABLE" in launcher
     assert "MEDIA_NODE_PYTHON" in launcher
+    assert "except ModuleNotFoundError as exc" in launcher
+    assert "install-media-node.ps1" in launcher
     assert "python\\python.exe" in portable_start
     assert "ffmpeg\\bin" in portable_start
+    assert "portable-runtime.txt" in portable_start
+    assert "runtime-required.txt" in portable_start
     assert 'os.getenv("MEDIA_WORKER_ID", "").strip()' in worker
     assert "MEDIA_WORKER_ID=\n" in environment
+
+    installer = (node / "install-media-node.ps1").read_text(encoding="utf-8")
+    assert '"import fastapi, funasr, modelscope, mutagen' in installer
+    assert '"-s"' in installer
+
+    for command_file in (node / "portable").glob("*.cmd"):
+        command_bytes = command_file.read_bytes()
+        assert all(byte < 128 for byte in command_bytes), (
+            f"{command_file.name} must stay ASCII-only for cmd.exe compatibility"
+        )
 
 
 def test_portable_zip_preserves_chinese_launcher_names(tmp_path):
@@ -113,6 +139,66 @@ def test_portable_zip_preserves_chinese_launcher_names(tmp_path):
         assert package.testzip() is None
         assert "portable-node/启动媒体节点.cmd" in package.namelist()
         assert "portable-node/使用说明.txt" in package.namelist()
+
+    flat_archive = tmp_path / "portable-node-flat.zip"
+    create_archive(source, flat_archive, include_root=False)
+    with zipfile.ZipFile(flat_archive) as package:
+        assert "启动媒体节点.cmd" in package.namelist()
+        assert not any(name.startswith("portable-node/") for name in package.namelist())
+
+
+def test_portable_code_update_preserves_runtime_config_and_creates_backup(tmp_path):
+    root = tmp_path / "rh"
+    (root / "python").mkdir(parents=True)
+    (root / "python" / "python.exe").write_bytes(b"portable")
+    (root / "portable-runtime.txt").write_text("runtime-v1\n", encoding="utf-8")
+    (root / "app").mkdir()
+    (root / "app" / "old.py").write_text("old", encoding="utf-8")
+    (root / "media_node").mkdir()
+    (root / "media_node" / "worker.py").write_text("old", encoding="utf-8")
+    (root / "media_node" / ".env").write_text("SECRET=keep", encoding="utf-8")
+    archive = tmp_path / "rh-media-update-test.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr(
+            "portable-update.json",
+            '{"formatVersion":1,"revision":"test","runtimeId":"runtime-v1"}',
+        )
+        package.writestr("app/new.py", "new")
+        package.writestr("media_node/worker.py", "updated")
+        package.writestr("media_node/.env.example", "EXAMPLE=1")
+
+    backup = apply_update(archive, root)
+
+    assert backup.is_file()
+    assert (root / "app" / "new.py").read_text(encoding="utf-8") == "new"
+    assert (root / "media_node" / "worker.py").read_text(encoding="utf-8") == "updated"
+    assert (root / "media_node" / ".env").read_text(encoding="utf-8") == "SECRET=keep"
+
+
+def test_portable_code_update_rejects_runtime_mismatch_and_private_files(tmp_path):
+    root = tmp_path / "rh"
+    (root / "python").mkdir(parents=True)
+    (root / "python" / "python.exe").write_bytes(b"portable")
+    (root / "portable-runtime.txt").write_text("runtime-v1\n", encoding="utf-8")
+    mismatch = tmp_path / "mismatch.zip"
+    with zipfile.ZipFile(mismatch, "w") as package:
+        package.writestr(
+            "portable-update.json",
+            '{"formatVersion":1,"revision":"test","runtimeId":"runtime-v2"}',
+        )
+        package.writestr("media_node/worker.py", "updated")
+    with pytest.raises(PortableUpdateError, match="完整包"):
+        apply_update(mismatch, root)
+
+    private = tmp_path / "private.zip"
+    with zipfile.ZipFile(private, "w") as package:
+        package.writestr(
+            "portable-update.json",
+            '{"formatVersion":1,"revision":"test","runtimeId":"runtime-v1"}',
+        )
+        package.writestr("media_node/.env", "SECRET=overwrite")
+    with pytest.raises(PortableUpdateError, match="配置或数据"):
+        apply_update(private, root)
 
 
 def test_remote_media_worker_switch_is_explicit_and_reversible():
@@ -251,6 +337,28 @@ def test_nginx_template_supports_current_upload_limit_and_proxy_headers():
     assert "proxy_pass http://127.0.0.1:18083;" in config
     assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in config
     assert "Content-Security-Policy" in config
+
+
+def test_documentation_has_one_current_developer_entrypoint():
+    guide = (PROJECT_ROOT / "DEVELOPER_GUIDE.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    status = (PROJECT_ROOT / "PROJECT_STATUS.md").read_text(encoding="utf-8")
+
+    assert "## 2. 运行架构" in guide
+    assert "## 3. 核心业务流程" in guide
+    assert "## 4. 状态机与重试语义" in guide
+    assert "## 8. 自动化测试与质量门槛" in guide
+    assert "## 9. Windows 媒体节点开发与分发" in guide
+    assert "## 11. 生产发布与回滚" in guide
+    assert "0018_segment_video_merge" in guide
+    assert "MEDIA_PROCESSING_MODE" in guide
+    assert "RUNNINGHUB_AUTO_RETRY_LIMIT" in guide
+    assert "rh-media-update-*.zip" in guide
+    assert "FunASR" in guide
+    assert "[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)" in readme
+    assert "当前技术事实以开发者指南" in readme
+    assert "当前架构、状态机、开发、测试和部署总说明" in status
+    assert "当前没有接入外部强制对齐或 ASR 服务" not in status
 
 
 def test_backup_timer_and_restore_confirmation_are_present():

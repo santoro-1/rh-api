@@ -20,5 +20,8 @@ RunningHub 独立媒体节点（Windows 64 位）
 - 不要在多台电脑上填写相同的 MEDIA_WORKER_ID，否则日志难以区分。
 
 更新：
-- 新版本请重新生成并解压便携包，不要只替换单个 Python 文件。
-- 可以保留旧包 media_node\.env 和 media_node\.runtime\models，再复制到新包中。
+- 普通代码更新不需要重新下载完整包。把 rh-media-update-*.zip 放到本目录，先关闭
+  媒体节点，再双击“更新媒体节点.cmd”。
+- 更新程序只覆盖代码，会保留 media_node\.env、模型、Python、FFmpeg、日志和数据，
+  并在 updates\backups 下自动备份更新前代码。
+- 如果提示运行环境不兼容，说明 Python 依赖或模型要求已经变化，需要下载新的完整包。

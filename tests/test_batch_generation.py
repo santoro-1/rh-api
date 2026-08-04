@@ -606,6 +606,7 @@ def test_uploaded_batch_automatically_expands_only_long_audio_rows(
         "audioMode": "upload",
         "requestKey": "mixed-duration-batch-request",
         "longAudioReviewRequired": True,
+        "videoReviewRequired": True,
         "assetIds": [video_id, short_audio_id, long_audio_id],
         "batchParameters": {
             "instance_type": "plus",
@@ -642,6 +643,7 @@ def test_uploaded_batch_automatically_expands_only_long_audio_rows(
         assert batch is not None
         assert batch.total_items == 2
         assert batch.review_required is True
+        assert batch.video_review_required is True
         assert items[0].generation_task is not None
         assert items[1].generation_task is None
         assert items[1].status == "SEGMENTING"
@@ -1251,7 +1253,7 @@ def test_batch_navigation_detail_return_and_zip_download(client, monkeypatch):
 
     detail = client.get(f"/batches/{batch_id}")
     assert detail.status_code == 200
-    assert "下载当前批次（1 个视频）" in detail.text
+    assert "下载当前批次分段（1 个视频）" in detail.text
     task_detail = client.get(f"/tasks/{task_id}")
     assert f'href="/batches/{batch_id}"' in task_detail.text
     assert "返回所属批次" in task_detail.text

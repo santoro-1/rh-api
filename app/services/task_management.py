@@ -44,22 +44,7 @@ def prepare_task_retry(
         task.status = TaskStatus.RUNNING.value
         task.runninghub_submitted_at = retry_time
     else:
-        try:
-            workflow = get_workflow(task.workflow_type)
-            assets = workflow.assets_for_task(task)
-            missing = [
-                asset.original_name
-                for asset in assets
-                if not resolve_asset_path(asset, settings).is_file()
-            ]
-        except ValueError as exc:
-            raise TaskManagementError(
-                "原上传素材不可用，无法重试；请重新创建任务"
-            ) from exc
-        if missing:
-            raise TaskManagementError(
-                "原上传素材已清理，无法重试；请重新创建任务"
-            )
+        _ensure_task_assets(task, settings)
         remove_directory(task_output_dir(settings, task.user_id, task.id))
         task.runninghub_task_id = None
         task.runninghub_submitted_at = None
@@ -74,6 +59,53 @@ def prepare_task_retry(
     task.error_code = None
     task.error_message = None
     task.runninghub_failed_reason = None
+    task.runninghub_auto_retry_count = 0
+    task.runninghub_auto_retry_after = None
+    task.completed_at = None
+
+
+def _ensure_task_assets(task: GenerationTask, settings: Settings) -> None:
+    try:
+        workflow = get_workflow(task.workflow_type)
+        assets = workflow.assets_for_task(task)
+        missing = [
+            asset.original_name
+            for asset in assets
+            if not resolve_asset_path(asset, settings).is_file()
+        ]
+    except ValueError as exc:
+        raise TaskManagementError(
+            "原上传素材不可用，无法重新生成；请重新创建任务"
+        ) from exc
+    if missing:
+        raise TaskManagementError(
+            "原上传素材已清理，无法重新生成；请重新创建任务"
+        )
+
+
+def prepare_successful_segment_regeneration(
+    task: GenerationTask,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Replace one successful segmented result after an explicit paid action."""
+
+    if task.status != TaskStatus.SUCCESS.value or not task.segment_id:
+        raise TaskManagementError("只有成功的分段视频可以重新生成")
+    _ensure_task_assets(task, settings)
+    retry_time = now or datetime.now(timezone.utc)
+    remove_directory(task_output_dir(settings, task.user_id, task.id))
+    task.runninghub_task_id = None
+    task.runninghub_submitted_at = None
+    task.runninghub_failed_reason = None
+    task.runninghub_usage = None
+    task.result_path = None
+    task.output_metadata = None
+    task.status = TaskStatus.PENDING.value
+    task.created_at = retry_time
+    task.error_code = None
+    task.error_message = None
     task.runninghub_auto_retry_count = 0
     task.runninghub_auto_retry_after = None
     task.completed_at = None

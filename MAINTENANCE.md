@@ -16,6 +16,7 @@ app/services/batch_lifecycle.py 批次失败重试、终态删除和文件清理
 app/services/audio_review.py 完整语音审核、整批通过和再次生成状态转换
 app/services/speech/         MiniMax 协议、异步结果和声音制作任务
 app/services/media_segmentation.py 音频/视频探测、分段计划和 FFmpeg 切割
+app/services/video_merge.py 分段结果按顺序统一规格、拼接、失效和成片审核状态
 app/workers/audio_worker.py  领取脚本语音队列、生成整段音频、审核后切分和视频交接
 app/services/speech/voice_jobs.py 克隆/融合试听、付费保护和保存音色
 app/workers/task_worker.py   按用户并发限制领取 FIFO 视频任务并调用 RunningHub
@@ -135,5 +136,7 @@ git diff --check
 涉及页面时再手工检查桌面宽度、窄屏、长脚本、横向滚动和实时更新。涉及真实
 RunningHub/MiniMax 的测试必须明确提示费用，自动化测试只使用 mock。
 
-完成后更新 `CHANGELOG.md` 和 `PROJECT_STATUS.md`。服务器部署前还应完成数据库备份、
-恢复演练、生产环境检查和一次独立测试环境验证。
+完成后按影响范围更新文档：用户可见变化写入 `CHANGELOG.md`；架构、数据流、状态机、
+配置或发布方式变化写入 `DEVELOPER_GUIDE.md`；阶段决策和历史交接才写入
+`PROJECT_STATUS.md`。服务器部署前还应完成数据库备份、恢复演练、生产环境检查和
+一次独立测试环境验证。

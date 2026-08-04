@@ -5,7 +5,12 @@ import zipfile
 from pathlib import Path
 
 
-def create_archive(source: Path, archive: Path) -> None:
+def create_archive(
+    source: Path,
+    archive: Path,
+    *,
+    include_root: bool = True,
+) -> None:
     source = source.resolve()
     archive = archive.resolve()
     if not source.is_dir():
@@ -17,7 +22,7 @@ def create_archive(source: Path, archive: Path) -> None:
     total_bytes = sum(path.stat().st_size for path in files)
     written_bytes = 0
     next_report = 256 * 1024 * 1024
-    root = source.parent
+    root = source.parent if include_root else source
     try:
         with zipfile.ZipFile(
             archive,
@@ -46,10 +51,22 @@ def create_archive(source: Path, archive: Path) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("用法：create_portable_zip.py <源目录> <输出 ZIP>", file=sys.stderr)
+    arguments = sys.argv[1:]
+    include_root = True
+    if arguments and arguments[0] == "--flat":
+        include_root = False
+        arguments = arguments[1:]
+    if len(arguments) != 2:
+        print(
+            "用法：create_portable_zip.py [--flat] <源目录> <输出 ZIP>",
+            file=sys.stderr,
+        )
         return 2
-    create_archive(Path(sys.argv[1]), Path(sys.argv[2]))
+    create_archive(
+        Path(arguments[0]),
+        Path(arguments[1]),
+        include_root=include_root,
+    )
     return 0
 
 

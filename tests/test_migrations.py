@@ -65,12 +65,32 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('long_audio_projects')"
             )
         }
-    assert revision == "0017_batch_long_audio"
+        batch_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('generation_batches')"
+            )
+        }
+        item_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('generation_batch_items')"
+            )
+        }
+    assert revision == "0018_segment_video_merge"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
     assert "runninghub_auto_retry_after" in task_columns
     assert "batch_item_id" in long_audio_columns
+    assert "video_review_required" in batch_columns
+    assert {
+        "merged_video_status",
+        "merged_video_path",
+        "merged_video_error",
+        "merged_at",
+        "merged_reviewed_at",
+    } <= item_columns
 
 
 def test_audio_review_migration_preserves_existing_batch_items():
@@ -189,7 +209,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0017_batch_long_audio"
+        assert version == "0018_segment_video_merge"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:

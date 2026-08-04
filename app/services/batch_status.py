@@ -54,6 +54,14 @@ STATUS_LABELS = {
     "FAILED": "失败",
     "DOWNLOAD_FAILED": "下载失败",
     "CANCELLED": "已取消",
+    "MERGE_PENDING": "等待拼接完整视频",
+    "MERGING": "正在拼接完整视频",
+    "AWAITING_VIDEO_REVIEW": "等待完整视频审核",
+    "READY": "完整视频可用",
+    "PREVIEW_READY": "快速拼接预览可用，等待人工处理",
+    "MERGE_FAILED": "完整视频拼接失败",
+    "AUTO_READY": "可自动进入BGM和字幕",
+    "MANUAL_READY": "等待人工处理",
 }
 
 TERMINAL_VIDEO_STATUSES = {
@@ -68,6 +76,10 @@ def item_display_status(item: GenerationBatchItem) -> str:
     """Aggregate one user-visible row without hiding segment failures."""
 
     if item.generation_task:
+        if item.generation_task.status == TaskStatus.SUCCESS.value:
+            from app.services.postproduction import postproduction_status
+
+            return postproduction_status(item)
         return item.generation_task.status
     if item.segments:
         statuses = [
@@ -88,7 +100,19 @@ def item_display_status(item: GenerationBatchItem) -> str:
                 item.status,
             )
         if all(status == TaskStatus.SUCCESS.value for status in statuses):
-            return TaskStatus.SUCCESS.value
+            if item.merged_video_status in {
+                "MERGE_PENDING",
+                "MERGING",
+                "AWAITING_VIDEO_REVIEW",
+            }:
+                return item.merged_video_status
+            if item.merged_video_status == "MERGE_FAILED":
+                return "MERGE_FAILED"
+            from app.services.postproduction import postproduction_status
+
+            return postproduction_status(item)
+        if all(status == TaskStatus.CANCELLED.value for status in statuses):
+            return TaskStatus.CANCELLED.value
         if any(status == TaskStatus.SUCCESS.value for status in statuses):
             return "PARTIAL_FAILED"
         return TaskStatus.FAILED.value
@@ -228,6 +252,23 @@ def summarize_batch(batch: GenerationBatch) -> dict[str, Any]:
             for task in audio_only
         )
         + sum(item.status == "AWAITING_REVIEW" for item in media_only),
+        "merging": sum(
+            item.merged_video_status in {"MERGE_PENDING", "MERGING"}
+            for item in batch.items
+        ),
+        "awaitingVideoReview": sum(
+            item.merged_video_status == "AWAITING_VIDEO_REVIEW"
+            for item in batch.items
+        ),
+        "completeVideos": sum(
+            item.merged_video_status
+            in {"AWAITING_VIDEO_REVIEW", "READY", "PREVIEW_READY"}
+            for item in batch.items
+        ),
+        "mergeFailed": sum(
+            item.merged_video_status == "MERGE_FAILED"
+            for item in batch.items
+        ),
     }
 
     # row_results evaluates one manifest row, not one provider call. A long
@@ -249,7 +290,19 @@ def summarize_batch(batch: GenerationBatch) -> dict[str, Any]:
             if all(
                 task.status == TaskStatus.SUCCESS.value for task in item_tasks
             ):
-                row_results.append("SUCCESS")
+                if item.segments and item.merged_video_status in {
+                    "MERGE_PENDING",
+                    "MERGING",
+                    "AWAITING_VIDEO_REVIEW",
+                }:
+                    row_results.append("ACTIVE")
+                elif (
+                    item.segments
+                    and item.merged_video_status == "MERGE_FAILED"
+                ):
+                    row_results.append("PARTIAL_FAILED")
+                else:
+                    row_results.append("SUCCESS")
             elif any(
                 task.status == TaskStatus.SUCCESS.value for task in item_tasks
             ):
@@ -341,6 +394,11 @@ def batch_view_revision(batch: GenerationBatch) -> str:
                     ]
                     for segment in item.segments
                 ],
+                "mergedVideo": [
+                    item.merged_video_status,
+                    item.merged_video_path,
+                    item.merged_video_error,
+                ],
             }
         )
     return json.dumps(structure, ensure_ascii=False, separators=(",", ":"))
@@ -348,6 +406,11 @@ def batch_view_revision(batch: GenerationBatch) -> str:
 
 def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
     """Return the compact item/segment payload used by in-place polling."""
+
+    from app.services.postproduction import (
+        postproduction_mode,
+        postproduction_status,
+    )
 
     return [
         {
@@ -361,8 +424,13 @@ def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
             "errorMessage": (
                 item.generation_task.error_message
                 if item.generation_task
-                else item.error_message
+                else (item.merged_video_error or item.error_message)
             ),
+            "mergedVideoStatus": item.merged_video_status,
+            "mergedVideoPath": item.merged_video_path,
+            "mergedVideoError": item.merged_video_error,
+            "postproductionMode": postproduction_mode(item),
+            "postproductionStatus": postproduction_status(item),
             "autoRetryCount": (
                 item.generation_task.runninghub_auto_retry_count
                 if item.generation_task

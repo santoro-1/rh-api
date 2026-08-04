@@ -19,6 +19,7 @@ from app.database import get_db
 from app.models import (
     AudioTaskStatus,
     GenerationBatch,
+    GenerationSegment,
     LongAudioProjectStatus,
     MiniMaxVoiceAsset,
     User,
@@ -77,6 +78,25 @@ from app.services.storage import (
     to_relative_data_path,
 )
 from app.services.task_management import RETRYABLE_TASK_STATUSES
+from app.services.task_management import (
+    TaskManagementError,
+    prepare_successful_segment_regeneration,
+)
+from app.services.postproduction import (
+    postproduction_manifest,
+    postproduction_mode,
+    postproduction_status,
+)
+from app.services.video_merge import (
+    AWAITING_VIDEO_REVIEW,
+    MERGE_FAILED,
+    MERGED_VIDEO_READY,
+    MERGED_PREVIEW_READY,
+    VideoMergeError,
+    approve_merged_video,
+    invalidate_merged_video,
+    retry_video_merge,
+)
 from app.services.task_cancellation import (
     TaskCancellationError,
     cancel_generation_task,
@@ -92,6 +112,13 @@ router = APIRouter(tags=["batches"])
 def _ensure_batch_access(batch: GenerationBatch, user: User) -> None:
     if batch.user_id != user.id and not user.is_admin:
         raise HTTPException(status_code=404, detail="批次不存在")
+
+
+def _batch_item(batch: GenerationBatch, item_id: str):
+    item = next((candidate for candidate in batch.items if candidate.id == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="批次任务不存在")
+    return item
 
 
 def _archive_name(value: str, fallback: str) -> str:
@@ -274,6 +301,7 @@ def _body_parts(
     dict[str, str],
     dict[str, Any],
     bool,
+    bool,
 ]:
     audio_mode = str(body.get("audioMode") or "upload")
     workflow_type = str(body.get("workflowType") or "")
@@ -282,6 +310,7 @@ def _body_parts(
     raw_batch_parameters = body.get("batchParameters") or {}
     raw_speech_options = body.get("speechOptions") or {}
     review_required = body.get("longAudioReviewRequired") is True
+    video_review_required = body.get("videoReviewRequired") is True
     if not isinstance(raw_rows, list) or not all(
         isinstance(row, dict) for row in raw_rows
     ):
@@ -309,6 +338,7 @@ def _body_parts(
         batch_parameters,
         raw_speech_options,
         review_required,
+        video_review_required,
     )
 
 
@@ -331,6 +361,7 @@ async def validate_batch_request(
         batch_parameters,
         speech_options,
         review_required,
+        video_review_required,
     ) = _body_parts(body)
     try:
         plan = validate_batch(
@@ -344,6 +375,7 @@ async def validate_batch_request(
             audio_mode=audio_mode,
             speech_options=speech_options,
             review_required=review_required,
+            video_review_required=video_review_required,
         )
     except BatchValidationError as exc:
         return JSONResponse(
@@ -378,6 +410,7 @@ async def create_batch_request(
         batch_parameters,
         speech_options,
         review_required,
+        video_review_required,
     ) = _body_parts(body)
     request_key = str(body.get("requestKey") or "").strip()
     existing = db.scalar(
@@ -405,6 +438,7 @@ async def create_batch_request(
             audio_mode=audio_mode,
             speech_options=speech_options,
             review_required=review_required,
+            video_review_required=video_review_required,
         )
         batch, created_directories = create_batch(
             db,
@@ -449,6 +483,54 @@ def batch_status(
         "viewRevision": batch_view_revision(batch),
         "items": batch_detail_status(batch),
     }
+
+
+@router.get("/api/batches/{batch_id}/items/{item_id}/postproduction")
+def batch_item_postproduction_manifest(
+    batch_id: str,
+    item_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Expose the exact editor hand-off without starting a paid task."""
+
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    return postproduction_manifest(_batch_item(batch, item_id), get_settings())
+
+
+@router.get("/batches/{batch_id}/items/{item_id}/postproduction")
+def batch_item_postproduction_page(
+    batch_id: str,
+    item_id: str,
+    request: Request,
+    current_user: User = Depends(get_page_user),
+    db: Session = Depends(get_db),
+):
+    """Human-readable editor hand-off page; the API route remains machine-readable."""
+
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    item = _batch_item(batch, item_id)
+    manifest = postproduction_manifest(item, get_settings())
+    return templates.TemplateResponse(
+        request,
+        "postproduction_detail.html",
+        {
+            "current_user": current_user,
+            "batch": batch,
+            "item": item,
+            "manifest": manifest,
+            "current_status": item_display_status(item),
+            "current_status_label": STATUS_LABELS.get(
+                item_display_status(item), item_display_status(item)
+            ),
+        },
+    )
 
 
 @router.get("/api/batch-templates/{workflow_type}.csv")
@@ -553,6 +635,12 @@ def batch_detail_page(
             "item_statuses": {
                 item.id: item_display_status(item) for item in batch.items
             },
+            "postproduction_modes": {
+                item.id: postproduction_mode(item) for item in batch.items
+            },
+            "postproduction_statuses": {
+                item.id: postproduction_status(item) for item in batch.items
+            },
             "active_statuses": ACTIVE_VIDEO_STATUSES,
             "retryable_statuses": RETRYABLE_TASK_STATUSES,
             "status_labels": STATUS_LABELS,
@@ -645,6 +733,147 @@ def download_segment_audio(
         filename=f"{segment.batch_item.row_key}-{segment.segment_index:03d}.mp3",
         media_type="audio/mpeg",
     )
+
+
+def _merged_video_response(
+    batch: GenerationBatch,
+    item_id: str,
+    *,
+    download: bool,
+) -> FileResponse:
+    item = _batch_item(batch, item_id)
+    if (
+        item.merged_video_status
+        not in {
+            AWAITING_VIDEO_REVIEW,
+            MERGED_VIDEO_READY,
+            MERGED_PREVIEW_READY,
+        }
+        or not item.merged_video_path
+    ):
+        raise HTTPException(status_code=404, detail="完整视频尚不可用")
+    try:
+        path = safe_relative_path(item.merged_video_path, get_settings().data_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="完整视频不存在") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="完整视频不存在")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=(
+            f"{_archive_name(item.row_key, item.id)}-complete.mp4"
+            if download
+            else None
+        ),
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
+@router.get("/batches/{batch_id}/items/{item_id}/merged-video")
+def preview_merged_video(
+    batch_id: str,
+    item_id: str,
+    current_user: User = Depends(get_page_user),
+    db: Session = Depends(get_db),
+):
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    return _merged_video_response(batch, item_id, download=False)
+
+
+@router.get("/batches/{batch_id}/items/{item_id}/merged-video/download")
+def download_merged_video(
+    batch_id: str,
+    item_id: str,
+    current_user: User = Depends(get_page_user),
+    db: Session = Depends(get_db),
+):
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    return _merged_video_response(batch, item_id, download=True)
+
+
+@router.post("/batches/{batch_id}/items/{item_id}/approve-video")
+def approve_complete_video(
+    batch_id: str,
+    item_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del csrf_ok
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    try:
+        approve_merged_video(_batch_item(batch, item_id))
+    except VideoMergeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    return RedirectResponse(f"/batches/{batch.id}", status_code=303)
+
+
+@router.post("/batches/{batch_id}/items/{item_id}/retry-video-merge")
+def retry_complete_video_merge(
+    batch_id: str,
+    item_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del csrf_ok
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    try:
+        retry_video_merge(_batch_item(batch, item_id), get_settings())
+    except (OSError, VideoMergeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    return RedirectResponse(f"/batches/{batch.id}", status_code=303)
+
+
+@router.post("/batches/{batch_id}/segments/{segment_id}/regenerate")
+def regenerate_successful_segment(
+    batch_id: str,
+    segment_id: str,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del csrf_ok
+    batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    _ensure_batch_access(batch, current_user)
+    segment = next(
+        (
+            candidate
+            for item in batch.items
+            for candidate in item.segments
+            if candidate.id == segment_id
+        ),
+        None,
+    )
+    if segment is None or segment.generation_task is None:
+        raise HTTPException(status_code=404, detail="分段任务不存在")
+    try:
+        prepare_successful_segment_regeneration(
+            segment.generation_task,
+            get_settings(),
+        )
+        invalidate_merged_video(segment.batch_item, get_settings())
+    except (OSError, TaskManagementError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    return RedirectResponse(f"/batches/{batch.id}", status_code=303)
 
 
 @router.get("/batches/{batch_id}/items/{item_id}/audio")
@@ -885,6 +1114,16 @@ def cancel_batch(
         except (TaskCancellationError, RunningHubError):
             db.rollback()
             failed += 1
+    for item in batch.items:
+        child_tasks = [
+            segment.generation_task
+            for segment in item.segments
+            if segment.generation_task is not None
+        ]
+        if child_tasks and all(task.status == "CANCELLED" for task in child_tasks):
+            item.merged_video_status = "NOT_APPLICABLE"
+            item.merged_video_error = None
+    db.commit()
     return RedirectResponse(
         f"/batches/{batch.id}?cancelled={cancelled}&cancelFailed={failed}",
         status_code=303,

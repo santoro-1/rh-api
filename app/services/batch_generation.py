@@ -113,6 +113,7 @@ class BatchPlan:
     assets: list[StagedAsset]
     speech_options: SpeechBatchOptions | None = None
     review_required: bool = False
+    video_review_required: bool = False
 
 
 def _person_mode(value: str) -> str:
@@ -291,6 +292,7 @@ def validate_batch(
     audio_mode: str = "upload",
     speech_options: dict[str, Any] | None = None,
     review_required: bool = False,
+    video_review_required: bool = False,
 ) -> BatchPlan:
     """Return every row error together; no task is written during validation."""
 
@@ -718,6 +720,7 @@ def validate_batch(
                 and resolved_speech_options.review_required
             )
         ),
+        video_review_required=bool(video_review_required),
     )
 
 
@@ -758,6 +761,7 @@ def create_batch(
         workflow_type=plan.workflow_type,
         audio_mode=plan.audio_mode,
         review_required=plan.review_required,
+        video_review_required=plan.video_review_required,
         request_key=request_key,
         status="ACTIVE",
         total_items=len(plan.rows),

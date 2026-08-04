@@ -693,6 +693,9 @@ def materialize_long_audio_project(
                 created_at=created_at,
             )
         item.status = "SEGMENTS_CREATED"
+        item.merged_video_status = "MERGE_PENDING"
+        item.merged_video_path = None
+        item.merged_video_error = None
         if project.batch_item_id is None:
             project.batch_id = batch.id
             project.batch_item = item

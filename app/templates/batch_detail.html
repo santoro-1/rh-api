@@ -13,7 +13,7 @@
   </div>
   <div class="button-row">
     {% if summary.success %}
-      <a class="button" href="/batches/{{ batch.id }}/download">下载当前批次（{{ summary.success }} 个视频）</a>
+      <a class="button" href="/batches/{{ batch.id }}/download">下载当前批次分段（{{ summary.success }} 个视频）</a>
     {% endif %}
     <a class="button secondary" href="/batches/{{ batch.id }}">刷新状态</a>
     <a class="button secondary" href="/batches">返回批次任务</a>
@@ -27,6 +27,8 @@
   <div class="summary-card"><strong data-summary-key="processing">{{ summary.processing }}</strong><span>处理中</span></div>
   {% if batch.audio_mode == "minimax" %}<div class="summary-card"><strong data-summary-key="audioPreparing">{{ summary.audioPreparing }}</strong><span>准备语音</span></div>{% endif %}
   {% if batch.review_required %}<div class="summary-card review"><strong data-summary-key="awaitingReview">{{ summary.awaitingReview }}</strong><span>等待语音审核</span></div>{% endif %}
+  <div class="summary-card"><strong data-summary-key="merging">{{ summary.merging }}</strong><span>快速预览拼接中</span></div>
+  <div class="summary-card success"><strong data-summary-key="completeVideos">{{ summary.completeVideos }}</strong><span>快速拼接预览</span></div>
   <div class="summary-card success"><strong data-summary-key="success">{{ summary.success }}</strong><span>成功</span></div>
   <div class="summary-card danger"><strong data-summary-key="failed">{{ summary.failed }}</strong><span>失败</span></div>
 </section>
@@ -66,6 +68,14 @@
             <td>
               {% set item_status = item_statuses[item.id] %}
               <span data-item-status="{{ item.id }}">{{ status_labels.get(item_status, item_status) }}</span>
+              <br><small class="muted">当前阶段：{{ status_labels.get(item_status, item_status) }}</small>
+              <br><small class="muted">
+                {% if postproduction_modes[item.id] == "AUTO_POSTPROCESS" %}
+                  最终处理：文本语音且未切分，视频完成后可直接进入 BGM 和精确字幕
+                {% else %}
+                  最终处理：需要人工粗剪或确认成片后，再进入剪映工作台
+                {% endif %}
+              </small>
               {% if task %}
                 <br><small class="muted">
                   RunningHub ID：
@@ -107,8 +117,69 @@
               {% else %}
                 <span class="muted">等待完整音频完成</span>
               {% endif %}
+              <br><a href="/batches/{{ batch.id }}/items/{{ item.id }}/postproduction">查看后处理清单</a>
             </td>
           </tr>
+          {% if postproduction_modes[item.id] == "AUTO_POSTPROCESS" and item.segments|length == 1 %}
+            {% set auto_child = item.segments[0].generation_task %}
+            {% if auto_child and auto_child.status == "SUCCESS" %}
+              <tr class="batch-complete-video-row">
+                <td></td>
+                <td colspan="5">
+                  <div class="audio-review-card">
+                    <strong>自动后处理源视频 · 可进入 BGM 和精确字幕</strong>
+                    <video controls preload="metadata" style="max-width: 720px; width: 100%;" src="/api/tasks/{{ auto_child.id }}/preview"></video>
+                    <div class="audio-review-actions">
+                      <a class="button" href="/api/tasks/{{ auto_child.id }}/download">下载视频</a>
+                      <a class="button secondary" href="/batches/{{ batch.id }}/items/{{ item.id }}/postproduction">查看精确字幕后处理清单</a>
+                    </div>
+                    <small class="field-help">此任务来自文本语音且没有切分；清单携带 MiniMax 原始时间戳，不需要人工粗剪。</small>
+                  </div>
+                </td>
+              </tr>
+            {% endif %}
+          {% endif %}
+          {% if item.merged_video_status in ["AWAITING_VIDEO_REVIEW", "READY", "PREVIEW_READY"] and item.merged_video_path %}
+            <tr class="batch-complete-video-row">
+              <td></td>
+              <td colspan="5">
+                <div class="audio-review-card">
+                  <strong>
+                    {% if item.merged_video_status == "PREVIEW_READY" %}
+                      快速拼接预览 · 仅用于检查片段顺序，仍需人工粗剪
+                    {% else %}
+                      完整视频 · {{ "等待人工审核" if item.merged_video_status == "AWAITING_VIDEO_REVIEW" else "已可进入后续包装" }}
+                    {% endif %}
+                  </strong>
+                  <video controls preload="metadata" style="max-width: 720px; width: 100%;" src="/batches/{{ batch.id }}/items/{{ item.id }}/merged-video"></video>
+                  <div class="audio-review-actions">
+                    <a class="button" href="/batches/{{ batch.id }}/items/{{ item.id }}/merged-video/download">下载快速拼接预览</a>
+                    {% if item.merged_video_status == "AWAITING_VIDEO_REVIEW" %}
+                      <form method="post" action="/batches/{{ batch.id }}/items/{{ item.id }}/approve-video">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit">审核通过</button>
+                      </form>
+                    {% endif %}
+                  </div>
+                  <small class="field-help">原始分段始终保留。发现某段生成异常时，可在下面重新生成；画面接缝请在剪映中人工粗剪。</small>
+                </div>
+              </td>
+            </tr>
+          {% elif item.merged_video_status == "MERGE_FAILED" %}
+            <tr class="batch-complete-video-row">
+              <td></td>
+              <td colspan="5">
+                <div class="audio-review-card">
+                  <strong class="error-text">完整视频拼接失败</strong>
+                  <p>{{ item.merged_video_error or "请检查 FFmpeg 和分段视频文件。" }}</p>
+                  <form method="post" action="/batches/{{ batch.id }}/items/{{ item.id }}/retry-video-merge">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit">重新拼接</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% endif %}
           {% if audio_task and audio_task.status == "AWAITING_REVIEW" %}
             <tr class="batch-audio-review-row">
               <td></td>
@@ -191,11 +262,19 @@
                               <div class="segment-action-links">
                                 <a href="/batches/{{ batch.id }}/segments/{{ segment.id }}/audio">下载音频</a>
                                 {% if child %}<a href="/tasks/{{ child.id }}">查看视频</a>{% endif %}
+                                {% if child and child.status == "SUCCESS" %}<a href="/api/tasks/{{ child.id }}/download">直接下载视频</a>{% endif %}
                               </div>
                               {% if child and child.status in retryable_statuses %}
                                 <form method="post" action="/tasks/{{ child.id }}/retry" class="compact-inline-form">
                                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                                   <button type="submit">仅重试本段</button>
+                                </form>
+                              {% endif %}
+                              {% if child and child.status == "SUCCESS" and item.merged_video_status in ["AWAITING_VIDEO_REVIEW", "PREVIEW_READY", "READY"] %}
+                                <form method="post" action="/batches/{{ batch.id }}/segments/{{ segment.id }}/regenerate" class="compact-inline-form"
+                                  onsubmit="return confirm('重新生成会删除本段当前结果、再次调用 RunningHub 并产生费用，完整视频也会在新结果完成后重新拼接。确认继续吗？');">
+                                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                  <button class="button danger" type="submit">重新生成本段</button>
                                 </form>
                               {% endif %}
                             </td>
@@ -254,7 +333,7 @@
   const batchId = {{ batch.id|tojson }};
   const statusLabels = {{ status_labels|tojson }};
   const autoRetryLimit = {{ auto_retry_limit }};
-  const summaryKeys = ["total", "childTotal", "queued", "processing", "audioPreparing", "awaitingReview", "success", "failed"];
+  const summaryKeys = ["total", "childTotal", "queued", "processing", "audioPreparing", "awaitingReview", "merging", "awaitingVideoReview", "completeVideos", "success", "failed"];
   let previousStatus = {{ summary.status|tojson }};
   let renderedViewRevision = {{ view_revision|tojson }};
 

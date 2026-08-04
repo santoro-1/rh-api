@@ -18,7 +18,8 @@ powershell -ExecutionPolicy Bypass -File .\media_node\build-portable-media-node.
 ```
 
 脚本会复用当前已经验证过的媒体节点 Python 环境，并把 Python、依赖、FFmpeg、程序
-代码和现有 ASR 模型缓存打进 `dist\runninghub-media-node-windows-x64-*.zip`。目标电脑
+代码和现有 ASR 模型缓存打进 `dist\rh-media-full-*.zip`。ZIP 内部采用扁平结构，
+不会在资源管理器默认解压目录中重复套一层长名称。目标电脑
 不需要安装 Python、FFmpeg，也不需要完整仓库；解压后先双击“配置媒体节点.cmd”，
 再双击“启动媒体节点.cmd”即可。
 
@@ -35,6 +36,19 @@ powershell -ExecutionPolicy Bypass -File .\media_node\build-portable-media-node.
 
 模型缓存约 1GB。希望减小压缩包、允许新电脑首次使用时联网下载模型，可加
 `-WithoutModels`。希望打包后保留未压缩目录用于本机验证，可加 `-KeepExpanded`。
+
+普通代码更新不必重新生成约 1.3GB 的完整包。开发电脑运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\media_node\build-portable-media-node.ps1 `
+  -UpdateOnly
+```
+
+会生成通常只有几 MB 的 `dist\rh-media-update-*.zip`。把它放进固定电脑已经解压的
+媒体节点根目录，先关闭节点，再双击“更新媒体节点.cmd”即可。更新程序会验证基础
+运行环境版本，只覆盖 `app`、`media_node` 和启动脚本；不会覆盖 `.env`、Token、
+模型、Python、FFmpeg、日志或工作数据，并会在 `updates\backups` 自动备份旧代码。
+如果 Python 依赖或模型兼容版本发生变化，小更新会拒绝执行并提示改用新的完整包。
 
 ## 多节点如何分配任务
 

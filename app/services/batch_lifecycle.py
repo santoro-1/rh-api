@@ -24,6 +24,7 @@ from app.services.task_management import (
     TaskManagementError,
     prepare_task_retry,
 )
+from app.services.video_merge import merged_video_output_dir
 
 
 class BatchLifecycleError(ValueError):
@@ -160,6 +161,10 @@ def _deletion_directories(
     task_ids = {task.id for task in tasks}
     media_directories: list[Path] = []
     for item in batch.items:
+        if item.merged_video_path or item.merged_video_status != "NOT_APPLICABLE":
+            media_directories.append(
+                merged_video_output_dir(settings, batch.user_id, item.id)
+            )
         if item.long_audio_project is not None:
             media_directories.append(
                 long_audio_project_dir(

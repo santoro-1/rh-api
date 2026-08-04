@@ -157,6 +157,44 @@ def test_digital_human_adapter_uses_video_output_and_rejects_bad_parameters():
     assert output.extension == "mp4"
 
 
+def test_digital_human_batch_payload_adds_safe_silent_tail_window():
+    workflow = get_workflow("digital_human")
+    parameters = workflow.validate_parameters(
+        {"prompt": "完整口播", "start_time": "0:00", "end_time": "0:31"},
+        {"audio_duration_seconds": 30.9},
+    )
+    task = SimpleNamespace(
+        input_payload=json.dumps(
+            workflow.serialize_input(
+                [
+                    WorkflowAsset("image", "image", "image.png", "image.png"),
+                    WorkflowAsset("audio", "audio", "audio.mp3", "audio.mp3"),
+                ],
+                parameters,
+                {"audio_duration_seconds": 30.9},
+            )
+        ),
+        audio_duration_seconds=30.9,
+        start_seconds=0,
+        end_seconds=31,
+        prompt="完整口播",
+        segment_id="segment-1",
+        batch_item_id=None,
+    )
+    payload = workflow.build_payload(
+        task,
+        {"image": "remote-image", "audio": "remote-audio-with-tail"},
+        ai_app_id="app-id",
+        instance_type="default",
+        settings={},
+    )
+    nodes = {
+        (node["nodeId"], node["fieldName"]): node["fieldValue"]
+        for node in payload["nodeInfoList"]
+    }
+    assert nodes[("341", "end_time")] == "0:32"
+
+
 def test_ltx_lip_sync_adapter_maps_custom_audio_and_output_node():
     workflow = get_workflow("ltx_lip_sync")
     assert workflow.submission_type == "workflow"
