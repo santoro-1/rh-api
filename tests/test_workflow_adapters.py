@@ -9,6 +9,7 @@ from app.services.security import encrypt_secret
 from app.services.workflow_configs import get_user_workflow_config
 from app.workflows import get_workflow, list_workflows
 from app.workflows.base import WorkflowAsset
+from app.workflows.digital_human import generation_tail_padding_seconds
 
 
 def test_digital_human_adapter_is_registered_and_owns_payload_mapping():
@@ -193,6 +194,50 @@ def test_digital_human_batch_payload_adds_safe_silent_tail_window():
         for node in payload["nodeInfoList"]
     }
     assert nodes[("341", "end_time")] == "0:32"
+
+
+def test_timestamped_workbench_payload_uses_ceiling_without_silent_tail():
+    workflow = get_workflow("digital_human")
+    parameters = workflow.validate_parameters(
+        {
+            "prompt": "完整口播",
+            "start_time": "0:00",
+            "end_time": "0:25",
+            "timing_mode": "exact_timestamps",
+        },
+        {"audio_duration_seconds": 24.4},
+    )
+    task = SimpleNamespace(
+        input_payload=json.dumps(
+            workflow.serialize_input(
+                [
+                    WorkflowAsset("image", "image", "image.png", "image.png"),
+                    WorkflowAsset("audio", "audio", "audio.mp3", "audio.mp3"),
+                ],
+                parameters,
+                {"audio_duration_seconds": 24.4},
+            )
+        ),
+        audio_duration_seconds=24.4,
+        start_seconds=0,
+        end_seconds=25,
+        prompt="完整口播",
+        segment_id="segment-1",
+        batch_item_id=None,
+    )
+    assert generation_tail_padding_seconds(task) == 0.0
+    payload = workflow.build_payload(
+        task,
+        {"image": "remote-image", "audio": "remote-audio"},
+        ai_app_id="app-id",
+        instance_type="default",
+        settings={},
+    )
+    nodes = {
+        (node["nodeId"], node["fieldName"]): node["fieldValue"]
+        for node in payload["nodeInfoList"]
+    }
+    assert nodes[("341", "end_time")] == "0:25"
 
 
 def test_ltx_lip_sync_adapter_maps_custom_audio_and_output_node():

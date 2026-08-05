@@ -79,8 +79,8 @@
 - 文本语音且只有一个视频子任务：后处理清单标记为自动包装，并携带 MiniMax 原始字幕
   cues；工作台可继续添加 BGM 和剪映字幕轨道。
 - 上传音频或多个视频子任务：旧任务收件箱仍标记为人工处理。多段成功后按
-  `segment_index` 生成快速拼接结果；新版 `/app/new` 后续画面模块会把它默认选为基础
-  视频，同时保留全部原始片段，并允许用户上传粗剪成片切换当前版本。
+  `segment_index` 生成快速拼接结果；新版 `/app/new` 4A 画面模块把标准化拼接结果保存为
+  基础视频，同时保留全部原始片段。上传粗剪成片切换当前版本留待模块 5。
 
 视频对口型要求原脚本。节点用 FunASR 获得字词时间戳，将识别 token 对齐到原脚本，
 再结合 VAD/静音边界寻找自然停顿；识别文本只用于定位，不替换用户原脚本。每个子任务
@@ -107,13 +107,38 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 - 声音列表只暴露三个产品确认且当前 MiniMax 账号实际可用的官方音色，以及该账号已
   保存的克隆/融合音色。
 - 克隆、融合、试听和保存复用 `voice_studio.py` 与语音 Worker，不建立平行任务队列。
-- 音频批次复用 `validate_batch`/`create_batch` 和 `AudioGenerationTask`，但强制
-  `reviewRequired=True`；生成完成后停在 `AWAITING_REVIEW`，不得自动创建视频任务。
+- 音频批次使用工作台专用的无图片校验计划和既有 `create_batch`、
+  `AudioGenerationTask`；只接收脚本、音色和语音参数，并强制 `reviewRequired=True`。
+  生成完成后停在 `AWAITING_REVIEW`，不得自动创建视频任务。
 - 工作台可下载完整 MP3 和 MiniMax 原始字幕 cues；重新生成必须再次确认费用，只重置
   指定行并保留历史 attempt。
 - 工作台专用路由只负责编排与序列化，账号、声音资产、批次和批次行都按令牌用户过滤。
+- `GenerationBatch.source_channel` 是新旧入口的唯一判据。旧网页及迁移前历史数据固定为
+  `legacy_web`，工作台声音批次固定为 `new_workbench`；禁止根据批次名或 `request_key`
+  推断来源。旧网页 `/batches` 只列出 `legacy_web`，工作台声音批次接口只接受
+  `new_workbench`；幂等键也不得跨来源复用。
 
-### 3.5 取消与删除
+### 3.5 新版工作台画面 4A 边界
+
+- `POST /api/workbench/audio-batches/{batch_id}/items/{item_id}/composition` 在显式费用确认
+  后接收工作台当时的当前图片，把图片绑定到已生成音频，再通过既有声音审核门，并复用
+  原有媒体、RunningHub 视频和拼接 Worker。声音阶段不会提前上传或绑定图片。
+- 工作台通过任务清单中的 `composition` 字段读取排队、数字人生成、拼接、完成或失败
+  状态；浏览器仍不直接访问本服务。
+- 每个 RunningHub 成功结果均可作为不可变原始分段下载。无论一个还是多个分段，都以
+  已确认音频时长为目标进行视频/音频归一化；明显短于音频超过 1 秒时失败，不静默补长。
+- 多分段按原顺序拼接，单分段也生成标准化基础视频。基础视频不是字幕/BGM 成片；4A
+  不调用剪映、不生成变体。
+- 重试接口只重置失败的 RunningHub/下载任务或失败的拼接，不重做已经成功的付费子任务。
+- 单片段标准化、逐段按音频时长补帧/裁切只适用于 `new_workbench`。`legacy_web`
+  单片段继续绕过拼接，旧多片段继续使用不带目标时长的原快速拼接；不得把工作台算法
+  再次扩散为全局默认。
+- 音频成功到 4A 启动前，图片仍由工作台管理和替换；composition 请求携带当时的当前
+  图片。启动后图片锁定，避免已提交任务被本地状态静默改写。
+- 4B 字幕、BGM 和最终 `composition_video` 完全由工作台现有本地剪映队列负责。本项目
+  不增加 4B 接口或队列；工作台 4B 失败重试不得重新放行本项目已成功的 RunningHub 任务。
+
+### 3.6 取消与删除
 
 - 尚未提交 RunningHub 的任务可以在本地直接取消。
 - 已提交任务会先调用 RunningHub 官方取消接口，远端确认后才写入本地取消状态。
@@ -240,7 +265,7 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0018_segment_video_merge`。SQLite 启用 WAL、外键和 busy timeout，设计目标
+当前迁移头为 `0020_batch_source_channel`。SQLite 启用 WAL、外键和 busy timeout，设计目标
 是一个 Web 加三个本地 Worker 的单服务器部署，不是多主集群。
 
 修改模型时：
@@ -365,3 +390,25 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 文档维护约定：架构、流程、配置或发布方式变化时更新本指南；用户可见变化更新
 `CHANGELOG.md`；专项操作同步更新 `deploy/README.md` 或 `media_node/README.md`；
 `PROJECT_STATUS.md` 只保留阶段快照和历史交接，不再承担完整开发文档职责。
+
+## 14. 新版工作台精确时间轴边界（2026-08-05）
+
+- `/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition` 在批准 4A 时给内部
+  视频参数写入 `timing_mode=exact_timestamps`。
+- 数字人工作流仍使用整秒时间码，因此小数音频时长使用 `ceil`，例如 `24.4 -> 25`；该
+  模式下 `generation_tail_padding_seconds()` 返回 `0`，上传文件和 RunningHub `end_time`
+  都不追加静音尾垫。
+- 没有这个内部标记的旧批次、上传音频和历史入口仍执行原有、最多 `0.5` 秒且不跨越
+  `45` 秒的安全尾垫。不要把本规则改成全局删除尾垫。
+
+## 15. 新旧批次隔离边界（2026-08-05）
+
+- 迁移 `0020_batch_source_channel` 为历史行补入 `legacy_web`；所有新工作台声音批次必须
+  在校验计划阶段显式写入 `new_workbench`。
+- 原网页历史列表只查询 `legacy_web`，工作台任务收件箱仍可按账号读取兼容的历史数字人
+  任务；这两个“可见性”用途不同，不要合并查询条件。
+- 音频交接后，`legacy_web` 单片段写入 `NOT_APPLICABLE`，旧多片段写入
+  `MERGE_PENDING` 并以 `target_durations=None` 进入原快速拼接。`new_workbench` 无论单段
+  或多段均进入按确认音频时长标准化的基础视频分支。
+- 修改来源、交接或拼接代码时，必须同时回归：历史迁移默认值、旧网页列表隔离、旧单段
+  不拼接、旧多段不传目标时长、新工作台单段仍标准化。

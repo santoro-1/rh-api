@@ -56,6 +56,7 @@ from app.services.speech.voice_jobs import (
 )
 from app.services.storage import safe_relative_path, to_relative_data_path
 from app.services.task_creation import create_generation_task, validate_task_input
+from app.services.video_merge import merge_status_after_handoff
 from app.workflows.base import WorkflowAsset
 
 
@@ -451,6 +452,8 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
     audio_path = safe_relative_path(task.output_path, get_settings().data_dir)
     if not audio_path.is_file():
         raise ValueError("已生成音频文件不存在")
+    if not task.primary_kind or not task.primary_path or not task.primary_original_name:
+        raise ValueError("画面素材尚未绑定，请从工作台启动 4A 画面合成")
 
     task.status = AudioTaskStatus.ALIGNING.value
     task.batch_item.audio_status = "ALIGNING"
@@ -611,11 +614,12 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
     task.error_message = None
     task.completed_at = _now()
     task.batch_item.status = "SEGMENTS_CREATED"
-    # One uncut TTS result is the automatic post-production branch.  It must
-    # use the provider result directly so it does not masquerade as a
-    # segmented rough-cut preview.
-    task.batch_item.merged_video_status = (
-        "MERGE_PENDING" if len(plans) > 1 else "NOT_APPLICABLE"
+    # The new workbench needs one normalized base video even for a single
+    # provider result.  Keep the legacy website's original behavior: only
+    # multi-segment rows enter the quick-concatenation worker.
+    task.batch_item.merged_video_status = merge_status_after_handoff(
+        task.batch_item.batch.source_channel,
+        len(plans),
     )
     task.batch_item.merged_video_path = None
     task.batch_item.merged_video_error = None

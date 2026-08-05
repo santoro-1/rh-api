@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import Settings
 from app.models import (
+    BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatchItem,
     GenerationSegment,
     TaskStatus,
@@ -29,6 +30,7 @@ AWAITING_VIDEO_REVIEW = "AWAITING_VIDEO_REVIEW"
 MERGED_VIDEO_READY = "READY"
 MERGED_PREVIEW_READY = "PREVIEW_READY"
 MERGE_FAILED = "MERGE_FAILED"
+MAX_VIDEO_SHORTFALL_SECONDS = 1.0
 
 
 class VideoMergeError(RuntimeError):
@@ -43,7 +45,15 @@ def merged_video_output_dir(settings: Settings, user_id: int, item_id: str) -> P
     return settings.outputs_dir / str(user_id) / "merged" / item_id
 
 
-def _probe_video(path: Path) -> tuple[int, int]:
+def merge_status_after_handoff(source_channel: str, segment_count: int) -> str:
+    """Choose the merge path without changing the legacy single-row flow."""
+
+    if source_channel == BATCH_SOURCE_NEW_WORKBENCH or segment_count > 1:
+        return MERGE_PENDING
+    return MERGE_NOT_APPLICABLE
+
+
+def _probe_video(path: Path) -> tuple[int, int, float]:
     try:
         completed = subprocess.run(
             [
@@ -51,6 +61,7 @@ def _probe_video(path: Path) -> tuple[int, int]:
                 "-v",
                 "error",
                 "-show_streams",
+                "-show_format",
                 "-of",
                 "json",
                 str(path),
@@ -70,7 +81,8 @@ def _probe_video(path: Path) -> tuple[int, int]:
     if completed.returncode != 0:
         raise VideoMergeError(f"无法读取分段视频：{path.name}")
     try:
-        streams = json.loads(completed.stdout or "{}").get("streams", [])
+        probe_payload = json.loads(completed.stdout or "{}")
+        streams = probe_payload.get("streams", [])
     except json.JSONDecodeError as exc:
         raise VideoMergeError(f"分段视频信息损坏：{path.name}") from exc
     video = next(
@@ -87,17 +99,49 @@ def _probe_video(path: Path) -> tuple[int, int]:
     height = int(video.get("height") or 0)
     if width <= 0 or height <= 0:
         raise VideoMergeError(f"分段视频分辨率无效：{path.name}")
-    return width - width % 2, height - height % 2
+    duration = 0.0
+    # Prefer the video stream clock: a longer embedded audio stream must not
+    # hide a materially truncated picture.  Format duration is a fallback for
+    # containers that omit per-stream duration.
+    for value in (video.get("duration"), probe_payload.get("format", {}).get("duration")):
+        try:
+            duration = float(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if duration > 0:
+            break
+    return width - width % 2, height - height % 2, duration
 
 
-def merge_segment_videos(inputs: list[Path], target: Path) -> None:
-    """Normalize provider outputs and concatenate them in segment order."""
+def merge_segment_videos(
+    inputs: list[Path],
+    target: Path,
+    *,
+    target_durations: list[float] | None = None,
+) -> None:
+    """Concatenate legacy outputs or normalize new-workbench outputs."""
 
     if not inputs:
         raise VideoMergeError("没有可合并的分段视频")
-    width, height = _probe_video(inputs[0])
-    for path in inputs[1:]:
-        _probe_video(path)
+    if target_durations is not None and len(target_durations) != len(inputs):
+        raise VideoMergeError("分段视频与目标音频时长数量不一致")
+    first_width, first_height, first_duration = _probe_video(inputs[0])
+    probes = [(first_width, first_height, first_duration)]
+    probes.extend(_probe_video(path) for path in inputs[1:])
+    width, height = first_width, first_height
+    durations = None
+    if target_durations is not None:
+        durations = [float(value) for value in target_durations]
+        for path, probe, duration in zip(inputs, probes, durations):
+            if duration <= 0:
+                raise VideoMergeError(f"目标音频时长无效：{path.name}")
+            if probe[2] <= 0:
+                raise VideoMergeError(f"分段视频时长无效：{path.name}")
+            shortfall = duration - probe[2]
+            if shortfall > MAX_VIDEO_SHORTFALL_SECONDS:
+                raise VideoMergeError(
+                    f"分段视频明显短于音频：{path.name} 少 {shortfall:.2f} 秒"
+                )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".part.mp4")
@@ -108,18 +152,27 @@ def merge_segment_videos(inputs: list[Path], target: Path) -> None:
     filters: list[str] = []
     concat_inputs: list[str] = []
     for index in range(len(inputs)):
-        filters.append(
+        video_filter = (
             f"[{index}:v:0]setpts=PTS-STARTPTS,"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-            "setsar=1,fps=30,format=yuv420p"
-            f"[v{index}]"
+            "setsar=1,fps=30"
         )
-        filters.append(
+        audio_filter = (
             f"[{index}:a:0]asetpts=PTS-STARTPTS,aresample=48000,"
             "aformat=sample_fmts=fltp:channel_layouts=stereo"
-            f"[a{index}]"
         )
+        if durations is not None:
+            duration_text = f"{durations[index]:.6f}"
+            video_filter += (
+                f",tpad=stop_mode=clone:stop_duration={duration_text},"
+                f"trim=duration={duration_text}"
+            )
+            audio_filter += (
+                f",apad=pad_dur={duration_text},atrim=duration={duration_text}"
+            )
+        filters.append(video_filter + ",format=yuv420p" + f"[v{index}]")
+        filters.append(audio_filter + f"[a{index}]")
         concat_inputs.append(f"[v{index}][a{index}]")
     filters.append(
         "".join(concat_inputs)
@@ -214,7 +267,12 @@ def merge_batch_item(
     """Merge one row when every ordered RunningHub child is available."""
 
     item = _load_merge_item(db, item_id)
-    if item is None or len(item.segments) <= 1:
+    if item is None or not item.segments:
+        return False
+    is_new_workbench = (
+        item.batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
+    )
+    if len(item.segments) == 1 and not is_new_workbench:
         return False
     if item.merged_video_status != MERGE_PENDING:
         return False
@@ -224,6 +282,7 @@ def merge_batch_item(
         return False
 
     inputs: list[Path] = []
+    target_durations: list[float] | None = [] if is_new_workbench else None
     for task in tasks:
         assert task is not None
         if not task.result_path:
@@ -241,6 +300,8 @@ def merge_batch_item(
             db.commit()
             return True
         inputs.append(path)
+        if target_durations is not None:
+            target_durations.append(float(task.audio_duration_seconds or 0))
 
     item.merged_video_status = MERGING
     item.merged_video_error = None
@@ -249,7 +310,11 @@ def merge_batch_item(
         settings, item.batch.user_id, item.id
     ) / "complete.mp4"
     try:
-        merge_segment_videos(inputs, target)
+        merge_segment_videos(
+            inputs,
+            target,
+            target_durations=target_durations,
+        )
     except (OSError, VideoMergeError) as exc:
         item = _load_merge_item(db, item_id)
         if item is not None:
@@ -265,9 +330,8 @@ def merge_batch_item(
         target.unlink(missing_ok=True)
         return True
     item.merged_video_path = to_relative_data_path(target, settings)
-    # Independent image-to-video children do not have continuous boundary
-    # frames.  The concatenation is therefore an inspection aid only; human
-    # rough cutting remains required before packaging.
+    # The legacy path remains a quick inspection concat; the workbench path is
+    # its normalized base video. Original provider files remain untouched.
     item.merged_video_status = MERGED_PREVIEW_READY
     item.merged_video_error = None
     item.merged_at = _now()

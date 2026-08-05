@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import (
     AudioTaskStatus,
+    BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
     GenerationBatchItem,
     MiniMaxVoiceAsset,
@@ -20,9 +23,22 @@ from app.models import (
     VoiceCreationTask,
 )
 from app.routes.dependencies import check_rate_limit
-from app.services.audio_review import AudioReviewError, regenerate_item_audio
-from app.services.batch_assets import StagedAssetError, stage_asset
-from app.services.batch_generation import BatchValidationError, create_batch, validate_batch
+from app.services.audio_review import (
+    AudioReviewError,
+    approve_item_audio,
+    current_attempt,
+    regenerate_item_audio,
+)
+from app.services.batch_assets import (
+    StagedAssetError,
+    load_available_assets,
+    stage_asset,
+)
+from app.services.batch_generation import (
+    BatchValidationError,
+    create_batch,
+    validate_workbench_audio_batch,
+)
 from app.services.batch_manifests import DIGITAL_HUMAN_WORKFLOW
 from app.services.batch_status import batch_query
 from app.services.postproduction import postproduction_manifest
@@ -40,8 +56,22 @@ from app.services.speech.workbench_voices import (
 )
 from app.services.storage import (
     UploadValidationError,
+    materialize_staged_asset,
     remove_directory,
     safe_relative_path,
+    task_upload_dir,
+    to_relative_data_path,
+)
+from app.services.task_management import (
+    TaskManagementError,
+    prepare_task_retry,
+)
+from app.services.video_merge import (
+    MERGE_FAILED,
+    MERGED_PREVIEW_READY,
+    MERGED_VIDEO_READY,
+    invalidate_merged_video,
+    retry_video_merge,
 )
 from app.services.workbench_auth import (
     HANDOFF_LIFETIME_SECONDS,
@@ -94,6 +124,7 @@ def _batch_for_user(batch_id: str, user: User, db: Session) -> GenerationBatch:
             GenerationBatch.id == batch_id,
             GenerationBatch.user_id == user.id,
             GenerationBatch.workflow_type == DIGITAL_HUMAN_WORKFLOW,
+            GenerationBatch.source_channel == BATCH_SOURCE_NEW_WORKBENCH,
         )
     )
     if batch is None:
@@ -177,7 +208,65 @@ def _workbench_manifest(item: GenerationBatchItem) -> dict[str, Any]:
     manifest["batch_name"] = item.batch.name
     manifest["created_at"] = item.batch.created_at.isoformat()
     manifest["updated_at"] = item.updated_at.isoformat()
+    manifest["composition"] = _composition_payload(item)
     return manifest
+
+
+def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
+    tasks = [
+        segment.generation_task
+        for segment in sorted(item.segments, key=lambda value: value.segment_index)
+        if segment.generation_task is not None
+    ]
+    audio_task = item.audio_task
+    error_message = item.merged_video_error or item.error_message
+    if audio_task is not None and audio_task.error_message:
+        error_message = audio_task.error_message
+
+    if item.merged_video_path and item.merged_video_status in {
+        MERGED_PREVIEW_READY,
+        MERGED_VIDEO_READY,
+    }:
+        status = "BASE_VIDEO_READY"
+    elif item.merged_video_status == MERGE_FAILED:
+        status = "COMPOSITION_FAILED"
+    elif any(
+        task.status in {TaskStatus.FAILED.value, TaskStatus.DOWNLOAD_FAILED.value}
+        for task in tasks
+    ):
+        status = "COMPOSITION_FAILED"
+        failed = next(
+            task
+            for task in tasks
+            if task.status in {TaskStatus.FAILED.value, TaskStatus.DOWNLOAD_FAILED.value}
+        )
+        error_message = failed.error_message or failed.runninghub_failed_reason
+    elif tasks and all(task.status == TaskStatus.SUCCESS.value for task in tasks):
+        status = "VIDEO_MERGING"
+    elif tasks:
+        status = "DIGITAL_HUMAN_RUNNING"
+    elif audio_task is not None and (
+        audio_task.reviewed_at is not None
+        or audio_task.status
+        not in {AudioTaskStatus.AWAITING_REVIEW.value, AudioTaskStatus.FAILED.value}
+    ):
+        status = "COMPOSITION_QUEUED"
+    elif audio_task is not None and audio_task.status == AudioTaskStatus.FAILED.value:
+        status = "COMPOSITION_FAILED"
+    else:
+        status = "AUDIO_READY"
+    return {
+        "status": status,
+        "segment_count": len(tasks),
+        "merge_status": item.merged_video_status,
+        "base_video_ready": status == "BASE_VIDEO_READY",
+        "base_video_download_url": (
+            f"/api/workbench/tasks/{item.id}/base-video"
+            if status == "BASE_VIDEO_READY"
+            else None
+        ),
+        "error_message": error_message,
+    }
 
 
 @router.post("/api/auth/center/login")
@@ -530,12 +619,9 @@ def create_workbench_audio_batch(
     if existing is not None:
         return _audio_batch_payload(_batch_for_user(existing.id, user, db))
     rows = payload.get("rows")
-    asset_ids = payload.get("asset_ids")
     speech_options = payload.get("speech_options")
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise HTTPException(status_code=422, detail="工作台脚本行格式不正确")
-    if not isinstance(asset_ids, list):
-        raise HTTPException(status_code=422, detail="工作台图片素材格式不正确")
     if not isinstance(speech_options, dict):
         raise HTTPException(status_code=422, detail="工作台声音参数格式不正确")
     selected_voice = _voice_for_user(
@@ -550,21 +636,13 @@ def create_workbench_audio_batch(
     normalized_speech_options["reviewRequired"] = True
     created_directories: list[Path] = []
     try:
-        plan = validate_batch(
+        plan = validate_workbench_audio_batch(
             db,
             user,
             get_settings(),
-            workflow_type=DIGITAL_HUMAN_WORKFLOW,
             rows=[{str(key): str(value or "") for key, value in row.items()} for row in rows],
-            asset_ids=[str(value) for value in asset_ids],
-            batch_parameters={
-                "person_mode": "单人",
-                "resolution": str(payload.get("resolution") or "1024"),
-            },
-            audio_mode="minimax",
             speech_options=normalized_speech_options,
-            review_required=False,
-            video_review_required=False,
+            resolution=str(payload.get("resolution") or "1024"),
         )
         batch, created_directories = create_batch(
             db,
@@ -646,3 +724,152 @@ def retry_workbench_audio(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
     return _audio_batch_payload(_batch_for_user(batch_id, user, db))
+
+
+@router.post(
+    "/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition"
+)
+def start_workbench_composition(
+    batch_id: str,
+    item_id: str,
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Approve one generated audio version and hand it to the existing workers."""
+
+    user = _token_user(str(payload.get("access_token", "")), db)
+    if payload.get("cost_confirmed") is not True:
+        raise HTTPException(status_code=409, detail="请确认画面生成会产生 RunningHub 费用")
+    if not str(payload.get("idempotency_key") or "").strip():
+        raise HTTPException(status_code=422, detail="画面生成请求缺少幂等键")
+    batch = _batch_for_user(batch_id, user, db)
+    item = next((candidate for candidate in batch.items if candidate.id == item_id), None)
+    if item is None or item.audio_task is None:
+        raise HTTPException(status_code=404, detail="声音任务不存在")
+    task = item.audio_task
+    materialized_image: Path | None = None
+    try:
+        try:
+            video_parameters = json.loads(task.video_parameters_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise AudioReviewError("画面生成参数不合法") from exc
+        if not isinstance(video_parameters, dict):
+            raise AudioReviewError("画面生成参数不合法")
+        # The new workbench hands MiniMax timestamped audio to 4A.  Preserve
+        # the existing whole-second ceiling (24.4 -> 25), but do not apply the
+        # legacy 0.5-second silent tail used by upload-audio batch workflows.
+        video_parameters["timing_mode"] = "exact_timestamps"
+        task.video_parameters_json = json.dumps(
+            video_parameters, ensure_ascii=False
+        )
+        if not task.primary_path:
+            image_asset_id = str(payload.get("image_asset_id") or "").strip()
+            if not image_asset_id:
+                raise AudioReviewError("4A 画面生成缺少当前项目图片")
+            try:
+                image_asset = load_available_assets(db, user, [image_asset_id])[0]
+            except StagedAssetError as exc:
+                raise AudioReviewError(str(exc)) from exc
+            if image_asset.kind != "image":
+                raise AudioReviewError("4A 画面素材必须是图片")
+            source = safe_relative_path(image_asset.relative_path, get_settings().data_dir)
+            materialized_image = materialize_staged_asset(
+                source,
+                task_upload_dir(
+                    get_settings(), user.id, task.planned_generation_task_id
+                ),
+                kind="image",
+            )
+            task.primary_kind = "image"
+            task.primary_path = to_relative_data_path(
+                materialized_image, get_settings()
+            )
+            task.primary_original_name = image_asset.original_name
+            image_asset.consumed_at = datetime.now(timezone.utc)
+            db.flush()
+        if task.status == AudioTaskStatus.AWAITING_REVIEW.value:
+            approve_item_audio(batch, item_id)
+        elif (
+            task.reviewed_at is not None
+            and current_attempt(task).status == "APPROVED"
+        ) or item.segments or item.generation_task:
+            # Retried HTTP requests must not create another paid handoff.
+            pass
+        else:
+            raise AudioReviewError("当前声音尚未准备好进入画面生成")
+    except AudioReviewError as exc:
+        db.rollback()
+        if materialized_image is not None:
+            materialized_image.unlink(missing_ok=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    return _workbench_manifest(_item_for_user(item_id, user, db))
+
+
+@router.post("/api/workbench/tasks/{item_id}/composition/retry")
+def retry_workbench_composition(
+    item_id: str,
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Retry only the failed RunningHub/download/merge stage for one row."""
+
+    user = _token_user(str(payload.get("access_token", "")), db)
+    if payload.get("cost_confirmed") is not True:
+        raise HTTPException(
+            status_code=409,
+            detail="请确认失败的 RunningHub 任务重试可能再次产生费用",
+        )
+    item = _item_for_user(item_id, user, db)
+    tasks = [
+        segment.generation_task
+        for segment in sorted(item.segments, key=lambda value: value.segment_index)
+        if segment.generation_task is not None
+    ]
+    if not tasks and item.generation_task is not None:
+        tasks = [item.generation_task]
+    retryable = [
+        task
+        for task in tasks
+        if task.status in {TaskStatus.FAILED.value, TaskStatus.DOWNLOAD_FAILED.value}
+    ]
+    try:
+        if retryable:
+            for task in retryable:
+                prepare_task_retry(task, get_settings())
+            invalidate_merged_video(item, get_settings())
+        elif item.merged_video_status == MERGE_FAILED:
+            retry_video_merge(item, get_settings())
+        else:
+            raise TaskManagementError("当前画面任务没有可重试的失败阶段")
+    except (TaskManagementError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    return _workbench_manifest(_item_for_user(item_id, user, db))
+
+
+@router.get("/api/workbench/tasks/{item_id}/base-video")
+def download_workbench_base_video(
+    item_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _bearer_user(request, db)
+    item = _item_for_user(item_id, user, db)
+    if (
+        not item.merged_video_path
+        or item.merged_video_status
+        not in {MERGED_PREVIEW_READY, MERGED_VIDEO_READY}
+    ):
+        raise HTTPException(status_code=409, detail="基础视频尚未生成完成")
+    try:
+        path = safe_relative_path(item.merged_video_path, get_settings().data_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="基础视频文件不存在") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="基础视频文件不存在")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"{item.row_key}-base.mp4",
+    )

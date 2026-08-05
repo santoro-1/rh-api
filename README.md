@@ -60,13 +60,32 @@
 中的独立环境已经安装完成，也会启动本地 ASR 服务。随后自动打开默认批量生成页。
 无需保留 PowerShell 窗口；重复双击不会重复启动同一套服务。
 
-剪映工作台可以直接使用本网站现有账号登录，并通过 `/api/workbench/tasks` 拉取当前账号自己的旧任务收件箱记录。批次详情中的“后处理清单”是给人查看的中文页面；对应 `/api/batches/.../postproduction` 仍保留为机器接口。旧收件箱继续按原规则提示多片段人工处理；新版 `/app/new` 的后续画面模块将按 2026-08-04 决策自动拼接多片段并默认选为基础视频，同时保留全部原始片段和上传粗剪替换入口。
+剪映工作台可以直接使用本网站现有账号登录，并通过 `/api/workbench/tasks` 拉取当前账号自己的旧任务收件箱记录。批次详情中的“后处理清单”是给人查看的中文页面；对应 `/api/batches/.../postproduction` 仍保留为机器接口。旧收件箱继续按原规则提示多片段人工处理；新版 `/app/new` 的 4A 画面模块按 2026-08-04 决策自动拼接多片段并保存为基础视频，同时保留全部原始片段。上传粗剪替换入口留待模块 5。
 
 新版工作台模块 3 还通过 `/api/workbench/voices*`、`/api/workbench/voice-creations*`
 和 `/api/workbench/audio-batches*` 复用本网站的 MiniMax 官方/自定义音色、声音制作任务
 和异步音频 Worker。工作台音频批次固定开启审核，生成完成后停在
 `AWAITING_REVIEW`，供工作台同步 MP3 和原始时间戳；本阶段不会自动进入 RunningHub
 画面生成。浏览器仍只访问工作台后端，MiniMax Key 不下发。
+
+模块 4A 已增加工作台专用的画面启动、状态、失败阶段重试和基础视频下载接口。用户在
+工作台确认费用后，既有音频审核门才放行到原有音频/视频 Worker；单片段和多片段结果
+都按已确认音频时长标准化，多片段按顺序拼接。RunningHub 原始片段继续保留，标准化
+结果只标记为 `base_video`。音频完成后、4A 启动前，工作台仍可替换图片；启动请求绑定
+最后一次选择的当前图片。
+
+新旧入口通过批次字段 `source_channel` 明确隔离：历史数据及原网页创建的批次为
+`legacy_web`，新工作台创建的声音批次为 `new_workbench`。原网页批次列表只显示
+`legacy_web`；工作台的单片段标准化和多片段按音频时长补帧/裁切不会应用到旧网页。
+旧网页单片段仍直接使用原 RunningHub 结果，多片段仍只生成原有快速顺序拼接预览。
+
+新版工作台的 4A 音频来自 MiniMax 原始时间戳，提交 RunningHub 时只把实际小数时长向上
+取整为整秒（例如 `24.4` 秒使用 `25` 秒），不再追加旧批量链路的 `0.5` 秒静音尾垫。
+旧版上传音频和旧批量生成继续保留原尾垫规则。
+
+模块 4B 位于工作台本地后端，使用其现有剪映渲染队列为 `base_video` 添加 MiniMax
+时间轴单行字幕和可选 BGM，再登记 `composition_video`。本项目没有为 4B 新增后端、
+账号、RunningHub 调用或变体任务；4B 失败重试不会重新调用本项目已成功的付费任务。
 
 需要停止时双击 `停止系统.cmd`。管理员登录后可从“运行状态”页面查看四个服务的
 心跳、CPU、内存、磁盘、FFmpeg、语音/媒体/视频队列数量和最近日志。日志位于
@@ -274,7 +293,8 @@ RunningHub 已明确返回 `FAILED` 的视频任务默认自动重试 3 次，�
 - audio_generation_attempts：每次 MiniMax 生成的完整音频、字幕、远程编号和审核结果
 - workflow_configs：每个用户、每个工作流的远程 ID、实例类型、默认提示词和启用状态
 - generation_tasks：本地任务 ID、远程 taskId、输入素材、时间范围、状态、错误、usage 与本地结果路径
-- generation_batches / generation_batch_items：批次元数据、脚本父任务和原始清单行
+- generation_batches / generation_batch_items：带 `source_channel` 的批次元数据、脚本
+  父任务和原始清单行
 - generation_segments：完整流程的分段脚本、时间区间、分段素材和 RunningHub 子任务关系
 - staged_assets：批量创建前已经校验、等待清单引用的暂存素材
 - long_audio_projects：长音频原始素材、脚本、可编辑分段草稿、远程节点租约、

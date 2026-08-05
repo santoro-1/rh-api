@@ -14,11 +14,30 @@ from app.workflows.base import WorkflowAsset, WorkflowOutput
 
 DIGITAL_HUMAN_MAX_SECONDS = 45.0
 DIGITAL_HUMAN_TAIL_PADDING_SECONDS = 0.5
+EXACT_TIMESTAMP_TIMING_MODE = "exact_timestamps"
+
+
+def _uses_exact_timestamp_timing(task: GenerationTask) -> bool:
+    """Return whether an internal timestamped handoff forbids legacy tail padding."""
+
+    try:
+        payload = json.loads(str(getattr(task, "input_payload", "") or ""))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    parameters = payload.get("parameters")
+    return bool(
+        isinstance(parameters, dict)
+        and parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
+    )
 
 
 def generation_tail_padding_seconds(task: GenerationTask) -> float:
     """Return safe padding for full-range batch inputs without crossing 45 s."""
 
+    if _uses_exact_timestamp_timing(task):
+        return 0.0
     if not (
         getattr(task, "batch_item_id", None)
         or getattr(task, "segment_id", None)
@@ -95,6 +114,11 @@ class DigitalHumanWorkflow:
             "person_mode": person_mode,
             "resolution": resolution,
             "instance_type": "default",
+            "timing_mode": (
+                EXACT_TIMESTAMP_TIMING_MODE
+                if parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
+                else None
+            ),
         }
 
     def serialize_input(

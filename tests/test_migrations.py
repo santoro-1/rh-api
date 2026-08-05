@@ -77,13 +77,20 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('generation_batch_items')"
             )
         }
-    assert revision == "0018_segment_video_merge"
+        audio_task_columns = {
+            row[1]: row
+            for row in connection.execute(
+                "PRAGMA table_info('audio_generation_tasks')"
+            )
+        }
+    assert revision == "0020_batch_source_channel"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
     assert "runninghub_auto_retry_after" in task_columns
     assert "batch_item_id" in long_audio_columns
     assert "video_review_required" in batch_columns
+    assert "source_channel" in batch_columns
     assert {
         "merged_video_status",
         "merged_video_path",
@@ -91,6 +98,9 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
         "merged_at",
         "merged_reviewed_at",
     } <= item_columns
+    assert audio_task_columns["primary_kind"][3] == 0
+    assert audio_task_columns["primary_path"][3] == 0
+    assert audio_task_columns["primary_original_name"][3] == 0
 
 
 def test_audio_review_migration_preserves_existing_batch_items():
@@ -161,6 +171,10 @@ def test_audio_review_migration_preserves_existing_batch_items():
                 "SELECT review_required FROM generation_batches "
                 "WHERE id = 'batch-before-0010'"
             ).fetchone()[0]
+            source_channel = connection.execute(
+                "SELECT source_channel FROM generation_batches "
+                "WHERE id = 'batch-before-0010'"
+            ).fetchone()[0]
             foreign_key_errors = connection.execute(
                 "PRAGMA foreign_key_check"
             ).fetchall()
@@ -168,6 +182,7 @@ def test_audio_review_migration_preserves_existing_batch_items():
 
         assert item_count == 1
         assert review_required == 0
+        assert source_channel == "legacy_web"
         assert foreign_key_errors == []
     finally:
         database.unlink(missing_ok=True)
@@ -209,7 +224,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0018_segment_video_merge"
+        assert version == "0020_batch_source_channel"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:

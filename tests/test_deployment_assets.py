@@ -350,7 +350,7 @@ def test_documentation_has_one_current_developer_entrypoint():
     assert "## 8. 自动化测试与质量门槛" in guide
     assert "## 9. Windows 媒体节点开发与分发" in guide
     assert "## 11. 生产发布与回滚" in guide
-    assert "0018_segment_video_merge" in guide
+    assert "0020_batch_source_channel" in guide
     assert "MEDIA_PROCESSING_MODE" in guide
     assert "RUNNINGHUB_AUTO_RETRY_LIMIT" in guide
     assert "rh-media-update-*.zip" in guide

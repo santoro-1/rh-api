@@ -7,11 +7,14 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from openpyxl import load_workbook
+import pytest
 
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     AudioGenerationTask,
+    BATCH_SOURCE_LEGACY_WEB,
+    BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
     GenerationBatchItem,
     GenerationSegment,
@@ -25,6 +28,7 @@ from app.models import (
     VoiceAssetStatus,
 )
 from app.services.security import encrypt_secret
+from app.services.batch_generation import BatchPlan, BatchValidationError, create_batch
 from app.services.speech.accounts import credential_fingerprint
 from app.services.batch_manifests import parse_manifest
 from app.services.long_audio import (
@@ -91,6 +95,70 @@ def _configure_minimax(username: str) -> str:
         db.add(voice)
         db.commit()
         return voice.id
+
+
+def test_legacy_batch_page_hides_new_workbench_batches(client):
+    user = create_user("batch-source-isolation-user")
+    login(client, user.username)
+    with SessionLocal() as db:
+        for source_channel, batch_id, name in (
+            (BATCH_SOURCE_LEGACY_WEB, "legacy-visible-batch", "旧网页可见批次"),
+            (BATCH_SOURCE_NEW_WORKBENCH, "workbench-hidden-batch", "新工作台隐藏批次"),
+        ):
+            db.add(
+                GenerationBatch(
+                    id=batch_id,
+                    user_id=user.id,
+                    name=name,
+                    workflow_type="digital_human",
+                    source_channel=source_channel,
+                    audio_mode="upload",
+                    request_key=batch_id,
+                    status="ACTIVE",
+                    total_items=0,
+                )
+            )
+        db.commit()
+
+    page = client.get("/batches")
+    assert page.status_code == 200
+    assert "旧网页可见批次" in page.text
+    assert "新工作台隐藏批次" not in page.text
+
+
+def test_idempotency_key_cannot_cross_batch_sources():
+    user = create_user("batch-source-key-user")
+    with SessionLocal() as db:
+        db.add(
+            GenerationBatch(
+                id="legacy-source-key-batch",
+                user_id=user.id,
+                name="旧入口批次",
+                workflow_type="digital_human",
+                source_channel=BATCH_SOURCE_LEGACY_WEB,
+                audio_mode="upload",
+                request_key="shared-source-key",
+                status="ACTIVE",
+                total_items=0,
+            )
+        )
+        db.commit()
+        with pytest.raises(BatchValidationError) as exc_info:
+            create_batch(
+                db,
+                db.get(User, user.id),
+                get_settings(),
+                name="新工作台批次",
+                request_key="shared-source-key",
+                plan=BatchPlan(
+                    workflow_type="digital_human",
+                    audio_mode="minimax",
+                    rows=[],
+                    assets=[],
+                    source_channel=BATCH_SOURCE_NEW_WORKBENCH,
+                ),
+            )
+        assert "另一入口" in exc_info.value.errors[0]["message"]
 
 
 def test_batch_page_and_templates_support_excel_and_csv(client):
@@ -231,6 +299,7 @@ def test_minimax_batch_creates_persistent_audio_tasks_before_video_tasks(
         audio_task = db.query(AudioGenerationTask).one()
         voices = db.query(MiniMaxVoiceAsset).all()
         assert batch.audio_mode == "minimax"
+        assert batch.source_channel == BATCH_SOURCE_LEGACY_WEB
         assert db.query(GenerationTask).count() == 0
         assert audio_task.status == "PENDING"
         assert json.loads(audio_task.pronunciation_dict_json) == [

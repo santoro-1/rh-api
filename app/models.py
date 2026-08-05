@@ -388,6 +388,10 @@ class GenerationTask(Base):
     )
 
 
+BATCH_SOURCE_LEGACY_WEB = "legacy_web"
+BATCH_SOURCE_NEW_WORKBENCH = "new_workbench"
+
+
 class GenerationBatch(Base):
     """One user submission containing multiple independently queued video tasks."""
 
@@ -399,6 +403,9 @@ class GenerationBatch(Base):
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     workflow_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    source_channel: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=BATCH_SOURCE_LEGACY_WEB, index=True
+    )
     audio_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="upload")
     review_required: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
@@ -686,9 +693,14 @@ class AudioGenerationTask(Base):
     credential_fingerprint: Mapped[str] = mapped_column(
         String(64), nullable=False
     )
-    primary_kind: Mapped[str] = mapped_column(String(20), nullable=False)
-    primary_path: Mapped[str] = mapped_column(String(500), nullable=False)
-    primary_original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Workbench text-to-speech is intentionally independent of the future
+    # digital-human picture.  These fields are bound only when Module 4A is
+    # started; legacy/full-flow batches may still populate them immediately.
+    primary_kind: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    primary_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    primary_original_name: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
     speech_script: Mapped[str] = mapped_column(Text, nullable=False)
     pronunciation_dict_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="[]"

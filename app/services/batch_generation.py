@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import (
     AudioGenerationTask,
+    BATCH_SOURCE_LEGACY_WEB,
+    BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
     GenerationBatchItem,
     LongAudioProject,
@@ -114,6 +116,8 @@ class BatchPlan:
     speech_options: SpeechBatchOptions | None = None
     review_required: bool = False
     video_review_required: bool = False
+    defer_primary_until_video: bool = False
+    source_channel: str = BATCH_SOURCE_LEGACY_WEB
 
 
 def _person_mode(value: str) -> str:
@@ -277,6 +281,116 @@ def _validate_speech_options(
         output_format=output_format,
         pronunciation_tones=pronunciation_tones,
         review_required=review_required,
+    )
+
+
+def validate_workbench_audio_batch(
+    db: Session,
+    user: User,
+    settings: Settings,
+    *,
+    rows: list[dict[str, str]],
+    speech_options: dict[str, Any],
+    resolution: str = "1024",
+) -> BatchPlan:
+    """Validate a workbench TTS batch without accepting picture assets.
+
+    The selected project picture belongs to Module 4A.  It is deliberately
+    absent here and will be validated against the digital-human adapter when
+    the approved audio is handed off to video generation.
+    """
+
+    if not rows:
+        raise BatchValidationError(
+            [{"rowNumber": 0, "rowId": "", "message": "批量清单没有数据行"}]
+        )
+    if len(rows) > settings.max_batch_items:
+        raise BatchValidationError(
+            [
+                {
+                    "rowNumber": 0,
+                    "rowId": "",
+                    "message": f"单批最多 {settings.max_batch_items} 条任务",
+                }
+            ]
+        )
+    try:
+        ensure_user_can_create_workflow(user, DIGITAL_HUMAN_WORKFLOW)
+        resolved_speech = _validate_speech_options(db, user, speech_options)
+        workflow_config = get_user_workflow_config(user, DIGITAL_HUMAN_WORKFLOW)
+    except (TaskCreationError, ValueError) as exc:
+        raise BatchValidationError(
+            [{"rowNumber": 0, "rowId": "", "message": str(exc)}]
+        ) from exc
+
+    errors: list[dict[str, Any]] = []
+    plans: list[BatchRowPlan] = []
+    seen_row_keys: set[str] = set()
+    for position, row in enumerate(rows, start=1):
+        row_key = str(row.get("row_id") or "").strip()
+        try:
+            if not row_key:
+                raise ValueError("任务编号不能为空")
+            if len(row_key) > 100:
+                raise ValueError("任务编号不能超过 100 个字符")
+            folded_key = row_key.casefold()
+            if folded_key in seen_row_keys:
+                raise ValueError("任务编号重复")
+            seen_row_keys.add(folded_key)
+            script = str(row.get("speech_script") or "").strip()
+            validate_synthesis_options(
+                text=script,
+                speed=resolved_speech.speed,
+                volume=resolved_speech.volume,
+                pitch=resolved_speech.pitch,
+                output_format=resolved_speech.output_format,
+            )
+            prompt = str(
+                row.get("prompt")
+                or workflow_config.default_prompt
+                or "人物自然地说话"
+            ).strip()
+            plans.append(
+                BatchRowPlan(
+                    row_number=position,
+                    row_key=row_key,
+                    manifest={
+                        "row_id": row_key,
+                        "speech_script": script,
+                        "prompt": prompt,
+                    },
+                    staged_assets={},
+                    parameters={
+                        "prompt": prompt,
+                        "start_time": "0:00",
+                        "end_time": "0:01",
+                        "resolution": str(resolution or "1024"),
+                        "person_mode": "1",
+                        "instance_type": "default",
+                    },
+                    asset_metadata={},
+                )
+            )
+        except ValueError as exc:
+            errors.append(
+                {
+                    "rowNumber": position,
+                    "rowId": row_key,
+                    "message": str(exc),
+                }
+            )
+    if errors:
+        raise BatchValidationError(errors)
+    return BatchPlan(
+        workflow_type=DIGITAL_HUMAN_WORKFLOW,
+        audio_mode="minimax",
+        rows=plans,
+        assets=[],
+        speech_options=resolved_speech,
+        review_required=True,
+        video_review_required=False,
+        defer_primary_until_video=True,
+        source_channel=BATCH_SOURCE_NEW_WORKBENCH,
     )
 
 
@@ -742,6 +856,16 @@ def create_batch(
         )
     )
     if existing is not None:
+        if existing.source_channel != plan.source_channel:
+            raise BatchValidationError(
+                [
+                    {
+                        "rowNumber": 0,
+                        "rowId": "",
+                        "message": "批次请求标识已被另一入口使用，请重新提交",
+                    }
+                ]
+            )
         return existing, []
 
     clean_name = name.strip()
@@ -759,6 +883,7 @@ def create_batch(
         user_id=user.id,
         name=clean_name,
         workflow_type=plan.workflow_type,
+        source_channel=plan.source_channel,
         audio_mode=plan.audio_mode,
         review_required=plan.review_required,
         video_review_required=plan.video_review_required,
@@ -929,10 +1054,15 @@ def create_batch(
                 assert plan.speech_options is not None
                 assert voice is not None
                 primary = next(
-                    asset
-                    for asset in final_assets
-                    if asset.name in {"image", "video"}
+                    (
+                        asset
+                        for asset in final_assets
+                        if asset.name in {"image", "video"}
+                    ),
+                    None,
                 )
+                if primary is None and not plan.defer_primary_until_video:
+                    raise ValueError("声音任务缺少后续画面素材")
                 audio_task = AudioGenerationTask(
                     id=str(uuid.uuid4()),
                     user_id=user.id,
@@ -950,9 +1080,9 @@ def create_batch(
                     credential_fingerprint=(
                         plan.speech_options.config.credential_fingerprint
                     ),
-                    primary_kind=primary.kind,
-                    primary_path=primary.relative_path,
-                    primary_original_name=primary.original_name,
+                    primary_kind=primary.kind if primary else None,
+                    primary_path=primary.relative_path if primary else None,
+                    primary_original_name=(primary.original_name if primary else None),
                     speech_script=row_plan.manifest["speech_script"],
                     pronunciation_dict_json=json.dumps(
                         plan.speech_options.pronunciation_tones,

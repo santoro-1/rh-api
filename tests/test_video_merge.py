@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
+    BATCH_SOURCE_LEGACY_WEB,
+    BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
     GenerationBatchItem,
     GenerationSegment,
@@ -14,12 +19,21 @@ from app.models import (
 from app.services.storage import to_relative_data_path
 from app.services.video_merge import (
     MERGED_PREVIEW_READY,
+    MERGE_NOT_APPLICABLE,
+    MERGE_PENDING,
+    VideoMergeError,
+    merge_status_after_handoff,
+    merge_segment_videos,
     process_pending_video_merges,
 )
 from tests.conftest import create_user, login
 
 
-def _segmented_batch(*, review_required: bool) -> tuple[str, str]:
+def _segmented_batch(
+    *,
+    review_required: bool,
+    source_channel: str = BATCH_SOURCE_LEGACY_WEB,
+) -> tuple[str, str]:
     user = create_user(
         "merge-review-user" if review_required else "merge-auto-user"
     )
@@ -39,6 +53,7 @@ def _segmented_batch(*, review_required: bool) -> tuple[str, str]:
             user_id=user.id,
             name="自动拼接测试",
             workflow_type="digital_human",
+            source_channel=source_channel,
             audio_mode="upload",
             review_required=False,
             video_review_required=review_required,
@@ -90,16 +105,44 @@ def _segmented_batch(*, review_required: bool) -> tuple[str, str]:
     return batch_id, item_id
 
 
-def _fake_merge(inputs, target):
+def _fake_legacy_merge(inputs, target, *, target_durations=None):
+    assert target_durations is None
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"|".join(path.read_bytes() for path in inputs))
+
+
+def _fake_workbench_merge(inputs, target, *, target_durations=None):
+    assert target_durations == [30.0] * len(inputs)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"|".join(path.read_bytes() for path in inputs))
+
+
+def test_normalization_rejects_materially_truncated_picture(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.services.video_merge._probe_video",
+        lambda _path: (1080, 1920, 28.5),
+    )
+    with pytest.raises(VideoMergeError, match="明显短于音频"):
+        merge_segment_videos(
+            [Path("provider.mp4")],
+            tmp_path / "base.mp4",
+            target_durations=[30.0],
+        )
+
+
+def test_handoff_merge_status_keeps_legacy_single_segment_unchanged():
+    assert merge_status_after_handoff(BATCH_SOURCE_LEGACY_WEB, 1) == (
+        MERGE_NOT_APPLICABLE
+    )
+    assert merge_status_after_handoff(BATCH_SOURCE_LEGACY_WEB, 2) == MERGE_PENDING
+    assert merge_status_after_handoff(BATCH_SOURCE_NEW_WORKBENCH, 1) == MERGE_PENDING
 
 
 def test_segment_outputs_create_ordered_quick_preview(monkeypatch):
     batch_id, item_id = _segmented_batch(review_required=False)
     monkeypatch.setattr(
         "app.services.video_merge.merge_segment_videos",
-        _fake_merge,
+        _fake_legacy_merge,
     )
 
     with SessionLocal() as db:
@@ -118,7 +161,7 @@ def test_legacy_video_review_flag_does_not_turn_preview_into_a_finished_video(
     batch_id, item_id = _segmented_batch(review_required=True)
     monkeypatch.setattr(
         "app.services.video_merge.merge_segment_videos",
-        _fake_merge,
+        _fake_legacy_merge,
     )
     with SessionLocal() as db:
         assert process_pending_video_merges(db, get_settings()) == 1
@@ -129,15 +172,38 @@ def test_legacy_video_review_flag_does_not_turn_preview_into_a_finished_video(
     assert "快速拼接预览 · 仅用于检查片段顺序，仍需人工粗剪" in detail.text
 
 
-def test_single_segment_is_not_sent_to_preview_merger(monkeypatch):
-    _batch_id, item_id = _segmented_batch(review_required=False)
+def test_new_workbench_single_segment_is_normalized_as_base_video(monkeypatch):
+    _batch_id, item_id = _segmented_batch(
+        review_required=False,
+        source_channel=BATCH_SOURCE_NEW_WORKBENCH,
+    )
     with SessionLocal() as db:
         item = db.get(GenerationBatchItem, item_id)
         item.segments.pop()
         db.commit()
     monkeypatch.setattr(
         "app.services.video_merge.merge_segment_videos",
-        _fake_merge,
+        _fake_workbench_merge,
+    )
+    with SessionLocal() as db:
+        assert process_pending_video_merges(db, get_settings()) == 1
+        item = db.get(GenerationBatchItem, item_id)
+        assert item.merged_video_status == MERGED_PREVIEW_READY
+
+
+def test_legacy_single_segment_never_enters_normalization(monkeypatch):
+    _batch_id, item_id = _segmented_batch(review_required=False)
+    with SessionLocal() as db:
+        item = db.get(GenerationBatchItem, item_id)
+        item.segments.pop()
+        db.commit()
+
+    def _unexpected_merge(*_args, **_kwargs):
+        raise AssertionError("legacy single segment must bypass merge")
+
+    monkeypatch.setattr(
+        "app.services.video_merge.merge_segment_videos",
+        _unexpected_merge,
     )
     with SessionLocal() as db:
         assert process_pending_video_merges(db, get_settings()) == 0

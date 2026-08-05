@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import (
     AudioTaskStatus,
+    BATCH_SOURCE_LEGACY_WEB,
     GenerationBatch,
     GenerationSegment,
     LongAudioProjectStatus,
@@ -589,7 +590,11 @@ def batches_page(
     current_user: User = Depends(get_page_user),
     db: Session = Depends(get_db),
 ):
-    statement = batch_query().order_by(GenerationBatch.created_at.desc())
+    statement = (
+        batch_query()
+        .where(GenerationBatch.source_channel == BATCH_SOURCE_LEGACY_WEB)
+        .order_by(GenerationBatch.created_at.desc())
+    )
     if not current_user.is_admin:
         statement = statement.where(GenerationBatch.user_id == current_user.id)
     batches = db.scalars(statement).unique().all()

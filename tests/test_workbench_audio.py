@@ -6,6 +6,7 @@ import uuid
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
+    AudioGenerationAttempt,
     AudioGenerationTask,
     AudioTaskStatus,
     GenerationBatch,
@@ -64,6 +65,32 @@ def _token(client, username: str) -> str:
     )
     assert response.status_code == 200
     return response.json()["access_token"]
+
+
+def test_workbench_audio_routes_reject_legacy_batches(client):
+    _account("workbench-source-boundary-user")
+    token = _token(client, "workbench-source-boundary-user")
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(username="workbench-source-boundary-user").one()
+        db.add(
+            GenerationBatch(
+                id="legacy-audio-route-batch",
+                user_id=user.id,
+                name="旧网页声音批次",
+                workflow_type="digital_human",
+                audio_mode="minimax",
+                request_key="legacy-audio-route-batch",
+                status="ACTIVE",
+                total_items=0,
+            )
+        )
+        db.commit()
+
+    response = client.post(
+        "/api/workbench/audio-batches/legacy-audio-route-batch",
+        json={"access_token": token},
+    )
+    assert response.status_code == 404
 
 
 def test_workbench_bootstraps_three_real_system_voices(client, monkeypatch):
@@ -249,26 +276,15 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         "/api/workbench/voices", json={"access_token": token}
     )
     voice_id = voice_response.json()["voices"][0]["voice_asset_id"]
-    staged = client.post(
-        "/api/workbench/batch-assets",
-        data={"access_token": token, "kind": "image"},
-        files={"file": ("person.png", b"\x89PNG\r\n\x1a\npayload", "image/png")},
-    )
-    assert staged.status_code == 201, staged.text
-    staged_id = staged.json()["asset_id"]
-
     created = client.post(
         "/api/workbench/audio-batches",
         json={
             "access_token": token,
             "name": "WB-20260804 声音批次",
             "request_key": "wb-audio-project-1",
-            "asset_ids": [staged_id],
             "rows": [
                 {
                     "row_id": "1",
-                    "image_asset_id": staged_id,
-                    "image_file": "person.png",
                     "speech_script": "第一条真实语音测试脚本。",
                     "prompt": "人物自然说话",
                 }
@@ -292,7 +308,11 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         batch = db.get(GenerationBatch, batch_id)
         task = db.query(AudioGenerationTask).one()
         assert batch.review_required is True
+        assert batch.source_channel == "new_workbench"
         assert db.query(GenerationTask).count() == 0
+        assert task.primary_kind is None
+        assert task.primary_path is None
+        assert task.primary_original_name is None
         output = get_settings().outputs_dir / "workbench-audio.mp3"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"ID3generated-audio")
@@ -306,6 +326,16 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         )
         task.output_path = to_relative_data_path(output, get_settings())
         task.subtitle_path = to_relative_data_path(subtitles, get_settings())
+        db.add(
+            AudioGenerationAttempt(
+                id=str(uuid.uuid4()),
+                audio_task_id=task.id,
+                version=task.generation_version,
+                output_path=task.output_path,
+                subtitle_path=task.subtitle_path,
+                status="READY",
+            )
+        )
         task.status = AudioTaskStatus.AWAITING_REVIEW.value
         task.batch_item.audio_status = "AWAITING_REVIEW"
         task.batch_item.status = "AWAITING_AUDIO_REVIEW"
@@ -326,3 +356,58 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
     )
     assert audio.status_code == 200
     assert audio.content == b"ID3generated-audio"
+
+    staged = client.post(
+        "/api/workbench/batch-assets",
+        data={"access_token": token, "kind": "image"},
+        files={"file": ("person.png", b"\x89PNG\r\n\x1a\npayload", "image/png")},
+    )
+    assert staged.status_code == 201, staged.text
+    staged_id = staged.json()["asset_id"]
+
+    started = client.post(
+        f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition",
+        json={
+            "access_token": token,
+            "idempotency_key": "composition-project-1",
+            "cost_confirmed": True,
+            "image_asset_id": staged_id,
+        },
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["composition"]["status"] == "COMPOSITION_QUEUED"
+    repeated = client.post(
+        f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition",
+        json={
+            "access_token": token,
+            "idempotency_key": "composition-project-1",
+            "cost_confirmed": True,
+            "image_asset_id": staged_id,
+        },
+    )
+    assert repeated.status_code == 200, repeated.text
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).one()
+        assert task.status == AudioTaskStatus.PENDING.value
+        assert task.reviewed_at is not None
+        assert task.primary_kind == "image"
+        assert task.primary_path
+        assert task.primary_original_name == "person.png"
+        assert json.loads(task.video_parameters_json)["timing_mode"] == "exact_timestamps"
+        base = get_settings().outputs_dir / "workbench-base.mp4"
+        base.write_bytes(b"normalized-base-video")
+        task.batch_item.merged_video_path = to_relative_data_path(base, get_settings())
+        task.batch_item.merged_video_status = "PREVIEW_READY"
+        db.commit()
+
+    manifest = client.post(
+        f"/api/workbench/tasks/{item_id}", json={"access_token": token}
+    )
+    assert manifest.status_code == 200
+    assert manifest.json()["composition"]["status"] == "BASE_VIDEO_READY"
+    base_video = client.get(
+        f"/api/workbench/tasks/{item_id}/base-video",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert base_video.status_code == 200
+    assert base_video.content == b"normalized-base-video"
