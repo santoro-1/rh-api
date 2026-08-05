@@ -164,7 +164,11 @@ try {
         throw "当前分支是 $branch。请先切换并更新 main：git switch main；git pull --ff-only origin main"
     }
     $dirty = Invoke-LocalText -Description "检查工作区" -Command {
-        git status --porcelain
+        # Stale pytest directories can be owned by another Windows security
+        # context and make Git print access warnings even when the tracked
+        # worktree is clean. Keep porcelain stdout authoritative and suppress
+        # only the warning stream; a non-zero Git exit still fails above.
+        git status --porcelain 2>$null
     }
     if ($dirty) {
         throw "本地工作区存在未提交改动，已拒绝发布。"

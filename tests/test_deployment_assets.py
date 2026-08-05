@@ -394,6 +394,7 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     local_text_function = updater.split("function Invoke-RemoteScript", 1)[0]
     assert "[Console]::OutputEncoding" in local_text_function
     assert "$exitCode = $LASTEXITCODE" in local_text_function
+    assert "git status --porcelain 2>$null" in updater
     assert "--max-time 8" in updater
     assert "ServerAliveCountMax=3" in updater
     assert "install -d -m 700 -o '$LinuxUser' -g '$LinuxUser'" in updater
