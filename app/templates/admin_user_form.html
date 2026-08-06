@@ -163,6 +163,31 @@
   {% endif %}
   </div>
   </details>
+  <details class="admin-config-section" open>
+  <summary>豆包内容分析</summary>
+  <div class="admin-config-body stack-form">
+    <p class="field-help">配置只保存在数字人服务端。工作台和浏览器不会获得 Ark API Key；本模块只保存连接参数，不会自动调用或产生费用。</p>
+    <label class="check-row"><span><input type="checkbox" name="ark_enabled" {% if ark_config.enabled %}checked{% endif %}> 为该账号启用豆包内容分析</span></label>
+    <label>Ark API Key
+      <input name="ark_api_key" type="password" autocomplete="new-password" maxlength="4096" placeholder="{{ '已加密保存，留空不修改' if editing and ark_config.api_key_encrypted else '可稍后配置' }}">
+    </label>
+    <label>Base URL
+      <input name="ark_base_url" value="{{ ark_config.base_url }}" maxlength="500" required>
+    </label>
+    <label>模型或推理接入点 ID
+      <input name="ark_model" value="{{ ark_config.model }}" maxlength="200" placeholder="启用前必须填写">
+    </label>
+    <div class="two-columns">
+      <label>请求超时（秒）
+        <input name="ark_timeout_seconds" type="number" min="1" max="120" value="{{ ark_config.timeout_seconds }}" required>
+      </label>
+      <label>额外重试次数
+        <input name="ark_max_retries" type="number" min="0" max="5" value="{{ ark_config.max_retries }}" required>
+      </label>
+    </div>
+    <p class="field-help">仅对超时、HTTP 429 和明确的 5xx 进行有限重试。内容分析 Prompt、缓存和工作台调用将在后续模块实现。</p>
+  </div>
+  </details>
   <button type="submit">保存</button>
 </form>
 {% endblock %}

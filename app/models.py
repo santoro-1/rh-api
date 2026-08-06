@@ -113,6 +113,12 @@ class User(Base):
     minimax_config: Mapped[Optional["MiniMaxConfig"]] = relationship(
         back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
+    ark_config: Mapped[Optional["ArkConfig"]] = relationship(
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    content_analysis_caches: Mapped[list["ContentAnalysisCache"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     minimax_voices: Mapped[list["MiniMaxVoiceAsset"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
@@ -199,6 +205,86 @@ class MiniMaxConfig(Base):
     )
     voice_creation_tasks: Mapped[list["VoiceCreationTask"]] = relationship(
         back_populates="config"
+    )
+
+
+class ArkConfig(Base):
+    """Encrypted user-level Volcengine Ark connection settings."""
+
+    __tablename__ = "ark_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    api_key_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    base_url: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        default="https://ark.cn-beijing.volces.com/api/v3",
+    )
+    model: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="ark_config")
+
+
+class ContentAnalysisCache(Base):
+    """Validated whole-script analysis, isolated by user and contract inputs."""
+
+    __tablename__ = "content_analysis_caches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    script_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    script_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    overall_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    music_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    subtitle_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    music_intent_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    subtitle_units_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    music_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    music_error_summary: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    subtitle_error_code: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    subtitle_error_summary: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    provider_request_id: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True
+    )
+    provider_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cacheable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="content_analysis_caches")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "script_sha256",
+            "schema_version",
+            "prompt_version",
+            "model",
+            name="uq_content_analysis_cache_key",
+        ),
     )
 
 

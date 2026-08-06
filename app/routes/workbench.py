@@ -41,6 +41,11 @@ from app.services.batch_generation import (
 )
 from app.services.batch_manifests import DIGITAL_HUMAN_WORKFLOW
 from app.services.batch_status import batch_query
+from app.services.content_analysis.analysis import (
+    ContentAnalysisInputError,
+    ContentAnalysisUnavailable,
+    analyze_content,
+)
 from app.services.postproduction import postproduction_manifest
 from app.services.security import verify_password
 from app.services.speech.minimax import MiniMaxAPIError
@@ -338,6 +343,33 @@ def workbench_tasks(
     ).unique().all()
     tasks = [_workbench_manifest(item) for batch in batches for item in batch.items]
     return {"schema": "runninghub.workbench-inbox.v1", "tasks": tasks[:limit]}
+
+
+@router.post("/api/workbench/content-analysis")
+def workbench_content_analysis(
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Analyze one exact script without exposing Ark credentials to workbench."""
+
+    user = _token_user(str(payload.get("access_token", "")), db)
+    original_script = payload.get("original_script")
+    force_refresh = payload.get("force_refresh", False)
+    if not isinstance(original_script, str):
+        raise HTTPException(status_code=400, detail="original_script 必须是字符串")
+    if type(force_refresh) is not bool:
+        raise HTTPException(status_code=400, detail="force_refresh 必须是布尔值")
+    try:
+        return analyze_content(
+            db,
+            user,
+            original_script=original_script,
+            force_refresh=force_refresh,
+        )
+    except ContentAnalysisInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ContentAnalysisUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/api/workbench/tasks/{item_id}")

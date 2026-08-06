@@ -32,8 +32,9 @@
     python -m alembic upgrade head
     python -m scripts.create_admin admin
 
-首次创建管理员时会提示输入密码。RunningHub 与 MiniMax 的账号连接、工作流 ID、
-默认提示词和并发限制均在登录后的用户管理页配置；API Key 与工作流访问密码不会
+首次创建管理员时会提示输入密码。RunningHub、MiniMax 与豆包 Ark 的账号连接、工作流 ID
+和用户级参数在登录后的用户管理页配置；豆包内容分析的服务端统一并发上限通过
+`ARK_MAX_CONCURRENCY` 配置，默认 10。API Key 与工作流访问密码不会
 回显，且只以 Fernet 加密密文保存在 SQLite 中。LTX 发布设置未开启“加密访问”时，
 工作流访问密码保持为空即可。语速、音量、语调等每批使用参数不放在用户
 配置中，而是在批量生成页选择。
@@ -86,6 +87,13 @@
 模块 4B 位于工作台本地后端，使用其现有剪映渲染队列为 `base_video` 添加 MiniMax
 时间轴单行字幕和可选 BGM，再登记 `composition_video`。本项目没有为 4B 新增后端、
 账号、RunningHub 调用或变体任务；4B 失败重试不会重新调用本项目已成功的付费任务。
+
+后续智能内容分析模块 1～8 已完成本地 mock 自动化闭环。本项目的
+`POST /api/workbench/content-analysis` 每次只接收一条精确脚本，同时返回分别校验的
+`music_intent` 与无时间戳 `subtitle_units`；工作台负责逐行版本快照、MiniMax `raw_cues`
+映射、真实字体宽度排版和 46 首本地音乐唯一 Top1。跨项目测试会把本项目实际响应直接交给
+工作台消费。内容分析失败不得触发 MiniMax、RunningHub 或剪映，也不得使已有基础视频失效。
+完整 mock 回归为本项目 `216 passed`、工作台 `260 passed`；真实服务与生产发布仍需另行授权。
 
 需要停止时双击 `停止系统.cmd`。管理员登录后可从“运行状态”页面查看四个服务的
 心跳、CPU、内存、磁盘、FFmpeg、语音/媒体/视频队列数量和最近日志。日志位于
@@ -287,6 +295,8 @@ RunningHub 已明确返回 `FAILED` 的视频任务默认自动重试 3 次，�
 - users：网站账号、密码哈希、管理员与启用状态
 - runninghub_configs：一对一的加密 API Key 与该用户的 RunningHub 配置
 - minimax_configs：一对一的 MiniMax 加密 API Key、稳定官方账号绑定、凭证指纹与调用节流配置
+- ark_configs：一对一的豆包 Ark 加密 API Key、模型、启用状态、超时与有限重试配置
+- content_analysis_caches：按用户、脚本哈希、模型、契约和 Prompt 版本隔离的音乐/字幕分析缓存
 - minimax_voice_assets：该账号的临时声音样本和已激活长期 voice ID
 - audio_generation_tasks：完整脚本、已保存音色、异步 MiniMax 任务编号、句级时间轴、
   语音参数、对齐方式、审核状态和当前生成版本

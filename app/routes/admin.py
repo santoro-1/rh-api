@@ -23,6 +23,10 @@ from app.models import (
 )
 from app.routes.dependencies import get_page_admin
 from app.services.csrf import require_csrf
+from app.services.content_analysis.ark_accounts import (
+    ARK_DEFAULT_BASE_URL,
+    save_ark_config,
+)
 from app.services.logging_config import log_event
 from app.services.security import (
     decrypt_secret,
@@ -178,6 +182,12 @@ def _save_config(
     minimax_requests_per_minute: int,
     minimax_account_label: str,
     minimax_new_account: bool,
+    ark_enabled: bool,
+    ark_api_key: str,
+    ark_base_url: str,
+    ark_model: str,
+    ark_timeout_seconds: int,
+    ark_max_retries: int,
 ) -> None:
     _validate_config(base_url, ai_app_id, instance_type, max_concurrent_tasks)
     config = user.runninghub_config
@@ -245,6 +255,16 @@ def _save_config(
         account_label=minimax_account_label,
         start_new_account_binding=minimax_new_account,
     )
+    save_ark_config(
+        db,
+        user,
+        enabled=ark_enabled,
+        api_key=ark_api_key,
+        base_url=ark_base_url,
+        model=ark_model,
+        timeout_seconds=ark_timeout_seconds,
+        max_retries=ark_max_retries,
+    )
 
 
 @router.get("/users")
@@ -259,6 +279,7 @@ def users_page(
             selectinload(User.runninghub_config),
             selectinload(User.workflow_configs),
             selectinload(User.minimax_config),
+            selectinload(User.ark_config),
         )
         .order_by(User.id)
     ).all()
@@ -301,6 +322,14 @@ def new_user_page(
                 "requests_per_minute": 20,
                 "account_label": "MiniMax 账号",
             },
+            "ark_config": {
+                "enabled": False,
+                "api_key_encrypted": None,
+                "base_url": ARK_DEFAULT_BASE_URL,
+                "model": "",
+                "timeout_seconds": 30,
+                "max_retries": 2,
+            },
             "system_voice_groups": [],
             "hidden_system_voice_groups": [],
             "custom_minimax_voices": [],
@@ -334,6 +363,12 @@ def create_user(
     minimax_requests_per_minute: int = Form(20),
     minimax_account_label: str = Form("MiniMax 账号"),
     minimax_new_account: bool = Form(False),
+    ark_enabled: bool = Form(False),
+    ark_api_key: str = Form(""),
+    ark_base_url: str = Form(ARK_DEFAULT_BASE_URL),
+    ark_model: str = Form(""),
+    ark_timeout_seconds: int = Form(30),
+    ark_max_retries: int = Form(2),
     csrf_ok: None = Depends(require_csrf),
     _: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
@@ -371,6 +406,12 @@ def create_user(
             minimax_requests_per_minute,
             minimax_account_label,
             minimax_new_account,
+            ark_enabled,
+            ark_api_key,
+            ark_base_url,
+            ark_model,
+            ark_timeout_seconds,
+            ark_max_retries,
         )
         db.commit()
     except ValueError as exc:
@@ -393,6 +434,7 @@ def edit_user_page(
             selectinload(User.workflow_configs),
             selectinload(User.minimax_config),
             selectinload(User.minimax_voices),
+            selectinload(User.ark_config),
         )
         .where(User.id == user_id)
     )
@@ -417,6 +459,15 @@ def edit_user_page(
                 "base_url": get_settings().minimax_default_base_url,
                 "requests_per_minute": 20,
                 "account_label": "MiniMax 账号",
+            },
+            "ark_config": user.ark_config
+            or {
+                "enabled": False,
+                "api_key_encrypted": None,
+                "base_url": ARK_DEFAULT_BASE_URL,
+                "model": "",
+                "timeout_seconds": 30,
+                "max_retries": 2,
             },
             **_voice_management_context(user),
         },
@@ -447,6 +498,12 @@ def update_user(
     minimax_requests_per_minute: int = Form(20),
     minimax_account_label: str = Form("MiniMax 账号"),
     minimax_new_account: bool = Form(False),
+    ark_enabled: bool = Form(False),
+    ark_api_key: str = Form(""),
+    ark_base_url: str = Form(ARK_DEFAULT_BASE_URL),
+    ark_model: str = Form(""),
+    ark_timeout_seconds: int = Form(30),
+    ark_max_retries: int = Form(2),
     csrf_ok: None = Depends(require_csrf),
     _: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
@@ -458,6 +515,7 @@ def update_user(
             selectinload(User.workflow_configs),
             selectinload(User.minimax_config),
             selectinload(User.minimax_voices),
+            selectinload(User.ark_config),
         )
         .where(User.id == user_id)
     )
@@ -493,6 +551,12 @@ def update_user(
             minimax_requests_per_minute,
             minimax_account_label,
             minimax_new_account,
+            ark_enabled,
+            ark_api_key,
+            ark_base_url,
+            ark_model,
+            ark_timeout_seconds,
+            ark_max_retries,
         )
         db.commit()
     except ValueError as exc:

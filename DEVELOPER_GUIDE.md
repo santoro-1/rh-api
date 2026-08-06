@@ -260,12 +260,14 @@ python -m app.workers.task_worker
 - RunningHub：基础地址、轮询、超时以及自动重试次数与等待。
 - 长音频：`LONG_AUDIO_ALIGNMENT_PROVIDER`、`ASR_BASE_URL`、ASR 超时。
 - 媒体节点：`MEDIA_PROCESSING_MODE`、`MEDIA_WORKER_TOKEN`、租约和归档上限。
+- 豆包内容分析：`ARK_MAX_CONCURRENCY` 默认 10、`ARK_QUEUE_WAIT_TIMEOUT_SECONDS`
+  默认 300 秒、`CONTENT_ANALYSIS_MAX_SCRIPT_CHARS` 默认 50000。
 
-用户级 RunningHub、MiniMax 和工作流 ID 通过管理员页面维护，不写入仓库环境模板。
+用户级 RunningHub、MiniMax、豆包 Ark 和工作流 ID 通过管理员页面维护，不写入仓库环境模板。
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0020_batch_source_channel`。SQLite 启用 WAL、外键和 busy timeout，设计目标
+当前迁移头为 `0022_content_analysis_cache`。SQLite 启用 WAL、外键和 busy timeout，设计目标
 是一个 Web 加三个本地 Worker 的单服务器部署，不是多主集群。
 
 修改模型时：
@@ -412,3 +414,86 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
   或多段均进入按确认音频时长标准化的基础视频分支。
 - 修改来源、交接或拼接代码时，必须同时回归：历史迁移默认值、旧网页列表隔离、旧单段
   不拼接、旧多段不传目标时长、新工作台单段仍标准化。
+
+## 16. 内容分析契约 v1（2026-08-06）
+
+模块 0～8 之后新增的音乐与字幕语义优化使用独立、版本化契约。智能内容分析模块 1～8 已
+完成服务端契约、Ark 配置、业务接口、缓存、工作台消费、时间轴映射和本地音乐 Top1：
+
+- 权威代码位于 `app/services/content_analysis/`，契约版本为
+  `jyd.content-analysis.v1`。
+- 一次未来的模型响应只包含 `music_intent` 和 `subtitle_units`；前景图片关键词延期到
+  后续契约版本，v1 禁止 `visual_cues`。
+- `subtitle_units` 使用 Python Unicode code point 的左闭右开字符位置，必须首尾相接、
+  完整覆盖原始脚本，且每段满足 `original_script[start:end] == text`。
+- 模型不得返回字幕时间戳或本地音乐文件身份。MiniMax 时间轴映射、真实字体测宽和本地
+  Top1 音乐选择仍由工作台负责。
+- `music-matcher.v1` 的评分维度和硬过滤条件已经在 `taxonomy.py` 冻结，后续 Excel
+  运行时清单和匹配器必须复用，不得另建第二套权重。
+- 契约测试位于 `tests/test_content_analysis_contract.py`，第三方接入前必须继续覆盖漏字、
+  改字、重复、乱序、越界、绑定冲突和额外字段。
+
+跨项目实施状态、每个模块的实际结果和下一步入口记录在工作区
+`智能内容分析开发文档.md`。当前未调用付费服务，未部署生产环境，也未修改云端账号数据库。
+
+## 17. 豆包 Ark 配置与客户端（2026-08-06）
+
+- 迁移 `0021_ark_configs` 新增用户一对一豆包配置；API Key 使用现有 Fernet 机制加密，
+  管理员页面只写入或轮换，不回显明文，浏览器和工作台均不获得 Key。
+- 每个用户独立保存启用状态、Base URL、模型、1～120 秒超时和 0～5 次额外重试。
+  启用时必须已有可解密 Key 且模型非空；停用时允许先保存不完整配置。
+- 独立客户端位于 `app/services/content_analysis/ark.py`，只封装 Ark OpenAI 兼容的
+  `/chat/completions` HTTP 传输，对超时、429 和明确 5xx 做有限重试，并支持注入 mock
+  session 与 sleep。模块 3 不发起内容分析业务调用。
+- `ArkAPIError` 只暴露稳定错误码、HTTP 状态、重试属性、请求 ID 和尝试次数，不把请求
+  消息、完整响应或凭证写入异常文本和普通日志。
+- 模块 4 已增加 Prompt、结构化响应的音乐/字幕分支独立校验、缓存和数字人服务端工作台
+  接口；工作台本地项目消费、语义字幕和音乐 Top1 已在模块 5～7 完成。自动化测试不得调用
+  真实豆包服务。
+
+## 18. 统一内容分析接口与缓存（2026-08-06）
+
+- `POST /api/workbench/content-analysis` 使用现有工作台短期令牌，只接收精确原始脚本和
+  可选 `force_refresh`；浏览器和工作台不会获得 Ark Key。
+- `app/services/content_analysis/analysis.py` 负责固定 Prompt、Ark JSON Schema、响应提取、
+  音乐与字幕分支独立校验、确定性字符索引修复、成功分支保护和脱敏状态日志。
+- 迁移 `0022_content_analysis_cache` 按用户、脚本 SHA-256、模型、契约版本和 Prompt
+  版本缓存结果。缓存不保存豆包原始完整响应；完整失败不形成粘性缓存，部分成功和完整
+  成功可复用，强制刷新失败不得覆盖此前合法分支。
+- 单 Web 进程使用统一有界信号量，默认最多同时发出 10 个 Ark 请求；其余请求等待，默认
+  最长 300 秒。当前生产结构只有一个 Web 进程；若将来增加 Web 进程或多台主机，必须先
+  把进程内信号量替换为数据库或 Redis 共享租约，不能简单把进程数相乘。
+- 429、超时、连接错误和明确 5xx 继续使用模块 3 的有限退避。分析失败不调用 MiniMax、
+  RunningHub 或剪映，不改变基础视频状态。
+
+## 19. 工作台内容分析消费边界（2026-08-06）
+
+- 工作台智能内容分析模块 5 已按 `ProjectItem` 消费 `/api/workbench/content-analysis`；一次
+  HTTP/Ark 请求仍只包含一条精确脚本，不支持把多行拼成一个模型输入。
+- 工作台单批最多并发 10 行，并保存逐行、逐分支快照。服务端缓存仍按用户和脚本哈希隔离，
+  不新增工作台项目 ID 维度；同账号相同脚本可以共享服务端缓存，但工作台状态各行独立。
+- Excel/CSV 导入和脚本编辑不自动分析；点击“生成声音预览”时才分析本批声音目标中首次
+  导入或文本变化的行。工作台脚本变化只使该行声音和分析快照失效，其余行不会重新请求。
+  文本未变而重新生成声音不会重做分析；显式单行分析重试才传 `force_refresh=true`。
+- 模块 5 不映射 MiniMax 时间轴、不执行本地音乐 Top1，也不改变数字人后端现有任务状态。
+
+## 20. 工作台语义字幕映射边界（2026-08-06）
+
+- 工作台智能内容分析模块 6 已消费本服务返回的 `subtitle_units`，但映射完全发生在工作台
+  本地 4B 阶段；数字人服务端和大模型仍不得返回字幕时间戳。
+- 工作台使用 MiniMax `raw_cues` 的真实时间范围作为唯一锚点，并核对当前脚本、分析脚本
+  摘要、当前音频脚本摘要及 raw cues 音频绑定。任一不一致就回退原有排版。
+- 空格和换行可不出现在 MiniMax cue 文本中，其他字符必须精确一致；`~` 不是通配符。
+- 模块 6 不改变本项目缓存、Ark/MiniMax 独立失败重试、RunningHub 状态或 BGM 选择。
+
+## 21. 智能内容分析跨项目验收（2026-08-06）
+
+- 模块 8 新增 `tests/test_content_analysis_workbench_integration.py`，把本项目
+  `analyze_content` 的真实序列化结果直接传入工作台的响应复核、语义字幕映射和本地音乐
+  匹配器，防止两边独立 mock 都通过但实际响应结构不兼容。
+- 跨项目测试覆盖双分支成功、音乐成功/字幕失败、字幕成功/音乐失败、安全字符索引重算，
+  以及空格、换行和 `~` 的精确保留；同时确认 Top1 响应不包含候选列表或 Top3。
+- 模块 8 新增验收 `3 passed`；内容分析定向回归 `48 passed`；本项目完整 mock 回归
+  `216 passed`，工作台完整 mock 回归 `260 passed`，0 failure、0 error。
+- 验收未发现运行时代码缺陷。测试没有发出真实豆包、MiniMax、RunningHub 或剪映请求，
+  没有部署生产环境，也没有修改云端账号数据库。真实服务质量与生产发布仍需独立授权。

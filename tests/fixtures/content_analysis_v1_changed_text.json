@@ -1,0 +1,56 @@
+{
+  "schema_version": "jyd.content-analysis.v1",
+  "music_intent": {
+    "primary_scene": "health_education",
+    "secondary_scenes": ["weight_management"],
+    "content_format": "knowledge_explanation",
+    "topics": ["general_health", "metabolism"],
+    "primary_mood": "rational",
+    "secondary_moods": ["encouraging"],
+    "valence": "positive",
+    "energy": 3,
+    "pace": "medium",
+    "seriousness": 4,
+    "warmth": 3,
+    "tension": 2,
+    "speech_density": "high",
+    "vocal_preference": "prefer_instrumental",
+    "opening_preference": "soft",
+    "avoid_traits": ["strong_vocals", "dense_arrangement"],
+    "confidence": 0.92
+  },
+  "subtitle_units": [
+    {
+      "start": 0,
+      "end": 2,
+      "text": "那么",
+      "kind": "connector",
+      "bind": "right",
+      "break_after": "avoid"
+    },
+    {
+      "start": 2,
+      "end": 4,
+      "text": "通過",
+      "kind": "word",
+      "bind": "none",
+      "break_after": "allow"
+    },
+    {
+      "start": 4,
+      "end": 7,
+      "text": "八十四",
+      "kind": "number",
+      "bind": "right",
+      "break_after": "avoid"
+    },
+    {
+      "start": 7,
+      "end": 8,
+      "text": "天",
+      "kind": "word",
+      "bind": "left",
+      "break_after": "prefer"
+    }
+  ]
+}

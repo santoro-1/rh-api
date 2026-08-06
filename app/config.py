@@ -84,6 +84,9 @@ class Settings:
     staged_asset_retention_hours: int
     minimax_default_base_url: str
     minimax_request_timeout_seconds: int
+    ark_max_concurrency: int
+    ark_queue_wait_timeout_seconds: int
+    content_analysis_max_script_chars: int
     temporary_voice_retention_hours: int
     long_audio_alignment_provider: str
     asr_base_url: str
@@ -181,6 +184,19 @@ class Settings:
             raise ValueError(
                 "RUNNINGHUB_AUTO_RETRY_BASE_DELAY_SECONDS 必须为 1-3600"
             )
+        ark_max_concurrency = _as_int("ARK_MAX_CONCURRENCY", 10)
+        if not 1 <= ark_max_concurrency <= 100:
+            raise ValueError("ARK_MAX_CONCURRENCY 必须为 1-100")
+        ark_queue_wait_timeout_seconds = _as_int(
+            "ARK_QUEUE_WAIT_TIMEOUT_SECONDS", 300
+        )
+        if not 1 <= ark_queue_wait_timeout_seconds <= 3600:
+            raise ValueError("ARK_QUEUE_WAIT_TIMEOUT_SECONDS 必须为 1-3600")
+        content_analysis_max_script_chars = _as_int(
+            "CONTENT_ANALYSIS_MAX_SCRIPT_CHARS", 50000
+        )
+        if not 100 <= content_analysis_max_script_chars <= 500000:
+            raise ValueError("CONTENT_ANALYSIS_MAX_SCRIPT_CHARS 必须为 100-500000")
 
         return cls(
             app_env=app_env,
@@ -230,6 +246,9 @@ class Settings:
             minimax_request_timeout_seconds=_as_int(
                 "MINIMAX_REQUEST_TIMEOUT_SECONDS", 120
             ),
+            ark_max_concurrency=ark_max_concurrency,
+            ark_queue_wait_timeout_seconds=ark_queue_wait_timeout_seconds,
+            content_analysis_max_script_chars=content_analysis_max_script_chars,
             temporary_voice_retention_hours=_as_int(
                 "TEMPORARY_VOICE_RETENTION_HOURS", 48
             ),

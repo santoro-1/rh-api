@@ -83,7 +83,19 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('audio_generation_tasks')"
             )
         }
-    assert revision == "0020_batch_source_channel"
+        ark_config_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('ark_configs')"
+            )
+        }
+        content_analysis_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('content_analysis_caches')"
+            )
+        }
+    assert revision == "0022_content_analysis_cache"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -101,6 +113,28 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
     assert audio_task_columns["primary_kind"][3] == 0
     assert audio_task_columns["primary_path"][3] == 0
     assert audio_task_columns["primary_original_name"][3] == 0
+    assert {
+        "user_id",
+        "enabled",
+        "api_key_encrypted",
+        "base_url",
+        "model",
+        "timeout_seconds",
+        "max_retries",
+    } <= ark_config_columns
+    assert {
+        "user_id",
+        "script_sha256",
+        "schema_version",
+        "prompt_version",
+        "model",
+        "overall_status",
+        "music_analysis_status",
+        "subtitle_analysis_status",
+        "music_intent_json",
+        "subtitle_units_json",
+        "cacheable",
+    } <= content_analysis_columns
 
 
 def test_audio_review_migration_preserves_existing_batch_items():
@@ -224,7 +258,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0020_batch_source_channel"
+        assert version == "0022_content_analysis_cache"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
