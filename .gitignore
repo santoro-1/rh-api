@@ -64,3 +64,6 @@ desktop.ini
 *.ppk
 id_rsa
 id_ed25519
+
+# Local pytest scratch directories
+.pytest-*/
