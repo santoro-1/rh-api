@@ -8,6 +8,9 @@ from typing import Any
 from app.database import SessionLocal
 from app.models import ArkConfig, User
 from app.services.content_analysis.analysis import analyze_content
+from app.services.content_analysis.contracts import (
+    CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
+)
 from app.services.security import encrypt_secret
 from tests.conftest import create_user
 
@@ -56,6 +59,17 @@ def _fixture_payload() -> dict[str, Any]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
+def _provider_payload(*, prefer_after: list[int]) -> dict[str, Any]:
+    return {
+        "schema_version": CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
+        "music_intent": _fixture_payload()["music_intent"],
+        "subtitle_breaks": {
+            "prefer_after": prefer_after,
+            "allow_after": [],
+        },
+    }
+
+
 def _analyze(
     *, username: str, script: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
@@ -96,7 +110,7 @@ def test_server_success_contract_drives_workbench_subtitles_and_top1() -> None:
     result = _analyze(
         username="cross-project-success",
         script=SCRIPT,
-        payload=_fixture_payload(),
+        payload=_provider_payload(prefer_after=[4]),
     )
 
     consumed = _consume_in_workbench(result, SCRIPT)

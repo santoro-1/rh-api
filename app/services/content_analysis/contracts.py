@@ -37,6 +37,12 @@ CONTENT_ANALYSIS_SCHEMA_VERSION = "jyd.content-analysis.v1"
 CONTENT_ANALYSIS_SCHEMA_ID = (
     "https://video.lanyingjk01.com/schemas/jyd.content-analysis.v1.json"
 )
+CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION = "jyd.content-analysis.provider.v2"
+CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID = (
+    "https://video.lanyingjk01.com/schemas/jyd.content-analysis.provider.v2.json"
+)
+
+_LOCAL_PREFERRED_BREAK_CHARACTERS = frozenset("，。！？；：、,.!?;:\n\r")
 
 LevelScore = Field(ge=1, le=5, description="Integer level from 1 (low) to 5 (high).")
 ConfidenceScore = confloat(strict=True, ge=0.0, le=1.0)
@@ -130,6 +136,34 @@ class ContentAnalysisResult(ContractModel):
     schema_version: Literal[CONTENT_ANALYSIS_SCHEMA_VERSION]
     music_intent: MusicIntent
     subtitle_units: list[SubtitleUnit] = Field(min_length=1)
+
+
+class SubtitleBreakPlan(ContractModel):
+    """Compact provider plan: selected boundaries, never duplicated script text."""
+
+    prefer_after: list[StrictInt]
+    allow_after: list[StrictInt]
+
+    @field_validator("prefer_after", "allow_after")
+    @classmethod
+    def require_sorted_unique_positions(cls, values: list[int]) -> list[int]:
+        if values != sorted(set(values)):
+            raise ValueError("subtitle break positions must be sorted and unique")
+        return values
+
+    @model_validator(mode="after")
+    def reject_overlapping_strengths(self) -> "SubtitleBreakPlan":
+        if set(self.prefer_after).intersection(self.allow_after):
+            raise ValueError("one subtitle boundary cannot have two strengths")
+        return self
+
+
+class ContentAnalysisProviderResult(ContractModel):
+    """Internal Ark response kept compact while the public v1 contract stays stable."""
+
+    schema_version: Literal[CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION]
+    music_intent: MusicIntent
+    subtitle_breaks: SubtitleBreakPlan
 
 
 class ContentAnalysisContractError(ValueError):
@@ -307,6 +341,123 @@ def parse_subtitle_units_payload(
     return rebuilt
 
 
+def subtitle_break_candidate_positions(original_script: str) -> list[int]:
+    """Return model-selectable semantic boundaries using Python code-point offsets.
+
+    Punctuation and whitespace boundaries are deterministic local facts and are
+    therefore intentionally absent. Boundaries inside ASCII words/numbers are also
+    withheld so the model cannot split identifiers such as ``ADP`` or ``24.4``.
+    """
+
+    if not isinstance(original_script, str) or not original_script:
+        return []
+    positions: list[int] = []
+    for position in range(1, len(original_script)):
+        left = original_script[position - 1]
+        right = original_script[position]
+        if (
+            left.isspace()
+            or right.isspace()
+            or left in _LOCAL_PREFERRED_BREAK_CHARACTERS
+            or right in _LOCAL_PREFERRED_BREAK_CHARACTERS
+        ):
+            continue
+        if left.isascii() and right.isascii() and left.isalnum() and right.isalnum():
+            continue
+        positions.append(position)
+    return positions
+
+
+def boundary_indexed_script(original_script: str) -> str:
+    """Decorate selectable boundaries with stable IDs without changing source text."""
+
+    candidates = set(subtitle_break_candidate_positions(original_script))
+    parts: list[str] = []
+    for index, character in enumerate(original_script):
+        parts.append(character)
+        position = index + 1
+        if position in candidates:
+            parts.append(f"⟦B{position}⟧")
+    return "".join(parts)
+
+
+def _local_preferred_break_positions(original_script: str) -> set[int]:
+    return {
+        index + 1
+        for index, character in enumerate(original_script[:-1])
+        if character in _LOCAL_PREFERRED_BREAK_CHARACTERS or character.isspace()
+    }
+
+
+def parse_subtitle_break_plan_payload(
+    payload: Any,
+    *,
+    original_script: str,
+) -> list[SubtitleUnit]:
+    """Expand Ark's compact boundary plan into existing public v1 units."""
+
+    break_plan = SubtitleBreakPlan.model_validate(payload)
+    candidates = set(subtitle_break_candidate_positions(original_script))
+    requested = set(break_plan.prefer_after).union(break_plan.allow_after)
+    invalid_positions = sorted(requested.difference(candidates))
+    if invalid_positions:
+        raise ContentAnalysisContractError(
+            "subtitle_break_invalid",
+            "subtitle break plan contains a boundary that was not offered",
+        )
+
+    preferred = set(break_plan.prefer_after)
+    preferred.update(_local_preferred_break_positions(original_script))
+    allowed = set(break_plan.allow_after).difference(preferred)
+    boundaries = sorted(preferred.union(allowed))
+    boundaries.append(len(original_script))
+
+    units: list[SubtitleUnit] = []
+    cursor = 0
+    for end in boundaries:
+        if end <= cursor:
+            continue
+        text = original_script[cursor:end]
+        if text.isspace():
+            kind = SubtitleUnitKind.WHITESPACE
+        elif all(character in _LOCAL_PREFERRED_BREAK_CHARACTERS for character in text):
+            kind = SubtitleUnitKind.PUNCTUATION
+        else:
+            kind = SubtitleUnitKind.PHRASE
+        units.append(
+            SubtitleUnit(
+                start=cursor,
+                end=end,
+                text=text,
+                kind=kind,
+                bind=SubtitleBinding.NONE,
+                break_after=(
+                    BreakPreference.PREFER
+                    if end in preferred or end == len(original_script)
+                    else BreakPreference.ALLOW
+                ),
+            )
+        )
+        cursor = end
+    validate_subtitle_units(original_script, units)
+    return units
+
+
+def parse_content_analysis_provider_payload(
+    payload: Mapping[str, Any],
+    *,
+    original_script: str,
+) -> tuple[MusicIntent, list[SubtitleUnit]]:
+    """Validate one complete compact provider response."""
+
+    provider_result = ContentAnalysisProviderResult.model_validate(payload)
+    units = parse_subtitle_break_plan_payload(
+        provider_result.subtitle_breaks.model_dump(mode="json"),
+        original_script=original_script,
+    )
+    return provider_result.music_intent, units
+
+
 def content_analysis_json_schema() -> dict[str, Any]:
     """Return the canonical schema later supplied to Ark structured output."""
 
@@ -316,17 +467,9 @@ def content_analysis_json_schema() -> dict[str, Any]:
     return schema
 
 
-def content_analysis_provider_json_schema() -> dict[str, Any]:
-    """Return the canonical v1 schema with local refs inlined for providers.
+def _inline_local_schema_refs(canonical: dict[str, Any]) -> dict[str, Any]:
+    """Inline local Pydantic refs for structured-output provider compatibility."""
 
-    The canonical Pydantic schema uses local ``$defs`` / ``$ref`` references.
-    Some OpenAI-compatible structured-output implementations accept such a
-    request but do not reliably constrain referenced definitions.  Inline local
-    refs so the provider receives one self-contained root schema; validation
-    still relies on the canonical Pydantic contract above.
-    """
-
-    canonical = content_analysis_json_schema()
     definitions = canonical.get("$defs")
     if not isinstance(definitions, Mapping):
         return canonical
@@ -360,3 +503,16 @@ def content_analysis_provider_json_schema() -> dict[str, Any]:
 
     inlined = inline(canonical)
     return inlined if isinstance(inlined, dict) else canonical
+
+
+def content_analysis_provider_json_schema() -> dict[str, Any]:
+    """Return compact provider v2 schema with local refs inlined.
+
+    Ark selects semantic break IDs and never echoes the split script. The server
+    expands the plan into the stable public ``jyd.content-analysis.v1`` shape.
+    """
+
+    schema = ContentAnalysisProviderResult.model_json_schema(mode="validation")
+    schema["$id"] = CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID
+    schema["title"] = "JYD Content Analysis Provider v2"
+    return _inline_local_schema_refs(schema)

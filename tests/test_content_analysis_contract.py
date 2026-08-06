@@ -17,6 +17,12 @@ from app.services.content_analysis import (
     content_analysis_json_schema,
     parse_content_analysis_payload,
 )
+from app.services.content_analysis.contracts import (
+    CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
+    boundary_indexed_script,
+    content_analysis_provider_json_schema,
+    parse_subtitle_break_plan_payload,
+)
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -238,6 +244,52 @@ def test_schema_is_versioned_strict_and_provider_neutral() -> None:
     assert "visual_cues" not in serialized
     assert "start_us" not in serialized
     assert "bgm_identity" not in serialized
+
+
+def test_provider_schema_returns_only_music_and_compact_break_positions() -> None:
+    schema = content_analysis_provider_json_schema()
+
+    assert schema["$id"].endswith("jyd.content-analysis.provider.v2.json")
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["schema_version"]["const"] == (
+        CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION
+    )
+    assert schema["required"] == [
+        "schema_version",
+        "music_intent",
+        "subtitle_breaks",
+    ]
+    serialized = json.dumps(schema, ensure_ascii=False)
+    assert "subtitle_units" not in serialized
+    assert '"text"' not in serialized
+
+
+def test_boundary_indexed_script_withholds_punctuation_and_ascii_word_breaks() -> None:
+    indexed = boundary_indexed_script("ADP提高，百分之八十四")
+
+    assert "A⟦" not in indexed
+    assert "D⟦" not in indexed
+    assert "高⟦" not in indexed
+    assert "，⟦" not in indexed
+    assert "高，百" in indexed
+    assert indexed.replace("⟦", "").count("B") > 0
+
+
+def test_break_plan_is_expanded_from_exact_source_slices() -> None:
+    script = "百分之八十四是由呼吸的形式来离开我们身体的"
+
+    units = parse_subtitle_break_plan_payload(
+        {"prefer_after": [6], "allow_after": [13]},
+        original_script=script,
+    )
+
+    assert [unit.text for unit in units] == [
+        "百分之八十四",
+        "是由呼吸的形式",
+        "来离开我们身体的",
+    ]
+    assert [(unit.start, unit.end) for unit in units] == [(0, 6), (6, 13), (13, 21)]
+    assert [unit.break_after.value for unit in units] == ["prefer", "allow", "prefer"]
 
 
 def test_music_matcher_v1_weights_and_hard_filters_are_frozen() -> None:

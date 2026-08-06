@@ -12,10 +12,16 @@ from app.config import get_settings
 from app.models import ArkConfig, ContentAnalysisCache, User
 from app.services.content_analysis.analysis import (
     ArkConcurrencyLimiter,
+    _content_analysis_max_tokens,
     analyze_content,
     build_ark_messages,
 )
 from app.services.content_analysis.ark import ArkAPIError
+from app.services.content_analysis.contracts import (
+    CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
+    boundary_indexed_script,
+    parse_content_analysis_provider_payload,
+)
 from app.services.security import encrypt_secret
 from tests.conftest import create_user
 
@@ -26,6 +32,21 @@ SCRIPT = "那么通过八十四天"
 
 def _valid_payload() -> dict[str, Any]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+def _provider_payload(
+    *,
+    prefer_after: list[int] | None = None,
+    allow_after: list[int] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
+        "music_intent": _valid_payload()["music_intent"],
+        "subtitle_breaks": {
+            "prefer_after": prefer_after or [],
+            "allow_after": allow_after or [],
+        },
+    }
 
 
 def _ark_response(payload: dict[str, Any], request_id: str = "resp-test") -> dict[str, Any]:
@@ -149,9 +170,35 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     assert response_schema["required"] == [
         "schema_version",
         "music_intent",
-        "subtitle_units",
+        "subtitle_breaks",
     ]
-    assert "顶层只能有 schema_version、music_intent、subtitle_units 三个字段" in system_prompt
+    assert "## 1. 角色定义" in system_prompt
+    assert "## 6. 示例（few-shot）" in system_prompt
+    assert "只返回候选编号，不返回拆分后的文案" in system_prompt
+
+
+def test_long_script_gets_full_safe_output_budget_in_one_request() -> None:
+    assert _content_analysis_max_tokens("健" * 730) == 8192
+
+
+def test_music_only_provider_object_is_partial_without_a_second_request() -> None:
+    user_id = _configured_user("provider-music-only")
+    payload = _valid_payload()
+    fake = FakeArkClient(
+        [_ark_response(payload["music_intent"], request_id="resp-music-only")]
+    )
+
+    result = _analyze(user_id, fake)
+
+    assert result["overall_status"] == "PARTIAL"
+    assert result["music_analysis_status"] == "SUCCESS"
+    assert result["music_intent"] == payload["music_intent"]
+    assert result["subtitle_analysis_status"] == "FAILED"
+    assert result["subtitle_units"] is None
+    assert result["errors"]["subtitle"]["code"] == "SUBTITLE_MISSING"
+    assert result["provider_request_id"] == "resp-music-only"
+    assert result["provider_attempts"] == 1
+    assert len(fake.calls) == 1
 
 
 def test_subtitle_failure_does_not_discard_valid_music() -> None:
@@ -214,7 +261,7 @@ def test_schema_version_mismatch_debug_snapshot_is_explicitly_opt_in(
     assert len(snapshots) == 1
     snapshot = json.loads(snapshots[0].read_text(encoding="utf-8"))
     assert snapshot["error_code"] == "SCHEMA_VERSION_MISMATCH"
-    assert snapshot["expected_schema_version"] == "jyd.content-analysis.v1"
+    assert snapshot["expected_schema_version"] == CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION
     assert snapshot["received_schema_version"] == "jyd.content-analysis.v0"
     assert snapshot["provider_request_id"] == "resp-contract"
     assert snapshot["original_script"] == SCRIPT
@@ -297,10 +344,129 @@ def test_complete_transport_failure_is_not_sticky_cache() -> None:
 def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> None:
     script = "  那么\n通过八十四天  "
     messages = build_ark_messages(script)
+    system_prompt = messages[0]["content"]
 
     assert len(messages) == 2
-    assert "不得返回或推测任何字幕时间戳" in messages[0]["content"]
-    assert json.loads(messages[1]["content"])["original_script"] == script
+    assert "字幕时间戳" in system_prompt
+    assert "长脚本也要完成两项分析" in system_prompt
+    assert "不得超过 13 个全角中文字符的等效宽度" in system_prompt
+    assert "13 是单行上限，不是建议长度" in system_prompt
+    assert "只选择满足宽度所需的最少断点" in system_prompt
+    assert "完整保留“世界冠军”" in system_prompt
+    assert [
+        heading in system_prompt
+        for heading in (
+            "## 1. 角色定义",
+            "## 2. 任务目标",
+            "## 3. 输入说明",
+            "## 4. 输出要求",
+            "## 5. 业务规则约束",
+            "## 6. 示例（few-shot）",
+        )
+    ] == [True] * 6
+    user_payload = json.loads(messages[1]["content"])
+    assert set(user_payload) == {"original_script", "boundary_indexed_script"}
+    assert user_payload["original_script"] == script
+    assert user_payload["boundary_indexed_script"] == boundary_indexed_script(script)
+
+    example_json = system_prompt.split("正确输出示例：\n", maxsplit=1)[1]
+    example_payload = json.loads(example_json)
+    assert example_payload["schema_version"] == CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION
+    assert example_payload["subtitle_breaks"] == {
+        "prefer_after": [6],
+        "allow_after": [13],
+    }
+    _, example_units = parse_content_analysis_provider_payload(
+        example_payload,
+        original_script="百分之八十四是由呼吸的形式来离开我们身体的",
+    )
+    assert [unit.text for unit in example_units] == [
+        "百分之八十四",
+        "是由呼吸的形式",
+        "来离开我们身体的",
+    ]
+
+
+def test_compact_provider_breaks_expand_to_public_subtitle_units() -> None:
+    user_id = _configured_user("provider-breaks")
+    fake = FakeArkClient([_ark_response(_provider_payload(prefer_after=[4]))])
+
+    result = _analyze(user_id, fake)
+
+    assert result["overall_status"] == "SUCCESS"
+    assert result["schema_version"] == "jyd.content-analysis.v1"
+    assert [unit["text"] for unit in result["subtitle_units"]] == [
+        "那么通过",
+        "八十四天",
+    ]
+    assert [
+        (unit["start"], unit["end"], unit["break_after"])
+        for unit in result["subtitle_units"]
+    ] == [(0, 4, "prefer"), (4, 8, "prefer")]
+    assert len(fake.calls) == 1
+
+
+def test_semantic_break_plan_uses_positions_without_returning_split_text() -> None:
+    script = "百分之八十四是由呼吸的形式来离开我们身体的"
+    user_id = _configured_user("semantic-breaks")
+    provider_payload = _provider_payload(prefer_after=[6], allow_after=[13])
+    fake = FakeArkClient([_ark_response(provider_payload)])
+
+    with SessionLocal() as db:
+        result = analyze_content(
+            db,
+            db.get(User, user_id),
+            original_script=script,
+            client_factory=lambda _: fake,
+        )
+
+    assert [unit["text"] for unit in result["subtitle_units"]] == [
+        "百分之八十四",
+        "是由呼吸的形式",
+        "来离开我们身体的",
+    ]
+    assert [unit["break_after"] for unit in result["subtitle_units"]] == [
+        "prefer",
+        "allow",
+        "prefer",
+    ]
+    assert provider_payload["subtitle_breaks"] == {
+        "prefer_after": [6],
+        "allow_after": [13],
+    }
+
+
+def test_punctuation_breaks_are_added_locally_without_model_output() -> None:
+    script = "第一句，第二句"
+    user_id = _configured_user("local-punctuation-break")
+    fake = FakeArkClient([_ark_response(_provider_payload())])
+
+    with SessionLocal() as db:
+        result = analyze_content(
+            db,
+            db.get(User, user_id),
+            original_script=script,
+            client_factory=lambda _: fake,
+        )
+
+    assert [unit["text"] for unit in result["subtitle_units"]] == ["第一句，", "第二句"]
+    assert [unit["break_after"] for unit in result["subtitle_units"]] == [
+        "prefer",
+        "prefer",
+    ]
+
+
+def test_unoffered_break_position_fails_only_subtitle_branch() -> None:
+    user_id = _configured_user("invalid-provider-break")
+    fake = FakeArkClient([_ark_response(_provider_payload(prefer_after=[99]))])
+
+    result = _analyze(user_id, fake)
+
+    assert result["overall_status"] == "PARTIAL"
+    assert result["music_analysis_status"] == "SUCCESS"
+    assert result["subtitle_analysis_status"] == "FAILED"
+    assert result["errors"]["subtitle"]["code"] == "SUBTITLE_BREAK_INVALID"
+    assert len(fake.calls) == 1
 
 
 def test_ark_limiter_allows_at_most_ten_active_calls() -> None:

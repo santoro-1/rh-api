@@ -422,8 +422,10 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 
 - 权威代码位于 `app/services/content_analysis/`，契约版本为
   `jyd.content-analysis.v1`。
-- 一次未来的模型响应只包含 `music_intent` 和 `subtitle_units`；前景图片关键词延期到
-  后续契约版本，v1 禁止 `visual_cues`。
+- 对工作台公开的响应仍包含 `music_intent` 和 `subtitle_units`；内部 Ark 响应使用紧凑的
+  `jyd.content-analysis.provider.v2`，只返回 `music_intent` 与字幕断点编号
+  `subtitle_breaks`。服务端按原脚本本地切片生成公开 v1 单元。前景图片关键词延期到后续
+  契约版本，v1 禁止 `visual_cues`。
 - `subtitle_units` 使用 Python Unicode code point 的左闭右开字符位置，必须首尾相接、
   完整覆盖原始脚本，且每段满足 `original_script[start:end] == text`。
 - 模型不得返回字幕时间戳或本地音乐文件身份。MiniMax 时间轴映射、真实字体测宽和本地
@@ -465,6 +467,17 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
   把进程内信号量替换为数据库或 Redis 共享租约，不能简单把进程数相乘。
 - 429、超时、连接错误和明确 5xx 继续使用模块 3 的有限退避。分析失败不调用 MiniMax、
   RunningHub 或剪映，不改变基础视频状态。
+- 真实 Ark 验收发现 Lite 模型可能把合法 `music_intent` 字段直接提升到响应顶层并遗漏字幕。
+  当前仍只发出一次组合请求，Prompt v5 不再要求模型复述整段字幕 JSON：用户消息同时
+  提供未修改原文和带 `B` 编号的候选边界，模型只返回 `prefer_after`/`allow_after` 编号。
+  Prompt 按任务执行顺序分为角色、目标、输入、输出、业务规则和完整 few-shot；根字段、值域
+  与额外字段限制由 strict JSON Schema 负责，避免在 system/user/Schema 三处重复堆叠。
+  标点和空白断点由服务端本地补入；相邻断点间的可显示正文以 13 个全角中文字等效宽度为
+  模型硬上限而非目标长度，只为超宽片段选择最少量自然断点。未选择的边界默认避免，排版器
+  仍使用真实字体宽度作最终校验。
+  长脚本输出预算按 `max(4096, 字符数 × 12)` 计算且上限为 8192。若仍收到精确的裸音乐
+  对象，音乐分支保留成功，字幕分支使用 `SUBTITLE_MISSING` 安全降级，不自动补发第二次
+  付费请求。
 
 ## 19. 工作台内容分析消费边界（2026-08-06）
 
