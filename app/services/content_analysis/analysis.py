@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any, Callable, Iterator, Mapping
@@ -187,19 +188,108 @@ def _provider_content(response: Mapping[str, Any]) -> tuple[str, str | None]:
     return content, safe_request_id
 
 
+def _decode_provider_json(content: str) -> Mapping[str, Any]:
+    """Decode a provider reply without trusting its surrounding presentation text.
+
+    Ark's structured-output support should return a plain JSON object. Some model
+    versions nevertheless wrap the object in a Markdown fence or introduce it with
+    a short sentence. The downstream contract validation remains authoritative; this
+    helper merely extracts one complete JSON object from that presentation wrapper.
+    """
+
+    clean = content.lstrip("\ufeff").strip()
+    try:
+        payload = json.loads(clean)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, Mapping):
+        return payload
+
+    # Prefer explicit Markdown JSON fences. Do not retain or expose any surrounding
+    # model text: only the parsed object continues into contract validation.
+    fenced_payloads = re.findall(
+        r"```(?:json)?[ \t]*\r?\n(.*?)```",
+        clean,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for candidate in fenced_payloads:
+        try:
+            payload = json.loads(candidate.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, Mapping):
+            return payload
+
+    # Some providers prepend a short explanation without a fence. Accept the first
+    # complete JSON object only; the exact v1 schema and source-text checks below
+    # still reject unrelated or incomplete data.
+    decoder = json.JSONDecoder()
+    for match_index, match in enumerate(re.finditer(r"\{", clean)):
+        if match_index >= 32:
+            break
+        try:
+            payload, _ = decoder.raw_decode(clean[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, Mapping):
+            return payload
+
+    raise ValueError("provider response does not contain a JSON object")
+
+
+def _response_shape(response: Mapping[str, Any]) -> dict[str, Any]:
+    """Return diagnostics that cannot reveal model output or user source text."""
+
+    choices = response.get("choices")
+    shape: dict[str, Any] = {
+        "provider_request_id": (
+            str(response.get("id"))[:200] if response.get("id") else None
+        ),
+        "choices_type": type(choices).__name__,
+        "choices_count": len(choices) if isinstance(choices, list) else None,
+    }
+    if not isinstance(choices, list) or not choices:
+        return shape
+    first_choice = choices[0]
+    if not isinstance(first_choice, Mapping):
+        shape["first_choice_type"] = type(first_choice).__name__
+        return shape
+    message = first_choice.get("message")
+    if not isinstance(message, Mapping):
+        shape["message_type"] = type(message).__name__
+        return shape
+    content = message.get("content")
+    shape["message_content_type"] = type(content).__name__
+    if isinstance(content, str):
+        shape["message_content_length"] = len(content)
+        shape["message_has_json_fence"] = "```" in content
+    return shape
+
+
 def _parse_provider_payload(
     response: Mapping[str, Any],
     *,
     original_script: str,
 ) -> tuple[BranchResult, BranchResult, str | None]:
+    request_id: str | None = None
     try:
         content, request_id = _provider_content(response)
-        payload = json.loads(content)
+        payload = _decode_provider_json(content)
     except (TypeError, ValueError, json.JSONDecodeError):
+        log_event(
+            logger,
+            "content_analysis.response_invalid",
+            "豆包内容分析响应不是可解析的 JSON 对象",
+            level=logging.WARNING,
+            **_response_shape(response),
+        )
         failed = BranchResult.failed(
             "ARK_RESPONSE_INVALID",
             "豆包响应不是可解析的内容分析 JSON",
         )
+        # Keep a previous successful cache record untouched on a failed forced
+        # refresh. The failed provider request ID is available in the diagnostic
+        # event above, but must not replace the successful record's ID.
         return failed, failed, None
     if not isinstance(payload, Mapping):
         failed = BranchResult.failed(

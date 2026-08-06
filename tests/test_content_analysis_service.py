@@ -103,6 +103,38 @@ def test_analysis_saves_valid_branches_and_reuses_cache() -> None:
         assert record.provider_request_id == "resp-test"
 
 
+def test_analysis_accepts_json_wrapped_in_markdown_and_explanation() -> None:
+    user_id = _configured_user("markdown-json")
+    content = (
+        "以下是分析结果：\n```json\n"
+        + json.dumps(_valid_payload(), ensure_ascii=False)
+        + "\n```\n请按此结果处理。"
+    )
+    fake = FakeArkClient(
+        [{"id": "resp-markdown", "choices": [{"message": {"content": content}}]}]
+    )
+
+    result = _analyze(user_id, fake)
+
+    assert result["overall_status"] == "SUCCESS"
+    assert result["music_analysis_status"] == "SUCCESS"
+    assert result["subtitle_analysis_status"] == "SUCCESS"
+    assert result["provider_request_id"] == "resp-markdown"
+
+
+def test_analysis_accepts_json_with_unfenced_intro_text() -> None:
+    user_id = _configured_user("intro-json")
+    content = "分析结果如下：\n" + json.dumps(_valid_payload(), ensure_ascii=False)
+    fake = FakeArkClient(
+        [{"id": "resp-intro", "choices": [{"message": {"content": content}}]}]
+    )
+
+    result = _analyze(user_id, fake)
+
+    assert result["overall_status"] == "SUCCESS"
+    assert result["provider_request_id"] == "resp-intro"
+
+
 def test_subtitle_failure_does_not_discard_valid_music() -> None:
     user_id = _configured_user("partial-music")
     payload = _valid_payload()
