@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Any, Literal
@@ -313,3 +314,49 @@ def content_analysis_json_schema() -> dict[str, Any]:
     schema["$id"] = CONTENT_ANALYSIS_SCHEMA_ID
     schema["title"] = "JYD Content Analysis v1"
     return schema
+
+
+def content_analysis_provider_json_schema() -> dict[str, Any]:
+    """Return the canonical v1 schema with local refs inlined for providers.
+
+    The canonical Pydantic schema uses local ``$defs`` / ``$ref`` references.
+    Some OpenAI-compatible structured-output implementations accept such a
+    request but do not reliably constrain referenced definitions.  Inline local
+    refs so the provider receives one self-contained root schema; validation
+    still relies on the canonical Pydantic contract above.
+    """
+
+    canonical = content_analysis_json_schema()
+    definitions = canonical.get("$defs")
+    if not isinstance(definitions, Mapping):
+        return canonical
+
+    def inline(value: Any, resolving: tuple[str, ...] = ()) -> Any:
+        if isinstance(value, list):
+            return [inline(item, resolving) for item in value]
+        if not isinstance(value, Mapping):
+            return value
+
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            definition_name = reference.removeprefix("#/$defs/")
+            target = definitions.get(definition_name)
+            if isinstance(target, Mapping) and definition_name not in resolving:
+                resolved = inline(deepcopy(target), (*resolving, definition_name))
+                sibling_fields = {
+                    key: inline(item, resolving)
+                    for key, item in value.items()
+                    if key != "$ref"
+                }
+                if isinstance(resolved, dict):
+                    resolved.update(sibling_fields)
+                return resolved
+
+        return {
+            key: inline(item, resolving)
+            for key, item in value.items()
+            if key != "$defs"
+        }
+
+    inlined = inline(canonical)
+    return inlined if isinstance(inlined, dict) else canonical

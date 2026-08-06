@@ -209,6 +209,7 @@ def test_ark_client_sends_openai_compatible_request() -> None:
             {"role": "user", "content": "private script"},
         ],
         response_format={"type": "json_object"},
+        max_tokens=2048,
     )
 
     assert result["choices"][0]["message"]["content"] == "{}"
@@ -224,6 +225,7 @@ def test_ark_client_sends_openai_compatible_request() -> None:
                 ],
                 "temperature": 0.0,
                 "response_format": {"type": "json_object"},
+                "max_tokens": 2048,
             },
             "timeout": 25,
         }

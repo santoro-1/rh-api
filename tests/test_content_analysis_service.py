@@ -95,6 +95,7 @@ def test_analysis_saves_valid_branches_and_reuses_cache() -> None:
     assert second["subtitle_units"] == first["subtitle_units"]
     assert len(fake.calls) == 1
     assert fake.calls[0]["temperature"] == 0.0
+    assert fake.calls[0]["max_tokens"] == 4096
     assert fake.calls[0]["response_format"]["type"] == "json_schema"
     with SessionLocal() as db:
         record = db.query(ContentAnalysisCache).one()
@@ -135,6 +136,24 @@ def test_analysis_accepts_json_with_unfenced_intro_text() -> None:
     assert result["provider_request_id"] == "resp-intro"
 
 
+def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> None:
+    user_id = _configured_user("provider-schema")
+    fake = FakeArkClient([_ark_response(_valid_payload())])
+
+    _analyze(user_id, fake)
+
+    response_schema = fake.calls[0]["response_format"]["json_schema"]["schema"]
+    serialized_schema = json.dumps(response_schema, ensure_ascii=False)
+    system_prompt = fake.calls[0]["messages"][0]["content"]
+    assert '"$ref"' not in serialized_schema
+    assert response_schema["required"] == [
+        "schema_version",
+        "music_intent",
+        "subtitle_units",
+    ]
+    assert "顶层只能有 schema_version、music_intent、subtitle_units 三个字段" in system_prompt
+
+
 def test_subtitle_failure_does_not_discard_valid_music() -> None:
     user_id = _configured_user("partial-music")
     payload = _valid_payload()
@@ -150,6 +169,56 @@ def test_subtitle_failure_does_not_discard_valid_music() -> None:
     assert result["subtitle_units"] is None
     assert result["errors"]["subtitle"]["code"] == "SUBTITLE_TEXT_MISMATCH"
     assert result["cacheable"] is True
+
+
+def test_subtitle_mismatch_debug_snapshot_is_explicitly_opt_in(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    user_id = _configured_user("subtitle-debug")
+    payload = _valid_payload()
+    payload["subtitle_units"][1]["text"] = "通道"
+    monkeypatch.setenv("CONTENT_ANALYSIS_DEBUG_CAPTURE", "true")
+    monkeypatch.setenv("CONTENT_ANALYSIS_DEBUG_DIR", str(tmp_path))
+
+    result = _analyze(user_id, FakeArkClient([_ark_response(payload)]))
+
+    assert result["subtitle_analysis_status"] == "FAILED"
+    snapshots = list(tmp_path.glob("subtitle-mismatch-*.json"))
+    assert len(snapshots) == 1
+    snapshot = json.loads(snapshots[0].read_text(encoding="utf-8"))
+    assert snapshot["original_script"] == SCRIPT
+    assert snapshot["returned_subtitle_text"] == "那么通道八十四天"
+    assert snapshot["first_difference"] == {
+        "index": 3,
+        "source_character": "过",
+        "returned_character": "道",
+    }
+    assert snapshot["subtitle_units"] == payload["subtitle_units"]
+
+
+def test_schema_version_mismatch_debug_snapshot_is_explicitly_opt_in(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    user_id = _configured_user("contract-debug")
+    payload = _valid_payload()
+    payload["schema_version"] = "jyd.content-analysis.v0"
+    monkeypatch.setenv("CONTENT_ANALYSIS_DEBUG_CAPTURE", "true")
+    monkeypatch.setenv("CONTENT_ANALYSIS_DEBUG_DIR", str(tmp_path))
+
+    result = _analyze(user_id, FakeArkClient([_ark_response(payload, "resp-contract")]))
+
+    assert result["overall_status"] == "FAILED"
+    snapshots = list(tmp_path.glob("contract-failure-*.json"))
+    assert len(snapshots) == 1
+    snapshot = json.loads(snapshots[0].read_text(encoding="utf-8"))
+    assert snapshot["error_code"] == "SCHEMA_VERSION_MISMATCH"
+    assert snapshot["expected_schema_version"] == "jyd.content-analysis.v1"
+    assert snapshot["received_schema_version"] == "jyd.content-analysis.v0"
+    assert snapshot["provider_request_id"] == "resp-contract"
+    assert snapshot["original_script"] == SCRIPT
+    assert snapshot["provider_payload"] == payload
 
 
 def test_music_failure_does_not_discard_valid_subtitles() -> None:

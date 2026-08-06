@@ -102,6 +102,7 @@ class ArkClient:
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
         temperature: float = 0.0,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         if not messages:
             raise ValueError("Ark messages 不能为空")
@@ -116,6 +117,10 @@ class ArkClient:
             normalized_messages.append({"role": role, "content": content})
         if not isinstance(temperature, (int, float)) or not 0 <= temperature <= 2:
             raise ValueError("Ark temperature 必须在 0 到 2 之间")
+        if max_tokens is not None and (
+            isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0
+        ):
+            raise ValueError("Ark max_tokens 必须为正整数")
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -124,6 +129,8 @@ class ArkClient:
         }
         if response_format is not None:
             payload["response_format"] = dict(response_format)
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         endpoint = f"{self.base_url}/chat/completions"
         total_attempts = self.max_retries + 1
