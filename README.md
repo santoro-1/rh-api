@@ -335,3 +335,11 @@ RunningHub 已明确返回 `FAILED` 的视频任务默认自动重试 3 次，�
 一个语音 Worker、一个媒体 Worker 和一个视频 Worker；公网不直接开放 8000 端口。
 服务器默认不再安装或启动 FunASR；长媒体使用 Windows 节点时，服务器媒体 Worker
 只负责保留队列心跳，实际 ASR 与 FFmpeg 由授权节点执行。
+
+## 工作台语义前景图片
+
+云端提供独立的 `POST /api/workbench/visual-analysis`。工作台只提交精确脚本、字符候选和
+允许的概念；云端使用用户级 Ark 配置做语境消歧，并按用户、脚本、目录、候选集合、模型、
+Prompt 和契约版本独立缓存。接口不会接收本地素材路径或音视频时间，失败也不会改变声音、
+字幕、BGM、RunningHub 或已有视频。请求契约为 `jyd.visual-analysis.request.v1`，响应契约为
+`jyd.visual-analysis.v1`。

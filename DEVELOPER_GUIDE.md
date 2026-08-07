@@ -527,3 +527,15 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
   `216 passed`，工作台完整 mock 回归 `260 passed`，0 failure、0 error。
 - 验收未发现运行时代码缺陷。测试没有发出真实豆包、MiniMax、RunningHub 或剪映请求，
   没有部署生产环境，也没有修改云端账号数据库。真实服务质量与生产发布仍需独立授权。
+
+## 22. 独立视觉语境分析（2026-08-07）
+
+- `app/services/visual_analysis/` 定义严格的请求/响应模型、Ark JSON Schema、Prompt 和结果
+  复核。候选字符切片必须逐字匹配脚本，每个候选必须且只能返回一次，概念必须来自该候选
+  的允许集合，任何额外字段（包括时间和本地路径）都会被拒绝。
+- `POST /api/workbench/visual-analysis` 继续使用工作台短期令牌和用户级 Ark 配置。浏览器不
+  直连云端，Ark Key 不下发到工作台。
+- `visual_analysis_caches` 使用迁移 `0026_visual_analysis_cache`。缓存键包含用户、脚本摘要、
+  素材目录版本、候选集合摘要、响应契约、Prompt 和模型；强制刷新更新同一精确缓存项。
+- 云端只输出 `SHOW/REVIEW/SKIP`、概念、用法、重要度、置信度和原因码，不选择具体图片、
+  不计算时间。无效响应、Ark 错误或排队超时返回独立失败状态且不写缓存。

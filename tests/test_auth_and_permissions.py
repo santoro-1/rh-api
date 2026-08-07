@@ -240,6 +240,7 @@ def test_admin_can_create_a_user_with_legacy_default_instance(client):
         user = db.query(User).filter_by(username="created-user").one()
         assert user.runninghub_config is not None
         assert user.runninghub_config.instance_type == "default"
+        assert len(user.runninghub_config.credential_fingerprint or "") == 64
         workflow_config = db.query(WorkflowConfig).filter_by(
             user_id=user.id, workflow_key="digital_human"
         ).one()

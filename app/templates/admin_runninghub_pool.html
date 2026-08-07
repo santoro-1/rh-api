@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}RunningHub 资源池{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>RunningHub 执行账号资源池</h1>
+    <p class="muted">仅供新版工作台管理员使用。API Key 只在云端加密保存，页面不会显示或下发其值。</p>
+  </div>
+  <a class="button secondary" href="/admin/users">返回用户管理</a>
+</section>
+
+{% if request.query_params.get("created") == "1" %}<p class="success-notice">执行账号已新增。</p>{% endif %}
+{% if request.query_params.get("updated") == "1" %}<p class="success-notice">执行账号配置已更新。</p>{% endif %}
+
+<details class="panel pool-create-panel" {% if not accounts %}open{% endif %}>
+  <summary>新增执行账号</summary>
+  <form method="post" action="/admin/runninghub-pool/accounts" class="stack-form pool-account-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="two-columns">
+      <label>备注名称
+        <input name="label" required maxlength="100" placeholder="例如：RunningHub 一号">
+      </label>
+      <label>RunningHub API Key
+        <input name="api_key" type="password" required maxlength="4096" autocomplete="new-password" placeholder="仅本次提交到云端加密保存">
+      </label>
+      <label>Base URL
+        <input name="base_url" type="url" required maxlength="500" value="{{ default_base_url }}">
+      </label>
+      <label>数字人 AI App ID
+        <input name="digital_human_ai_app_id" required maxlength="100" placeholder="此 Key 可访问的数字人 AI App ID">
+      </label>
+      <label>最大并发
+        <input name="max_concurrent_tasks" type="number" min="1" max="5" value="5" required>
+      </label>
+    </div>
+    <div>
+      <strong>可使用此账号的管理员</strong>
+      <div class="pool-member-list">
+        {% for administrator in administrators %}
+          <label><input type="checkbox" name="admin_user_ids" value="{{ administrator.id }}" {% if administrator.id == current_user.id %}checked{% endif %}> {{ administrator.username }}{% if not administrator.is_active %}（已停用）{% endif %}</label>
+        {% endfor %}
+      </div>
+    </div>
+    <label class="inline-check"><input type="checkbox" name="is_enabled" checked> 全局启用，可供后续新版工作台操作选择</label>
+    <div class="button-row"><button type="submit">新增执行账号</button></div>
+  </form>
+</details>
+
+<section class="pool-account-list">
+  {% for account in accounts %}
+    {% set member_ids = account.pool_memberships | map(attribute='admin_user_id') | list %}
+    <article class="panel pool-account-card">
+      <div class="pool-account-heading">
+        <div>
+          <h2>#{{ account.id }} · {{ account.label }}</h2>
+          <p class="muted">凭据指纹 {{ account.credential_fingerprint[:12] }}… · API Key 已加密保存</p>
+        </div>
+        <span class="pool-state {{ 'enabled' if account.is_enabled else 'disabled' }}">{{ "已启用" if account.is_enabled else "已停用" }}</span>
+      </div>
+      <dl class="pool-account-meta">
+        <dt>健康状态</dt><dd>{{ account.health_status }}</dd>
+        <dt>最近检查</dt><dd>{{ account.health_checked_at or "尚未检查" }}</dd>
+        <dt>冷却至</dt><dd>{{ account.cooldown_until or "未冷却" }}</dd>
+        <dt>最近使用</dt><dd>{{ account.last_used_at or "尚未使用" }}</dd>
+      </dl>
+      <form method="post" action="/admin/runninghub-pool/accounts/{{ account.id }}" class="stack-form pool-account-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="two-columns">
+          <label>备注名称
+            <input name="label" required maxlength="100" value="{{ account.label }}">
+          </label>
+          <label>更换 API Key
+            <input name="api_key" type="password" maxlength="4096" autocomplete="new-password" placeholder="已加密保存，留空不修改">
+            <span class="field-help">账号产生任务历史后禁止原地换 Key；应停用旧账号并新建账号。</span>
+          </label>
+          <label>Base URL
+            <input name="base_url" type="url" required maxlength="500" value="{{ account.base_url }}">
+          </label>
+          <label>数字人 AI App ID
+            <input name="digital_human_ai_app_id" required maxlength="100" value="{{ account.digital_human_ai_app_id }}">
+          </label>
+          <label>最大并发
+            <input name="max_concurrent_tasks" type="number" min="1" max="5" value="{{ account.max_concurrent_tasks }}" required>
+          </label>
+        </div>
+        <div>
+          <strong>可使用此账号的管理员</strong>
+          <div class="pool-member-list">
+            {% for administrator in administrators %}
+              <label><input type="checkbox" name="admin_user_ids" value="{{ administrator.id }}" {% if administrator.id in member_ids %}checked{% endif %}> {{ administrator.username }}{% if not administrator.is_active %}（已停用）{% endif %}</label>
+            {% endfor %}
+          </div>
+        </div>
+        <label class="inline-check"><input type="checkbox" name="is_enabled" {% if account.is_enabled %}checked{% endif %}> 全局启用</label>
+        <div class="button-row"><button type="submit">保存账号配置</button></div>
+      </form>
+    </article>
+  {% else %}
+    <div class="empty-state">尚未配置 RunningHub 执行账号。</div>
+  {% endfor %}
+</section>
+{% endblock %}

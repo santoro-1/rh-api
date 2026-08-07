@@ -15,7 +15,7 @@
         <a href="/generate/batch">生成视频</a>
         <a href="/batches">任务记录</a>
         <a href="/voices">声音</a>
-        {% if current_user is defined and current_user.is_admin %}<a href="/admin/users">用户管理</a><a href="/admin/operations">系统状态</a>{% endif %}
+        {% if current_user is defined and current_user.is_admin %}<a href="/admin/users">用户管理</a><a href="/admin/runninghub-pool">RunningHub 资源池</a><a href="/admin/operations">系统状态</a>{% endif %}
         <form method="post" action="/logout">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button class="link-button" type="submit">退出登录</button>

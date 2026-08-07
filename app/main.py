@@ -22,6 +22,7 @@ from app.routes import (
     long_audio,
     media_worker_api,
     operations,
+    runninghub_pool_admin,
     tasks,
     voices,
     workbench,
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     app.state.rate_limits = defaultdict(deque)
     app.include_router(auth.router)
     app.include_router(admin.router)
+    app.include_router(runninghub_pool_admin.router)
     app.include_router(tasks.router)
     app.include_router(batches.router)
     app.include_router(voices.router)

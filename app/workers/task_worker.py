@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -18,6 +18,7 @@ from app.models import (
     GenerationSegment,
     GenerationTask,
     RunningHubConfig,
+    RunningHubExecutionAccount,
     TaskStatus,
     User,
 )
@@ -25,6 +26,16 @@ from app.services.runninghub import (
     RunningHubClient,
     RunningHubError,
     runninghub_upload_diagnostics,
+)
+from app.services.runninghub_dispatch import (
+    DispatchReservation,
+    cool_execution_account,
+    mark_execution_account_healthy,
+    prepare_legacy_credential_fingerprints,
+    release_unsubmitted_pool_reservation,
+    reserve_legacy_task,
+    reserve_pool_task,
+    task_uses_execution_pool,
 )
 from app.services.logging_config import (
     configure_logging,
@@ -49,6 +60,7 @@ logger = logging.getLogger(__name__)
 REMOTE_CAPACITY_RECHECK_SECONDS = 180.0
 REMOTE_WATCHDOG_CANCEL_ERROR_CODE = "REMOTE_WATCHDOG_CANCEL_FAILED"
 _capacity_check_after: dict[int, float] = {}
+_remote_account_task_counts: dict[int, int] = {}
 
 # Only these remote-work states consume a user's configured concurrency slot.
 # PENDING remains in the shared FIFO but does not occupy RunningHub capacity.
@@ -92,16 +104,32 @@ def _video_log_context(task: GenerationTask) -> dict[str, object]:
         "batch_item_id": item.id if item else None,
         "source_channel": batch.source_channel if batch else None,
         "correlation_id": (batch.correlation_id or batch.id) if batch else None,
+        "execution_account_id": task.execution_account_id,
+        "execution_account_label": (
+            task.execution_account.label if task.execution_account else None
+        ),
+        "execution_account_max_concurrency": (
+            task.execution_account.max_concurrent_tasks
+            if task.execution_account
+            else None
+        ),
     }
 
 
-def _make_client(config: RunningHubConfig) -> RunningHubClient:
+def _make_client(
+    config: RunningHubConfig | RunningHubExecutionAccount,
+) -> RunningHubClient:
     """Build the account-level client; the selected adapter supplies the App ID."""
 
+    ai_app_id = (
+        config.digital_human_ai_app_id
+        if isinstance(config, RunningHubExecutionAccount)
+        else config.ai_app_id
+    )
     return RunningHubClient(
         api_key=decrypt_secret(config.api_key_encrypted),
         base_url=config.base_url,
-        ai_app_id=config.ai_app_id,
+        ai_app_id=ai_app_id,
     )
 
 
@@ -224,13 +252,17 @@ def _handle_safe_pre_submission_failure(
     code: str,
     message: str,
     diagnostics: dict[str, Any] | None = None,
+    release_pool_account: bool = False,
 ) -> None:
     """Retry failures that happened before a remote task could be created."""
 
+    log_context = _video_log_context(task)
     task.error_code = code
     scheduled = _schedule_runninghub_auto_retry(task, message=message)
     if scheduled is not None:
         _, delay_seconds = scheduled
+        if release_pool_account:
+            release_unsubmitted_pool_reservation(task)
         db.commit()
         log_event(
             logger,
@@ -244,7 +276,7 @@ def _handle_safe_pre_submission_failure(
             error_code=code,
             error=message,
             **(diagnostics or {}),
-            **_video_log_context(task),
+            **log_context,
         )
         return
     _mark_failed(
@@ -377,6 +409,7 @@ def recover_interrupted_tasks(db: Session) -> int:
         )
         .values(
             status=TaskStatus.PENDING.value,
+            execution_account_id=None,
             error_code=None,
             error_message=None,
         )
@@ -386,27 +419,28 @@ def recover_interrupted_tasks(db: Session) -> int:
 
 
 def claim_next_pending_task(db: Session) -> str | None:
-    # user_id -> currently occupied slots, calculated once for this claim pass.
-    active_counts = dict(
-        db.execute(
-            select(GenerationTask.user_id, func.count())
-            .where(GenerationTask.status.in_(SLOT_OCCUPYING_TASK_STATUSES))
-            .group_by(GenerationTask.user_id)
-        ).all()
-    )
-    # user_id -> administrator-configured maximum parallel RunningHub tasks.
-    concurrency_limits = dict(
-        db.execute(
-            select(
-                RunningHubConfig.user_id,
-                RunningHubConfig.max_concurrent_tasks,
+    prepare_legacy_credential_fingerprints(db)
+    # Global creation time remains the FIFO key. A task whose entire selected
+    # pool is full/cooling is skipped so a healthy account or another user's
+    # later task can still make progress.
+    pending_tasks = list(
+        db.scalars(
+            select(GenerationTask)
+            .options(
+                selectinload(GenerationTask.user).selectinload(
+                    User.runninghub_config
+                ),
+                selectinload(GenerationTask.user).selectinload(
+                    User.workflow_configs
+                ),
+                selectinload(GenerationTask.execution_account),
+                selectinload(GenerationTask.batch_item).selectinload(
+                    GenerationBatchItem.batch
+                ),
+                selectinload(GenerationTask.segment)
+                .selectinload(GenerationSegment.batch_item)
+                .selectinload(GenerationBatchItem.batch),
             )
-        ).all()
-    )
-    # Global creation time is the FIFO key; rows belonging to a full user are
-    # skipped without blocking eligible rows created later by other users.
-    pending_tasks = db.execute(
-        select(GenerationTask.id, GenerationTask.user_id)
         .where(
             GenerationTask.status == TaskStatus.PENDING.value,
             or_(
@@ -415,40 +449,40 @@ def claim_next_pending_task(db: Session) -> str | None:
             ),
         )
         .order_by(GenerationTask.created_at)
-    ).all()
-    for task_id, user_id in pending_tasks:
-        if _capacity_check_is_deferred(user_id):
-            continue
-        limit = max(int(concurrency_limits.get(user_id, 1)), 1)
-        if int(active_counts.get(user_id, 0)) >= limit:
-            continue
-        result = db.execute(
-            update(GenerationTask)
-            .where(
-                GenerationTask.id == task_id,
-                GenerationTask.status == TaskStatus.PENDING.value,
+        ).all()
+    )
+    for pending_task in pending_tasks:
+        reservation: DispatchReservation | None
+        if task_uses_execution_pool(pending_task):
+            reservation = reserve_pool_task(
+                db,
+                pending_task,
+                remote_active_counts=_remote_account_task_counts,
             )
-            .values(
-                status=TaskStatus.UPLOADING.value,
-                error_code=None,
-                error_message=None,
-            )
+        else:
+            if _capacity_check_is_deferred(pending_task.user_id):
+                continue
+            reservation = reserve_legacy_task(db, pending_task)
+        if reservation is None:
+            continue
+        task = _load_task(db, reservation.task_id)
+        log_event(
+            logger,
+            "video.pool_reserved" if reservation.uses_pool else "video.claimed",
+            (
+                "视频 Worker 已从 RunningHub 资源池原子预留账号并领取任务"
+                if reservation.uses_pool
+                else "视频 Worker 已领取任务"
+            ),
+            **(
+                _video_log_context(task)
+                if task is not None
+                else {"task_id": reservation.task_id}
+            ),
+            concurrency_limit=reservation.concurrency_limit,
+            occupied_before_reservation=reservation.occupied_before_reservation,
         )
-        db.commit()
-        if result.rowcount == 1:
-            task = _load_task(db, task_id)
-            log_event(
-                logger,
-                "video.claimed",
-                "视频 Worker 已领取任务",
-                **(
-                    _video_log_context(task)
-                    if task is not None
-                    else {"task_id": task_id, "user_id": user_id}
-                ),
-                concurrency_limit=limit,
-            )
-            return task_id
+        return reservation.task_id
     return None
 
 
@@ -458,6 +492,7 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
         .options(
             selectinload(GenerationTask.user).selectinload(User.runninghub_config),
             selectinload(GenerationTask.user).selectinload(User.workflow_configs),
+            selectinload(GenerationTask.execution_account),
             selectinload(GenerationTask.batch_item).selectinload(
                 GenerationBatchItem.batch
             ),
@@ -480,12 +515,24 @@ def _handle_remote_status(
         result = client.query_task(task.runninghub_task_id)
     except RunningHubError as exc:
         if exc.is_task_not_found:
+            if task.execution_account:
+                mark_execution_account_healthy(
+                    task.execution_account, clear_cooldown=False
+                )
+                _remote_account_task_counts.pop(task.execution_account.id, None)
             _mark_remote_cancelled(
                 task,
                 "RunningHub 返回任务不存在或已过期，可能已在平台手动取消",
             )
             db.commit()
             return
+        if task.execution_account:
+            cool_execution_account(
+                task.execution_account,
+                error_code=str(exc.error_code or "QUERY_ERROR"),
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=True,
+            )
         # A query failure must never lead to a second paid submission.
         watchdog_cancel_pending = (
             task.error_code == REMOTE_WATCHDOG_CANCEL_ERROR_CODE
@@ -511,6 +558,10 @@ def _handle_remote_status(
             )
         return
 
+    if task.execution_account:
+        mark_execution_account_healthy(
+            task.execution_account, clear_cooldown=False
+        )
     status = str(result.get("status") or "").upper()
     previous_status = task.status
     remote_error_code = str(result.get("errorCode") or "") or None
@@ -545,6 +596,8 @@ def _handle_remote_status(
                 **_video_log_context(task),
             )
         return
+    if task.execution_account:
+        _remote_account_task_counts.pop(task.execution_account.id, None)
     task.error_code = remote_error_code
     task.error_message = remote_error_message
     if status == "FAILED":
@@ -655,12 +708,18 @@ def _return_to_capacity_queue(
     remote_current_tasks: int | None = None,
     concurrency_limit: int | None = None,
     diagnostics: dict[str, Any] | None = None,
+    release_pool_account: bool = False,
 ) -> None:
+    log_context = _video_log_context(task)
+    pool_account = task.execution_account
     task.status = TaskStatus.PENDING.value
     task.error_code = None
     task.error_message = None
     task.completed_at = None
-    _defer_capacity_check(task.user_id, REMOTE_CAPACITY_RECHECK_SECONDS)
+    if release_pool_account:
+        release_unsubmitted_pool_reservation(task)
+    else:
+        _defer_capacity_check(task.user_id, REMOTE_CAPACITY_RECHECK_SECONDS)
     db.commit()
     log_event(
         logger,
@@ -671,20 +730,39 @@ def _return_to_capacity_queue(
         concurrency_limit=concurrency_limit,
         retry_after_seconds=int(REMOTE_CAPACITY_RECHECK_SECONDS),
         **(diagnostics or {}),
-        **_video_log_context(task),
+        **log_context,
     )
+    if pool_account is not None and release_pool_account:
+        log_event(
+            logger,
+            "video.pool_reservation_released",
+            "未创建远程任务，已释放 RunningHub 执行账号预留",
+            execution_account_id=pool_account.id,
+            execution_account_label=pool_account.label,
+            **{key: value for key, value in log_context.items() if not key.startswith("execution_account")},
+        )
 
 
 def _remote_capacity_is_available(
     db: Session,
     task: GenerationTask,
     client: RunningHubClient,
-    config: RunningHubConfig,
+    config: RunningHubConfig | RunningHubExecutionAccount,
 ) -> bool:
     limit = max(int(config.max_concurrent_tasks), 1)
+    pool_account = (
+        config if isinstance(config, RunningHubExecutionAccount) else None
+    )
     try:
         current_tasks = client.get_account_current_task_count()
     except RunningHubError as exc:
+        if pool_account is not None:
+            cool_execution_account(
+                pool_account,
+                error_code=str(exc.error_code or "CAPACITY_CHECK_ERROR"),
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=True,
+            )
         _return_to_capacity_queue(
             db,
             task,
@@ -692,9 +770,20 @@ def _remote_capacity_is_available(
             event_code="video.capacity_check_error",
             level=logging.WARNING,
             diagnostics=exc.log_details(),
+            release_pool_account=pool_account is not None,
         )
         return False
+    if pool_account is not None:
+        _remote_account_task_counts[pool_account.id] = current_tasks
+        mark_execution_account_healthy(pool_account)
     if current_tasks >= limit:
+        if pool_account is not None:
+            cool_execution_account(
+                pool_account,
+                error_code="CAPACITY_FULL",
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=False,
+            )
         _return_to_capacity_queue(
             db,
             task,
@@ -702,8 +791,11 @@ def _remote_capacity_is_available(
             event_code="video.capacity_waiting",
             remote_current_tasks=current_tasks,
             concurrency_limit=limit,
+            release_pool_account=pool_account is not None,
         )
         return False
+    if pool_account is not None:
+        db.commit()
     return True
 
 
@@ -715,10 +807,29 @@ def process_task(db: Session, task_id: str) -> None:
         TaskStatus.CANCELLED.value,
     }:
         return
-    if not task.user or not task.user.is_active or not task.user.runninghub_config:
-        _mark_failed(task, "CONFIGURATION_ERROR", "账号已禁用或 RunningHub 配置缺失")
+    if not task.user or not task.user.is_active:
+        _mark_failed(task, "CONFIGURATION_ERROR", "账号已禁用")
         db.commit()
         return
+    uses_pool = task_uses_execution_pool(task)
+    if uses_pool:
+        if task.execution_account is None:
+            _mark_failed(
+                task,
+                "POOL_ACCOUNT_BINDING_MISSING",
+                "新版工作台资源池任务缺少已预留的 RunningHub 执行账号",
+            )
+            db.commit()
+            return
+        execution_config: RunningHubConfig | RunningHubExecutionAccount = (
+            task.execution_account
+        )
+    else:
+        if task.user.runninghub_config is None:
+            _mark_failed(task, "CONFIGURATION_ERROR", "RunningHub 配置缺失")
+            db.commit()
+            return
+        execution_config = task.user.runninghub_config
     try:
         workflow = get_workflow(task.workflow_type)
     except ValueError as exc:
@@ -726,15 +837,20 @@ def process_task(db: Session, task_id: str) -> None:
         db.commit()
         return
     workflow_config = get_user_workflow_config(task.user, workflow.key)
-    if not workflow_config.is_enabled:
+    if not uses_pool and not workflow_config.is_enabled:
         _mark_failed(task, "WORKFLOW_DISABLED", f"工作流未为该账号启用：{workflow.key}")
         db.commit()
         return
     try:
-        client = _make_client(task.user.runninghub_config)
+        client = _make_client(execution_config)
+        effective_ai_app_id = (
+            task.execution_account.digital_human_ai_app_id
+            if uses_pool and task.execution_account
+            else workflow_config.ai_app_id
+        )
         # RunningHubClient is generic.  The workflow config determines only
         # which AI App the generic submit endpoint targets.
-        client.ai_app_id = workflow_config.ai_app_id
+        client.ai_app_id = effective_ai_app_id
         client.submission_type = workflow.submission_type
     except (ValueError, RunningHubError) as exc:
         _mark_failed(task, "CONFIGURATION_ERROR", str(exc))
@@ -759,7 +875,7 @@ def process_task(db: Session, task_id: str) -> None:
         db,
         task,
         client,
-        task.user.runninghub_config,
+        execution_config,
     ):
         return
 
@@ -803,9 +919,9 @@ def process_task(db: Session, task_id: str) -> None:
         payload = workflow.build_payload(
             task,
             uploaded_files,
-            ai_app_id=workflow_config.ai_app_id,
-            instance_type=workflow_config.instance_type,
-            settings=workflow_config.settings,
+            ai_app_id=effective_ai_app_id,
+            instance_type=("default" if uses_pool else workflow_config.instance_type),
+            settings=({} if uses_pool else workflow_config.settings),
         )
         remote_task_id = client.submit_task(payload)
         # Persist as soon as submission returns. Every later run only queries this ID.
@@ -817,6 +933,11 @@ def process_task(db: Session, task_id: str) -> None:
         task.runninghub_failed_reason = None
         task.runninghub_usage = None
         task.runninghub_auto_retry_after = None
+        if task.execution_account:
+            mark_execution_account_healthy(task.execution_account)
+            _remote_account_task_counts[task.execution_account.id] = (
+                _remote_account_task_counts.get(task.execution_account.id, 0) + 1
+            )
         db.commit()
         log_event(
             logger,
@@ -828,16 +949,32 @@ def process_task(db: Session, task_id: str) -> None:
         )
         # Let RunningHub accountStatus catch up before considering another
         # task for this user. Other users remain eligible in the same pass.
-        _defer_capacity_check(task.user_id, get_settings().poll_interval_seconds)
+        if not uses_pool:
+            _defer_capacity_check(task.user_id, get_settings().poll_interval_seconds)
     except RunningHubError as exc:
         if exc.is_capacity_limited:
+            if task.execution_account:
+                cool_execution_account(
+                    task.execution_account,
+                    error_code="CAPACITY_FULL",
+                    cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                    unhealthy=False,
+                )
             _return_to_capacity_queue(
                 db,
                 task,
                 reason="RunningHub 在提交时报告并发已满，任务将保留排队",
                 event_code="video.capacity_waiting",
+                release_pool_account=task.execution_account is not None,
             )
             return
+        if task.execution_account:
+            cool_execution_account(
+                task.execution_account,
+                error_code=str(exc.error_code or "SUBMIT_FAILED"),
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=True,
+            )
         if exc.retry_safe and task.runninghub_task_id is None:
             _handle_safe_pre_submission_failure(
                 db,
@@ -845,6 +982,7 @@ def process_task(db: Session, task_id: str) -> None:
                 code="SUBMIT_FAILED",
                 message=str(exc),
                 diagnostics=exc.log_details(),
+                release_pool_account=task.execution_account is not None,
             )
             return
         _mark_failed(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from cryptography.fernet import Fernet, InvalidToken
 from passlib.context import CryptContext
 
@@ -46,3 +48,12 @@ def mask_secret(value: str | None) -> str:
     if not value:
         return "未配置"
     return "已加密保存"
+
+
+def secret_fingerprint(value: str) -> str:
+    """Return a stable one-way identifier without exposing a credential."""
+
+    clean_value = value.strip()
+    if not clean_value:
+        raise ValueError("密钥不能为空")
+    return hashlib.sha256(clean_value.encode("utf-8")).hexdigest()

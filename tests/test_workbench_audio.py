@@ -198,6 +198,79 @@ def test_workbench_voice_clone_reuses_existing_voice_queue(client, monkeypatch):
     assert response.json()["status"] == "PENDING"
 
 
+def test_workbench_imports_existing_clone_voice_without_paid_synthesis(
+    client, monkeypatch
+):
+    _account("workbench-import-voice-user")
+    token = _token(client, "workbench-import-voice-user")
+    synthesize_calls = []
+
+    monkeypatch.setattr(
+        "app.services.speech.workbench_voices.MiniMaxClient.list_voices",
+        lambda self, voice_type="system": (
+            [{"voice_id": "ImportedCloneVoice01", "voice_name": "抽卡克隆音色"}]
+            if voice_type == "voice_cloning"
+            else OFFICIAL_ITEMS
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.speech.workbench_voices.MiniMaxClient.synthesize_voice",
+        lambda self, **payload: synthesize_calls.append(payload),
+    )
+
+    imported = client.post(
+        "/api/workbench/voices/import",
+        json={
+            "access_token": token,
+            "voice_id": "ImportedCloneVoice01",
+            "name": "我的抽卡音色",
+            "already_activated": False,
+        },
+    )
+
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["provider_voice_id"] == "ImportedCloneVoice01"
+    assert imported.json()["selectable"] is False
+    assert imported.json()["activation_required"] is True
+    assert synthesize_calls == []
+    with SessionLocal() as db:
+        voice = db.query(MiniMaxVoiceAsset).filter_by(
+            voice_id="ImportedCloneVoice01"
+        ).one()
+        assert voice.name == "我的抽卡音色"
+        assert voice.status == VoiceAssetStatus.READY.value
+        assert voice.is_saved is True
+
+    activated_import = client.post(
+        "/api/workbench/voices/import",
+        json={
+            "access_token": token,
+            "voice_id": "ImportedCloneVoice01",
+            "name": "我的抽卡音色",
+            "already_activated": True,
+        },
+    )
+    assert activated_import.status_code == 200, activated_import.text
+    assert activated_import.json()["activated"] is True
+    assert activated_import.json()["selectable"] is True
+    assert synthesize_calls == []
+    with SessionLocal() as db:
+        assert db.query(MiniMaxVoiceAsset).filter_by(
+            voice_id="ImportedCloneVoice01"
+        ).one().status == VoiceAssetStatus.ACTIVE.value
+
+    missing = client.post(
+        "/api/workbench/voices/import",
+        json={
+            "access_token": token,
+            "voice_id": "MissingCloneVoice01",
+            "name": "不存在的音色",
+        },
+    )
+    assert missing.status_code == 400
+    assert "没有这个 voice_id" in missing.json()["detail"]
+
+
 def test_saved_custom_voice_requires_explicit_activation_and_can_be_deleted(
     client, monkeypatch
 ):

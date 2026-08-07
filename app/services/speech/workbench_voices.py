@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -19,7 +20,7 @@ from app.services.speech.accounts import (
     replicate_shared_custom_voice,
     synchronize_shared_custom_voices,
 )
-from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient
+from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient, validate_voice_id
 from app.services.speech.system_voices import sync_system_voices
 from app.services.storage import to_relative_data_path, voice_creation_dir
 
@@ -173,6 +174,96 @@ def voice_payload(voice: MiniMaxVoiceAsset) -> dict[str, Any]:
     }
 
 
+def import_workbench_clone_voice(
+    db: Session,
+    user: User,
+    settings: Settings,
+    *,
+    voice_id: str,
+    name: str,
+    already_activated: bool,
+) -> tuple[MiniMaxVoiceAsset, bool]:
+    """Register an existing provider clone without making any T2A request."""
+
+    config = user.minimax_config
+    if (
+        config is None
+        or not config.api_key_encrypted
+        or not config.account_binding_id
+        or not config.credential_fingerprint
+    ):
+        raise ValueError("当前账号尚未配置 MiniMax API Key")
+    clean_voice_id = str(voice_id or "").strip()
+    validate_voice_id(clean_voice_id)
+    clean_name = str(name or "").strip()
+    if not clean_name or len(clean_name) > 100:
+        raise ValueError("声音名称长度必须在 1–100 个字符之间")
+
+    provider_voices = _client(user, settings).list_voices("voice_cloning")
+    provider_ids = {
+        str(item.get("voice_id") or "").strip()
+        for item in provider_voices
+        if isinstance(item, dict)
+    }
+    if clean_voice_id not in provider_ids:
+        raise ValueError(
+            "当前 MiniMax API Key 的克隆音色列表中没有这个 voice_id，"
+            "请确认复制完整且与工作台使用同一个 MiniMax 账号"
+        )
+
+    imported_at = datetime.now(timezone.utc)
+    imported_status = (
+        VoiceAssetStatus.ACTIVE.value
+        if already_activated
+        else VoiceAssetStatus.READY.value
+    )
+
+    voice = db.scalar(
+        select(MiniMaxVoiceAsset).where(
+            MiniMaxVoiceAsset.config_id == config.id,
+            MiniMaxVoiceAsset.voice_id == clean_voice_id,
+        )
+    )
+    created = voice is None
+    if voice is None:
+        voice = MiniMaxVoiceAsset(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            config_id=config.id,
+            name=clean_name,
+            voice_id=clean_voice_id,
+            account_binding_id=config.account_binding_id,
+            credential_fingerprint=config.credential_fingerprint,
+            status=imported_status,
+            method="clone",
+            category="自定义声音",
+            is_saved=True,
+            activated_at=imported_at if already_activated else None,
+        )
+        db.add(voice)
+    else:
+        if voice.method == "system":
+            raise ValueError("MiniMax 官方音色不需要通过 voice_id 导入")
+        voice.name = clean_name
+        voice.account_binding_id = config.account_binding_id
+        voice.credential_fingerprint = config.credential_fingerprint
+        voice.method = "clone"
+        voice.category = voice.category or "自定义声音"
+        voice.is_saved = True
+        if already_activated:
+            voice.status = VoiceAssetStatus.ACTIVE.value
+            voice.activated_at = voice.activated_at or imported_at
+            voice.expires_at = None
+        elif voice.status != VoiceAssetStatus.ACTIVE.value:
+            voice.status = VoiceAssetStatus.READY.value
+            voice.activated_at = None
+            voice.expires_at = None
+    db.flush()
+    replicate_shared_custom_voice(db, voice)
+    db.commit()
+    return voice, created
+
+
 def activate_workbench_voice(
     db: Session,
     user: User,
@@ -307,5 +398,6 @@ __all__ = [
     "creation_task_payload",
     "ensure_workbench_system_voices",
     "generate_official_voice_preview",
+    "import_workbench_clone_voice",
     "voice_payload",
 ]

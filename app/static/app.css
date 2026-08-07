@@ -175,7 +175,22 @@
 .admin-config-section { border:1px solid #dbe4ef; border-radius:10px; background:#f8fafc; }
 .admin-config-section > summary { cursor:pointer; padding:14px; color:#234b83; font-weight:700; }
 .admin-config-body { padding:0 14px 14px; }
+.pool-create-panel { margin-bottom:18px; }
+.pool-create-panel > summary { cursor:pointer; color:#234b83; font-weight:700; }
+.pool-create-panel[open] > summary { margin-bottom:18px; }
+.pool-account-list { display:grid; gap:18px; margin-top:18px; }
+.pool-account-card { display:grid; gap:18px; }
+.pool-account-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+.pool-account-heading h2, .pool-account-heading p { margin:0 0 5px; }
+.pool-state { flex:0 0 auto; padding:.3rem .65rem; border-radius:999px; font-weight:700; }
+.pool-state.enabled { color:#176b38; background:#eaf8ef; }
+.pool-state.disabled { color:#7a4b00; background:#fff7dd; }
+.pool-account-meta { grid-template-columns:100px minmax(0,1fr) 100px minmax(0,1fr); margin:0; padding:14px; border-radius:9px; background:#f8fafc; }
+.pool-member-list { display:flex; gap:12px 20px; flex-wrap:wrap; margin-top:9px; }
+.pool-member-list label { display:flex; align-items:center; gap:7px; font-weight:500; }
+.pool-member-list input { width:auto; }
 @media (max-width: 700px) { .site-header { padding:12px 4vw; align-items:flex-start; flex-direction:column; } nav { flex-wrap:wrap; } .page-heading, .task-card { align-items:stretch; } .page-heading, .detail-grid { display:grid; grid-template-columns:1fr; } .two-columns { grid-template-columns:1fr; } .date-filter { display:grid; grid-template-columns:1fr; } .date-filter label { min-width:0; } .bulk-toolbar .danger { width:100%; margin-left:0; } .task-card { grid-template-columns:auto 78px 1fr; } .task-card img { width:78px; height:65px; } .task-actions { grid-column:1 / -1; grid-template-columns:1fr 1fr; } dl { grid-template-columns:1fr; gap:3px; } dd { margin-bottom:10px; } }
+@media (max-width: 700px) { .pool-account-heading { display:grid; } .pool-state { width:max-content; } .pool-account-meta { grid-template-columns:1fr; } }
 @media (max-width: 760px) { .batch-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width: 760px) { .batch-upload-grid { grid-template-columns:1fr; } .batch-order-warning { display:grid; } }
 @media (max-width: 760px) { .three-columns, .service-status-grid, .resource-grid, .operations-filter-form { grid-template-columns:1fr; } }

@@ -47,8 +47,23 @@ from app.services.content_analysis.analysis import (
     ContentAnalysisUnavailable,
     analyze_content,
 )
+from app.services.visual_analysis import (
+    VisualAnalysisInputError,
+    VisualAnalysisUnavailable,
+    analyze_visual_context,
+)
 from app.services.postproduction import postproduction_manifest
 from app.services.logging_config import log_event
+from app.services.runninghub_pool import (
+    RunningHubPoolSelectionFormatError,
+    RunningHubPoolSelectionPermissionError,
+    RunningHubPoolSelectionUnavailableError,
+    RunningHubPoolSnapshotConflictError,
+    batch_execution_account_snapshot,
+    bind_batch_execution_account_snapshot,
+    validate_workbench_execution_account_selection,
+    workbench_execution_account_summary,
+)
 from app.services.security import verify_password
 from app.services.speech.minimax import MiniMaxAPIError
 from app.services.speech.voice_studio import create_voice_task, request_voice_save
@@ -59,6 +74,7 @@ from app.services.speech.workbench_voices import (
     delete_workbench_voice,
     ensure_workbench_system_voices,
     generate_official_voice_preview,
+    import_workbench_clone_voice,
     voice_payload,
 )
 from app.services.storage import (
@@ -204,6 +220,7 @@ def _audio_batch_payload(batch: GenerationBatch) -> dict[str, Any]:
         "source_channel": batch.source_channel,
         "name": batch.name,
         "review_required": batch.review_required,
+        "runninghub_execution_account_ids": batch_execution_account_snapshot(batch),
         "items": items,
     }
 
@@ -277,6 +294,9 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
             else None
         ),
         "error_message": error_message,
+        "runninghub_execution_account_ids": batch_execution_account_snapshot(
+            item.batch
+        ),
     }
 
 
@@ -332,6 +352,22 @@ def workbench_consume_handoff(
     return {"access_token": refreshed, "user": public_workbench_user(user)}
 
 
+@router.post("/api/workbench/runninghub-execution-accounts")
+def workbench_runninghub_execution_accounts(
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Return only safe capacity metadata for the authenticated administrator."""
+
+    user = _token_user(str(payload.get("access_token", "")), db)
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="只有管理员可以使用 RunningHub 执行账号资源池",
+        )
+    return workbench_execution_account_summary(db, user)
+
+
 @router.post("/api/workbench/tasks")
 def workbench_tasks(
     payload: dict[str, Any] = Body(...), db: Session = Depends(get_db)
@@ -375,6 +411,35 @@ def workbench_content_analysis(
     except ContentAnalysisInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ContentAnalysisUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/workbench/visual-analysis")
+def workbench_visual_analysis(
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Analyze only local semantic candidates without exposing Ark credentials."""
+
+    user = _token_user(str(payload.get("access_token", "")), db)
+    force_refresh = payload.get("force_refresh", False)
+    if type(force_refresh) is not bool:
+        raise HTTPException(status_code=400, detail="force_refresh 必须是布尔值")
+    request_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"access_token", "force_refresh"}
+    }
+    try:
+        return analyze_visual_context(
+            db,
+            user,
+            payload=request_payload,
+            force_refresh=force_refresh,
+        )
+    except VisualAnalysisInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except VisualAnalysisUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
@@ -446,6 +511,34 @@ def workbench_voices(
         "voices": [voice_payload(voice) for voice in voices],
         "creation_tasks": [creation_task_payload(task) for task in tasks],
     }
+
+
+@router.post("/api/workbench/voices/import")
+def import_workbench_voice(
+    payload: dict[str, Any] = Body(...), db: Session = Depends(get_db)
+):
+    """Register a clone voice already present under the configured MiniMax key."""
+
+    user = _token_user(str(payload.get("access_token", "")), db)
+    try:
+        voice, created = import_workbench_clone_voice(
+            db,
+            user,
+            get_settings(),
+            voice_id=str(payload.get("voice_id") or ""),
+            name=str(payload.get("name") or ""),
+            already_activated=payload.get("already_activated") is True,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MiniMaxAPIError as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return JSONResponse(
+        {**voice_payload(voice), "imported": True, "created": created},
+        status_code=201 if created else 200,
+    )
 
 
 @router.post("/api/workbench/voices/{voice_asset_id}/preview")
@@ -801,6 +894,26 @@ def start_workbench_composition(
     if item is None or item.audio_task is None:
         raise HTTPException(status_code=404, detail="声音任务不存在")
     task = item.audio_task
+    try:
+        selected_account_ids = validate_workbench_execution_account_selection(
+            db,
+            user,
+            selection_provided="runninghub_execution_account_ids" in payload,
+            raw_selection=payload.get("runninghub_execution_account_ids"),
+        )
+        bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
+    except RunningHubPoolSelectionFormatError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RunningHubPoolSelectionPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (
+        RunningHubPoolSelectionUnavailableError,
+        RunningHubPoolSnapshotConflictError,
+    ) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     materialized_image: Path | None = None
     try:
         try:
@@ -867,6 +980,7 @@ def start_workbench_composition(
         batch_item_id=item.id,
         source_channel=batch.source_channel,
         correlation_id=batch_correlation_id,
+        runninghub_execution_account_ids=selected_account_ids,
     )
     return _workbench_manifest(_item_for_user(item_id, user, db))
 

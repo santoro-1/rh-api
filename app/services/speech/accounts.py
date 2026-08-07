@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import uuid
 from datetime import datetime, timezone
 
@@ -9,13 +8,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import MiniMaxConfig, MiniMaxVoiceAsset, User, VoiceAssetStatus
-from app.services.security import encrypt_secret
+from app.services.security import encrypt_secret, secret_fingerprint
 
 
 def credential_fingerprint(api_key: str) -> str:
     """Identify an API account without storing or displaying its secret."""
 
-    return hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()
+    return secret_fingerprint(api_key)
 
 
 def validate_minimax_config(

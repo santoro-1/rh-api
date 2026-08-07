@@ -7,6 +7,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -119,6 +120,9 @@ class User(Base):
     content_analysis_caches: Mapped[list["ContentAnalysisCache"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    visual_analysis_caches: Mapped[list["VisualAnalysisCache"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     minimax_voices: Mapped[list["MiniMaxVoiceAsset"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
@@ -130,6 +134,9 @@ class User(Base):
     )
     long_audio_projects: Mapped[list["LongAudioProject"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
+    )
+    runninghub_pool_memberships: Mapped[list["RunningHubPoolMembership"]] = relationship(
+        back_populates="admin_user", cascade="all, delete-orphan"
     )
 
     __table_args__ = (UniqueConstraint("username"),)
@@ -143,6 +150,9 @@ class RunningHubConfig(Base):
         ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
     )
     api_key_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    credential_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     base_url: Mapped[str] = mapped_column(String(500), nullable=False)
     ai_app_id: Mapped[str] = mapped_column(String(100), nullable=False)
     instance_type: Mapped[str] = mapped_column(String(20), nullable=False, default="plus")
@@ -288,6 +298,46 @@ class ContentAnalysisCache(Base):
     )
 
 
+class VisualAnalysisCache(Base):
+    """Validated semantic-visual decisions keyed by every material input."""
+
+    __tablename__ = "visual_analysis_caches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    script_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    script_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    catalog_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    candidate_set_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_request_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    provider_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="visual_analysis_caches")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "script_sha256",
+            "catalog_version",
+            "candidate_set_sha256",
+            "schema_version",
+            "prompt_version",
+            "model",
+            name="uq_visual_analysis_cache_key",
+        ),
+    )
+
+
 class MiniMaxVoiceAsset(Base):
     """One provider system voice or a reusable custom MiniMax voice."""
 
@@ -386,6 +436,93 @@ class WorkflowConfig(Base):
     )
 
 
+class RunningHubExecutionAccount(Base):
+    """One real RunningHub credential used as an independent capacity pool member."""
+
+    __tablename__ = "runninghub_execution_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    digital_human_ai_app_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    max_concurrent_tasks: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    health_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="UNKNOWN"
+    )
+    health_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    health_error_code: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    cooldown_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    pool_memberships: Mapped[list["RunningHubPoolMembership"]] = relationship(
+        back_populates="execution_account", cascade="all, delete-orphan"
+    )
+    tasks: Mapped[list["GenerationTask"]] = relationship(
+        back_populates="execution_account"
+    )
+    attempts: Mapped[list["GenerationTaskAttempt"]] = relationship(
+        back_populates="execution_account"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "max_concurrent_tasks >= 1 AND max_concurrent_tasks <= 5",
+            name="ck_runninghub_execution_account_concurrency",
+        ),
+    )
+
+
+class RunningHubPoolMembership(Base):
+    """Grant one administrator access to one execution account."""
+
+    __tablename__ = "runninghub_pool_memberships"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    admin_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    execution_account_id: Mapped[int] = mapped_column(
+        ForeignKey("runninghub_execution_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    admin_user: Mapped[User] = relationship(
+        back_populates="runninghub_pool_memberships"
+    )
+    execution_account: Mapped[RunningHubExecutionAccount] = relationship(
+        back_populates="pool_memberships"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "admin_user_id",
+            "execution_account_id",
+            name="uq_runninghub_pool_admin_account",
+        ),
+    )
+
+
 class GenerationTask(Base):
     __tablename__ = "generation_tasks"
 
@@ -403,6 +540,11 @@ class GenerationTask(Base):
     )
     runninghub_task_id: Mapped[Optional[str]] = mapped_column(
         String(100), nullable=True, index=True
+    )
+    execution_account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("runninghub_execution_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     workflow_type: Mapped[str] = mapped_column(
         String(100), nullable=False, default="digital_human", index=True
@@ -454,6 +596,14 @@ class GenerationTask(Base):
     segment: Mapped[Optional["GenerationSegment"]] = relationship(
         back_populates="generation_task"
     )
+    execution_account: Mapped[Optional[RunningHubExecutionAccount]] = relationship(
+        back_populates="tasks"
+    )
+    runninghub_attempts: Mapped[list["GenerationTaskAttempt"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="GenerationTaskAttempt.attempt_number",
+    )
 
     __table_args__ = (
         Index(
@@ -474,6 +624,57 @@ class GenerationTask(Base):
     )
 
 
+class GenerationTaskAttempt(Base):
+    """Immutable account binding and outcome for one RunningHub submit attempt."""
+
+    __tablename__ = "generation_task_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    generation_task_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("runninghub_execution_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    remote_task_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True, unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="RESERVED", index=True
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    failed_reason_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    task: Mapped[GenerationTask] = relationship(back_populates="runninghub_attempts")
+    execution_account: Mapped[Optional[RunningHubExecutionAccount]] = relationship(
+        back_populates="attempts"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "generation_task_id",
+            "attempt_number",
+            name="uq_generation_task_attempt_number",
+        ),
+    )
+
+
 BATCH_SOURCE_LEGACY_WEB = "legacy_web"
 BATCH_SOURCE_NEW_WORKBENCH = "new_workbench"
 
@@ -489,6 +690,9 @@ class GenerationBatch(Base):
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     workflow_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    runninghub_execution_account_ids_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
     source_channel: Mapped[str] = mapped_column(
         String(30), nullable=False, default=BATCH_SOURCE_LEGACY_WEB, index=True
     )

@@ -33,6 +33,7 @@ from app.services.security import (
     encrypt_secret,
     hash_password,
     mask_secret,
+    secret_fingerprint,
 )
 from app.services.speech.accounts import save_minimax_config
 from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient
@@ -210,7 +211,13 @@ def _save_config(
         )
         config.max_concurrent_tasks = max_concurrent_tasks
     if api_key.strip():
-        config.api_key_encrypted = encrypt_secret(api_key.strip())
+        clean_api_key = api_key.strip()
+        config.api_key_encrypted = encrypt_secret(clean_api_key)
+        config.credential_fingerprint = secret_fingerprint(clean_api_key)
+    elif config.api_key_encrypted and not config.credential_fingerprint:
+        config.credential_fingerprint = secret_fingerprint(
+            decrypt_secret(config.api_key_encrypted)
+        )
     db.add(config)
     workflow_config = save_workflow_config(
         user,
