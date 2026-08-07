@@ -15,6 +15,10 @@ from app.models import (
     VoiceCreationTask,
 )
 from app.services.security import decrypt_secret
+from app.services.speech.accounts import (
+    replicate_shared_custom_voice,
+    synchronize_shared_custom_voices,
+)
 from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient
 from app.services.speech.system_voices import sync_system_voices
 from app.services.storage import to_relative_data_path, voice_creation_dir
@@ -123,6 +127,7 @@ def available_workbench_voices(db: Session, user: User) -> list[MiniMaxVoiceAsse
     config = user.minimax_config
     if config is None or not config.account_binding_id:
         return []
+    synchronize_shared_custom_voices(db, user)
     voices = db.scalars(
         select(MiniMaxVoiceAsset)
         .where(
@@ -217,6 +222,7 @@ def activate_workbench_voice(
     voice.expires_at = activated_at + timedelta(
         hours=settings.temporary_voice_retention_hours
     )
+    replicate_shared_custom_voice(db, voice)
     db.commit()
     return target
 

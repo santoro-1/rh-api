@@ -304,10 +304,12 @@ RunningHub 已明确返回 `FAILED` 的视频任务默认自动重试 3 次，�
 
 - users：网站账号、密码哈希、管理员与启用状态
 - runninghub_configs：一对一的加密 API Key 与该用户的 RunningHub 配置
-- minimax_configs：一对一的 MiniMax 加密 API Key、稳定官方账号绑定、凭证指纹与调用节流配置
+- minimax_configs：一对一的 MiniMax 加密 API Key、稳定官方账号绑定、凭证指纹与调用节流配置；
+  完全相同凭据的不同网站账号通过指纹共享自定义音色
 - ark_configs：一对一的豆包 Ark 加密 API Key、模型、启用状态、超时与有限重试配置
 - content_analysis_caches：按用户、脚本哈希、模型、契约和 Prompt 版本隔离的音乐/字幕分析缓存
-- minimax_voice_assets：该账号的临时声音样本和已激活长期 voice ID
+- minimax_voice_assets：该网站账号的临时声音样本和本地音色副本；同 Key 用户的自定义副本
+  指向同一个 MiniMax provider voice ID，删除操作彼此隔离
 - audio_generation_tasks：完整脚本、已保存音色、异步 MiniMax 任务编号、句级时间轴、
   语音参数、对齐方式、审核状态和当前生成版本
 - audio_generation_attempts：每次 MiniMax 生成的完整音频、字幕、远程编号和审核结果

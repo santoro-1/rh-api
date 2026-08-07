@@ -69,6 +69,7 @@ from app.services.batch_status import (
     summarize_batch,
 )
 from app.services.csrf import require_csrf
+from app.services.speech.accounts import synchronize_shared_custom_voices
 from app.services.speech.system_voices import group_system_voice_assets
 from app.services.storage import (
     UploadValidationError,
@@ -181,6 +182,8 @@ def batch_generate_page(
         workflow = DIGITAL_HUMAN_WORKFLOW
     digital_config = get_user_workflow_config(current_user, DIGITAL_HUMAN_WORKFLOW)
     ltx_config = get_user_workflow_config(current_user, LTX_LIP_SYNC_WORKFLOW)
+    if synchronize_shared_custom_voices(db, current_user):
+        db.commit()
     active_voices = db.scalars(
         select(MiniMaxVoiceAsset)
         .where(

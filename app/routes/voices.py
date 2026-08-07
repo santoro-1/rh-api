@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.routes.dependencies import check_rate_limit, get_current_user, get_page_user
 from app.services.csrf import require_csrf
+from app.services.speech.accounts import synchronize_shared_custom_voices
 from app.services.speech.system_voices import group_system_voice_assets
 from app.services.speech.voice_studio import create_voice_task, request_voice_save
 from app.services.storage import UploadValidationError, safe_relative_path
@@ -65,6 +66,8 @@ def voice_studio_page(
         if current_user.minimax_config
         else None
     )
+    if synchronize_shared_custom_voices(db, current_user):
+        db.commit()
     tasks = db.scalars(
         select(VoiceCreationTask)
         .options(selectinload(VoiceCreationTask.voice_asset))

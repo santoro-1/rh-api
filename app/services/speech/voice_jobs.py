@@ -20,6 +20,7 @@ from app.models import (
 )
 from app.services.logging_config import log_event
 from app.services.security import decrypt_secret
+from app.services.speech.accounts import replicate_shared_custom_voice
 from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient
 from app.services.storage import safe_relative_path, to_relative_data_path
 
@@ -386,6 +387,7 @@ def _save_voice_asset(
     )
     db.add(voice)
     db.flush()
+    replicate_shared_custom_voice(db, voice)
     task.voice_asset_id = voice.id
     task.status = VoiceCreationStatus.SAVED.value
     task.completed_at = _now()

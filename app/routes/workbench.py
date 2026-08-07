@@ -439,11 +439,11 @@ def workbench_voices(
         .order_by(VoiceCreationTask.created_at.desc())
         .limit(30)
     ).all()
+    voices = available_workbench_voices(db, user)
+    db.commit()
     return {
         "schema": "runninghub.workbench-voices.v1",
-        "voices": [
-            voice_payload(voice) for voice in available_workbench_voices(db, user)
-        ],
+        "voices": [voice_payload(voice) for voice in voices],
         "creation_tasks": [creation_task_payload(task) for task in tasks],
     }
 

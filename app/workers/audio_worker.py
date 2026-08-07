@@ -39,6 +39,7 @@ from app.services.media_segmentation import (
     plan_timestamped_segments,
 )
 from app.services.security import decrypt_secret
+from app.services.speech.accounts import replicate_shared_custom_voice
 from app.services.speech.async_outputs import (
     decode_async_speech_output,
     dump_subtitle_cues,
@@ -335,7 +336,7 @@ def _write_subtitles(task: AudioGenerationTask, cues) -> Path:
     return target
 
 
-def _activate_used_voices(task: AudioGenerationTask) -> None:
+def _activate_used_voices(db: Session, task: AudioGenerationTask) -> None:
     activated_at = _now()
     voice = task.voice_asset
     activated_voices = (
@@ -354,6 +355,7 @@ def _activate_used_voices(task: AudioGenerationTask) -> None:
         activated_voice.expires_at = activated_at + timedelta(
             hours=get_settings().temporary_voice_retention_hours
         )
+        replicate_shared_custom_voice(db, activated_voice)
 
 
 def _complete_async_speech(
@@ -423,7 +425,7 @@ def _complete_async_speech(
     else:
         task.status = AudioTaskStatus.ALIGNING.value
         task.batch_item.audio_status = "ALIGNING"
-    _activate_used_voices(task)
+    _activate_used_voices(db, task)
     db.commit()
     log_event(
         logger,
@@ -754,7 +756,7 @@ def process_task(db: Session, task_id: str) -> None:
                 task.output_path = to_relative_data_path(
                     output, get_settings()
                 )
-                _activate_used_voices(task)
+                _activate_used_voices(db, task)
                 db.commit()
         _handoff_to_video(db, task)
     except (MediaSegmentationError, MiniMaxAPIError, OSError, ValueError) as exc:

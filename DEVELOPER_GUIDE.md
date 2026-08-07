@@ -112,6 +112,10 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 
 - 声音列表只暴露三个产品确认且当前 MiniMax 账号实际可用的官方音色，以及该账号已
   保存的克隆/融合音色。
+- 不同网站用户配置完全相同的 MiniMax API Key 时，`credential_fingerprint` 作为共享范围。
+  `accounts.py` 为每个用户和 `MiniMaxConfig` 物化独立 `MiniMaxVoiceAsset`，但这些副本使用
+  相同 provider `voice_id`。保存、激活和历史迁移会同步副本；删除只设置当前用户副本的
+  `is_saved=false`，不能删除或隐藏其他用户副本。官方系统音色仍按用户独立同步。
 - 克隆、融合、试听和保存复用 `voice_studio.py` 与语音 Worker，不建立平行任务队列。
 - 音频批次使用工作台专用的无图片校验计划和既有 `create_batch`、
   `AudioGenerationTask`；只接收脚本、音色和语音参数，并强制 `reviewRequired=True`。
@@ -274,7 +278,7 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0023_batch_correlation_id`。SQLite 启用 WAL、外键和 busy timeout，设计目标
+当前迁移头为 `0024_shared_minimax_voices`。SQLite 启用 WAL、外键和 busy timeout，设计目标
 是一个 Web 加三个本地 Worker 的单服务器部署，不是多主集群。
 
 修改模型时：
@@ -472,6 +476,9 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - 迁移 `0023_batch_correlation_id` 为批次增加独立日志关联号；历史批次用批次 ID 回填，
   新工作台传入的关联号会被语音、媒体和视频 Worker 持续继承。不得用 `request_key`
   替代 `correlation_id`。
+- 迁移 `0024_shared_minimax_voices` 不改变表结构或唯一约束，只按相同
+  `credential_fingerprint` 为既有用户补齐自定义音色副本并同步激活状态。迁移不得通过
+  重建 `minimax_configs` 取消绑定唯一约束，否则 SQLite 外键级联可能删除已有音色。
 - 单 Web 进程使用统一有界信号量，默认最多同时发出 10 个 Ark 请求；其余请求等待，默认
   最长 300 秒。当前生产结构只有一个 Web 进程；若将来增加 Web 进程或多台主机，必须先
   把进程内信号量替换为数据库或 Redis 共享租约，不能简单把进程数相乘。

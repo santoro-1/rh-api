@@ -95,7 +95,7 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('content_analysis_caches')"
             )
         }
-    assert revision == "0023_batch_correlation_id"
+    assert revision == "0024_shared_minimax_voices"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -264,8 +264,74 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0023_batch_correlation_id"
+        assert version == "0024_shared_minimax_voices"
         assert category_columns == 1
         assert quick_check == "ok"
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_shared_minimax_voice_migration_backfills_same_key_accounts():
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-shared-voice-{uuid.uuid4().hex}.db"
+    try:
+        _run_alembic(database, "0023_batch_correlation_id")
+        timestamp = "2026-08-07 00:00:00"
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            for user_id, username in ((1, "voice-share-a"), (2, "voice-share-b")):
+                connection.execute(
+                    "INSERT INTO users "
+                    "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+                    "VALUES (?, ?, 'hash', 0, 1, ?, ?)",
+                    (user_id, username, timestamp, timestamp),
+                )
+                connection.execute(
+                    "INSERT INTO minimax_configs "
+                    "(id, user_id, api_key_encrypted, account_binding_id, account_label, "
+                    "credential_fingerprint, base_url, requests_per_minute, created_at, updated_at) "
+                    "VALUES (?, ?, 'encrypted', ?, '共享账号', 'same-fingerprint', "
+                    "'https://api.minimax.io', 20, ?, ?)",
+                    (user_id, user_id, f"binding-{user_id}", timestamp, timestamp),
+                )
+            connection.execute(
+                "INSERT INTO minimax_voice_assets "
+                "(id, user_id, config_id, name, voice_id, credential_fingerprint, status, "
+                "source_relative_path, source_original_name, remote_file_id, activated_at, "
+                "expires_at, created_at, updated_at, method, is_saved, preview_relative_path, "
+                "account_binding_id, category) "
+                "VALUES ('voice-a', 1, 1, '共享音色', 'provider-shared', 'rotated-old-fingerprint', "
+                "'ACTIVE', NULL, NULL, NULL, ?, NULL, ?, ?, 'clone', 1, NULL, 'binding-1', NULL)",
+                (timestamp, timestamp, timestamp),
+            )
+            connection.commit()
+        connection.close()
+
+        _run_alembic(database, "head")
+
+        with sqlite3.connect(database) as connection:
+            bindings = connection.execute(
+                "SELECT account_binding_id FROM minimax_configs ORDER BY id"
+            ).fetchall()
+            voices = connection.execute(
+                "SELECT user_id, config_id, voice_id, status, account_binding_id "
+                "FROM minimax_voice_assets WHERE voice_id='provider-shared' ORDER BY config_id"
+            ).fetchall()
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            foreign_key_errors = connection.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
+        connection.close()
+
+        assert revision == "0024_shared_minimax_voices"
+        assert bindings == [("binding-1",), ("binding-2",)]
+        assert voices == [
+            (1, 1, "provider-shared", "ACTIVE", "binding-1"),
+            (2, 2, "provider-shared", "ACTIVE", "binding-2"),
+        ]
+        assert foreign_key_errors == []
     finally:
         database.unlink(missing_ok=True)
