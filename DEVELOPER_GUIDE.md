@@ -66,6 +66,12 @@
 
 数字人和视频对口型共享同一个用户并发额度。槽位计入 `UPLOADING`、`SUBMITTED`、
 `RUNNING`；槽位满时新任务仍留在本地 `PENDING` 队列，不向用户返回并发错误。
+`PENDING` 没有本地年龄上限。远程任务的正常排队、执行和一小时运行边界由 RunningHub
+负责，本站不再从提交时间执行一小时终止判断。本站只保留默认 14400 秒（4 小时）的
+异常滞留看门狗：每轮先查询远程状态；仍为 `QUEUED`/`RUNNING` 且超过看门狗时调用
+RunningHub 取消。取消成功后写入 `REMOTE_WATCHDOG_TIMEOUT` 终态；取消失败则保持活动
+状态继续查询并重试取消，绝不释放槽位或重新提交。配置项为
+`RUNNINGHUB_REMOTE_WATCHDOG_SECONDS`，旧的 `RUNNINGHUB_TASK_TIMEOUT_SECONDS` 不再读取。
 
 ### 3.2 批量上传和长音频自动分流
 

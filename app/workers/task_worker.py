@@ -47,6 +47,7 @@ from app.workflows.digital_human import generation_tail_padding_seconds
 
 logger = logging.getLogger(__name__)
 REMOTE_CAPACITY_RECHECK_SECONDS = 180.0
+REMOTE_WATCHDOG_CANCEL_ERROR_CODE = "REMOTE_WATCHDOG_CANCEL_FAILED"
 _capacity_check_after: dict[int, float] = {}
 
 # Only these remote-work states consume a user's configured concurrency slot.
@@ -305,13 +306,64 @@ def _mark_remote_cancelled(task: GenerationTask, message: str) -> None:
     )
 
 
-def _has_timed_out(task: GenerationTask) -> bool:
+def _remote_watchdog_has_expired(task: GenerationTask) -> bool:
+    """Detect a remotely submitted task that exceeded the safety window."""
+
     started_at = task.runninghub_submitted_at or task.created_at
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
     return (
         _now() - started_at
-    ).total_seconds() > get_settings().runninghub_task_timeout_seconds
+    ).total_seconds() > get_settings().runninghub_remote_watchdog_seconds
+
+
+def _cancel_expired_remote_task(
+    db: Session,
+    task: GenerationTask,
+    client: RunningHubClient,
+) -> None:
+    """Cancel a stale remote task before releasing its local billing slot."""
+
+    assert task.runninghub_task_id
+    watchdog_seconds = get_settings().runninghub_remote_watchdog_seconds
+    try:
+        client.cancel_task(task.runninghub_task_id)
+    except RunningHubError as exc:
+        message = (
+            f"RunningHub 远程任务已超过 {watchdog_seconds // 3600} 小时安全等待上限，"
+            "自动取消尚未成功；系统会保留任务并继续查询、重试取消。"
+        )
+        changed = (
+            task.error_code != REMOTE_WATCHDOG_CANCEL_ERROR_CODE
+            or task.error_message != message
+        )
+        task.error_code = REMOTE_WATCHDOG_CANCEL_ERROR_CODE
+        task.error_message = message
+        db.commit()
+        if changed:
+            log_event(
+                logger,
+                "video.watchdog_cancel_failed",
+                "RunningHub 超时任务自动取消失败，将继续重试",
+                level=logging.WARNING,
+                runninghub_task_id=task.runninghub_task_id,
+                watchdog_seconds=watchdog_seconds,
+                error=str(exc),
+                **exc.log_details(),
+                **_video_log_context(task),
+            )
+        return
+
+    _mark_failed(
+        task,
+        "REMOTE_WATCHDOG_TIMEOUT",
+        (
+            f"RunningHub 远程任务提交后超过 {watchdog_seconds // 3600} 小时仍未结束，"
+            "已自动取消并关闭本地任务。"
+        ),
+        diagnostics={"watchdog_seconds": watchdog_seconds},
+    )
+    db.commit()
 
 
 def recover_interrupted_tasks(db: Session) -> int:
@@ -435,12 +487,16 @@ def _handle_remote_status(
             db.commit()
             return
         # A query failure must never lead to a second paid submission.
-        changed = (
+        watchdog_cancel_pending = (
+            task.error_code == REMOTE_WATCHDOG_CANCEL_ERROR_CODE
+        )
+        changed = not watchdog_cancel_pending and (
             task.error_code != "QUERY_ERROR"
             or task.error_message != str(exc)
         )
-        task.error_code = "QUERY_ERROR"
-        task.error_message = str(exc)
+        if not watchdog_cancel_pending:
+            task.error_code = "QUERY_ERROR"
+            task.error_message = str(exc)
         db.commit()
         if changed:
             log_event(
@@ -457,8 +513,8 @@ def _handle_remote_status(
 
     status = str(result.get("status") or "").upper()
     previous_status = task.status
-    task.error_code = str(result.get("errorCode") or "") or None
-    task.error_message = str(result.get("errorMessage") or "") or None
+    remote_error_code = str(result.get("errorCode") or "") or None
+    remote_error_message = str(result.get("errorMessage") or "") or None
     failed_reason = _runninghub_failed_reason(result)
     task.runninghub_failed_reason = (
         json.dumps(failed_reason, ensure_ascii=False)
@@ -469,6 +525,11 @@ def _handle_remote_status(
     task.runninghub_usage = json.dumps(usage, ensure_ascii=False) if usage is not None else None
 
     if status in {"QUEUED", "RUNNING"}:
+        # Preserve a failed watchdog cancellation so operators can see why an
+        # otherwise active task is being cancelled again on every poll cycle.
+        if task.error_code != REMOTE_WATCHDOG_CANCEL_ERROR_CODE:
+            task.error_code = remote_error_code
+            task.error_message = remote_error_message
         task.status = (
             TaskStatus.RUNNING.value if status == "RUNNING" else TaskStatus.SUBMITTED.value
         )
@@ -484,6 +545,8 @@ def _handle_remote_status(
                 **_video_log_context(task),
             )
         return
+    task.error_code = remote_error_code
+    task.error_message = remote_error_message
     if status == "FAILED":
         failure_message = _runninghub_failure_message(result)
         _record_runninghub_failure(
@@ -667,11 +730,6 @@ def process_task(db: Session, task_id: str) -> None:
         _mark_failed(task, "WORKFLOW_DISABLED", f"工作流未为该账号启用：{workflow.key}")
         db.commit()
         return
-    if task.runninghub_task_id and _has_timed_out(task):
-        _mark_failed(task, "TASK_TIMEOUT", "RunningHub 任务超过允许的最长等待时间")
-        db.commit()
-        _allow_immediate_capacity_check(task.user_id)
-        return
     try:
         client = _make_client(task.user.runninghub_config)
         # RunningHubClient is generic.  The workflow config determines only
@@ -684,7 +742,15 @@ def process_task(db: Session, task_id: str) -> None:
         return
 
     if task.runninghub_task_id:
+        # RunningHub owns queueing, execution and its normal timeout. Always
+        # consume the newest remote state before applying our much larger
+        # stuck-task watchdog, otherwise a just-finished task can be misclosed.
         _handle_remote_status(db, task, client, workflow)
+        if (
+            task.status in SLOT_OCCUPYING_TASK_STATUSES
+            and _remote_watchdog_has_expired(task)
+        ):
+            _cancel_expired_remote_task(db, task, client)
         if task.status not in SLOT_OCCUPYING_TASK_STATUSES:
             _allow_immediate_capacity_check(task.user_id)
         return
@@ -835,6 +901,7 @@ def main() -> None:
         "视频 Worker 已启动",
         poll_interval_seconds=settings.poll_interval_seconds,
         capacity_recheck_seconds=int(REMOTE_CAPACITY_RECHECK_SECONDS),
+        remote_watchdog_seconds=settings.runninghub_remote_watchdog_seconds,
     )
     while True:
         try:

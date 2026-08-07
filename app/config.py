@@ -67,7 +67,7 @@ class Settings:
     default_runninghub_instance_type: str
     default_use_personal_queue: bool
     poll_interval_seconds: int
-    runninghub_task_timeout_seconds: int
+    runninghub_remote_watchdog_seconds: int
     runninghub_auto_retry_limit: int
     runninghub_auto_retry_base_delay_seconds: int
     max_image_size_mb: int
@@ -184,6 +184,13 @@ class Settings:
             raise ValueError(
                 "RUNNINGHUB_AUTO_RETRY_BASE_DELAY_SECONDS 必须为 1-3600"
             )
+        runninghub_remote_watchdog_seconds = _as_int(
+            "RUNNINGHUB_REMOTE_WATCHDOG_SECONDS", 14400
+        )
+        if not 3600 <= runninghub_remote_watchdog_seconds <= 604800:
+            raise ValueError(
+                "RUNNINGHUB_REMOTE_WATCHDOG_SECONDS 必须为 3600-604800"
+            )
         ark_max_concurrency = _as_int("ARK_MAX_CONCURRENCY", 10)
         if not 1 <= ark_max_concurrency <= 100:
             raise ValueError("ARK_MAX_CONCURRENCY 必须为 1-100")
@@ -215,8 +222,8 @@ class Settings:
                 os.getenv("DEFAULT_USE_PERSONAL_QUEUE"), False
             ),
             poll_interval_seconds=_as_int("POLL_INTERVAL_SECONDS", 5),
-            runninghub_task_timeout_seconds=_as_int(
-                "RUNNINGHUB_TASK_TIMEOUT_SECONDS", 3600
+            runninghub_remote_watchdog_seconds=(
+                runninghub_remote_watchdog_seconds
             ),
             runninghub_auto_retry_limit=runninghub_auto_retry_limit,
             runninghub_auto_retry_base_delay_seconds=(

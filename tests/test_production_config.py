@@ -36,3 +36,23 @@ def test_production_settings_accept_explicit_domain(monkeypatch):
     assert settings.allowed_hosts == ("video.example.com",)
     assert settings.log_retention_days == 7
     assert settings.log_max_bytes == 10 * 1024 * 1024
+    assert settings.runninghub_remote_watchdog_seconds == 14400
+
+
+def test_runninghub_watchdog_ignores_removed_one_hour_timeout(monkeypatch):
+    _set_valid_production_environment(monkeypatch)
+    monkeypatch.delenv("RUNNINGHUB_REMOTE_WATCHDOG_SECONDS", raising=False)
+    monkeypatch.setenv("RUNNINGHUB_TASK_TIMEOUT_SECONDS", "3600")
+
+    settings = Settings.from_environment()
+
+    assert settings.runninghub_remote_watchdog_seconds == 14400
+
+
+def test_runninghub_watchdog_accepts_explicit_override(monkeypatch):
+    _set_valid_production_environment(monkeypatch)
+    monkeypatch.setenv("RUNNINGHUB_REMOTE_WATCHDOG_SECONDS", "21600")
+
+    settings = Settings.from_environment()
+
+    assert settings.runninghub_remote_watchdog_seconds == 21600

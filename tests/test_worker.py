@@ -27,6 +27,8 @@ class FakeRunningHub:
         upload_error: bool = False,
         submit_network_error: bool = False,
         query_not_found: bool = False,
+        query_error: bool = False,
+        cancel_error: bool = False,
         query_result: dict | None = None,
     ):
         self.submissions = 0
@@ -38,7 +40,10 @@ class FakeRunningHub:
         self.upload_error = upload_error
         self.submit_network_error = submit_network_error
         self.query_not_found = query_not_found
+        self.query_error = query_error
+        self.cancel_error = cancel_error
         self.query_result = query_result
+        self.cancel_calls = 0
 
     def get_account_current_task_count(self):
         self.capacity_checks += 1
@@ -82,6 +87,8 @@ class FakeRunningHub:
 
     def query_task(self, task_id):
         self.query_calls += 1
+        if self.query_error:
+            raise RunningHubError("查询 RunningHub 任务时网络请求失败")
         if self.query_not_found:
             raise RunningHubError(
                 "查询任务失败：Task not found | 任务不存在或已过期",
@@ -90,6 +97,14 @@ class FakeRunningHub:
         if self.query_result is not None:
             return self.query_result
         return {"taskId": task_id, "status": "RUNNING", "usage": None}
+
+    def cancel_task(self, task_id):
+        self.cancel_calls += 1
+        if self.cancel_error:
+            raise RunningHubError(
+                "取消 RunningHub 任务时网络请求失败",
+                diagnostics={"runninghub_operation": "task_cancel"},
+            )
 
 
 @pytest.fixture(autouse=True)
@@ -131,6 +146,116 @@ def test_worker_does_not_resubmit_existing_remote_task(monkeypatch):
         assert task.status == TaskStatus.RUNNING.value
     assert fake.query_calls == 1
     assert fake.submissions == 0
+
+
+def test_worker_watchdog_queries_then_cancels_after_four_hours(monkeypatch):
+    user = create_user("watchdog-expired-worker-user")
+    _add_task(
+        user.id,
+        "watchdog-expired-task",
+        TaskStatus.RUNNING.value,
+        "watchdog-expired-remote-id",
+    )
+    fake = FakeRunningHub()
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "watchdog-expired-task")
+        task.runninghub_submitted_at = datetime.now(timezone.utc) - timedelta(
+            hours=4,
+            seconds=1,
+        )
+        db.commit()
+
+        task_worker.process_task(db, task.id)
+        task = db.get(GenerationTask, task.id)
+        assert task.status == TaskStatus.FAILED.value
+        assert task.error_code == "REMOTE_WATCHDOG_TIMEOUT"
+        assert "4 小时" in task.error_message
+        assert task.completed_at is not None
+    assert fake.query_calls == 1
+    assert fake.cancel_calls == 1
+    assert fake.submissions == 0
+
+
+def test_worker_watchdog_keeps_remote_task_before_four_hours(monkeypatch):
+    user = create_user("watchdog-active-worker-user")
+    _add_task(
+        user.id,
+        "watchdog-active-task",
+        TaskStatus.RUNNING.value,
+        "watchdog-active-remote-id",
+    )
+    fake = FakeRunningHub()
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "watchdog-active-task")
+        task.runninghub_submitted_at = datetime.now(timezone.utc) - timedelta(
+            hours=3,
+            minutes=59,
+        )
+        db.commit()
+
+        task_worker.process_task(db, task.id)
+        task = db.get(GenerationTask, task.id)
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.completed_at is None
+    assert fake.query_calls == 1
+    assert fake.cancel_calls == 0
+
+
+def test_worker_watchdog_retries_cancel_without_releasing_slot(monkeypatch):
+    user = create_user("watchdog-cancel-retry-user")
+    _add_task(
+        user.id,
+        "watchdog-cancel-retry-task",
+        TaskStatus.RUNNING.value,
+        "watchdog-cancel-retry-remote-id",
+    )
+    fake = FakeRunningHub(cancel_error=True)
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "watchdog-cancel-retry-task")
+        task.runninghub_submitted_at = datetime.now(timezone.utc) - timedelta(hours=5)
+        db.commit()
+
+        task_worker.process_task(db, task.id)
+        task = db.get(GenerationTask, task.id)
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.error_code == task_worker.REMOTE_WATCHDOG_CANCEL_ERROR_CODE
+        assert "继续查询、重试取消" in task.error_message
+        assert task.completed_at is None
+
+        fake.query_error = True
+        task_worker.process_task(db, task.id)
+        task = db.get(GenerationTask, task.id)
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.error_code == task_worker.REMOTE_WATCHDOG_CANCEL_ERROR_CODE
+    assert fake.query_calls == 2
+    assert fake.cancel_calls == 2
+    assert fake.submissions == 0
+
+
+def test_worker_watchdog_consumes_remote_terminal_status_before_cancel(monkeypatch):
+    user = create_user("watchdog-terminal-worker-user")
+    _add_task(
+        user.id,
+        "watchdog-terminal-task",
+        TaskStatus.RUNNING.value,
+        "watchdog-terminal-remote-id",
+    )
+    fake = FakeRunningHub(query_not_found=True)
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "watchdog-terminal-task")
+        task.runninghub_submitted_at = datetime.now(timezone.utc) - timedelta(hours=5)
+        db.commit()
+
+        task_worker.process_task(db, task.id)
+        task = db.get(GenerationTask, task.id)
+        assert task.status == TaskStatus.CANCELLED.value
+        assert task.error_code == "REMOTE_TASK_NOT_FOUND"
+    assert fake.query_calls == 1
+    assert fake.cancel_calls == 0
 
 
 def test_worker_closes_remote_task_removed_after_manual_cancel(monkeypatch):
