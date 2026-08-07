@@ -7,7 +7,7 @@
 - [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)：当前架构、业务流程、本地开发、状态机、
   测试、媒体节点、生产发布和扩展方式的统一开发入口。
 - [CHANGELOG.md](CHANGELOG.md)：面向版本的功能变化、兼容性说明和验证记录。
-- [WORKBENCH_INTEGRATION_20260803.md](WORKBENCH_INTEGRATION_20260803.md)：本轮数字人账号、任务分流、剪映工作台拉取和本地验收记录。
+- [数字人网站与剪映工作台集成说明.md](数字人网站与剪映工作台集成说明.md)：数字人账号、任务分流、剪映工作台集成、日志规划和本地验收记录。
 - [MAINTENANCE.md](MAINTENANCE.md)：模块边界、迁移红线、日志规范和修改检查清单。
 - [deploy/README.md](deploy/README.md)：生产预检、发布、验收、备份和恢复。
 - [media_node/README.md](media_node/README.md)：固定电脑媒体节点的安装、迁移及完整包/
@@ -71,9 +71,9 @@
 
 模块 4A 已增加工作台专用的画面启动、状态、失败阶段重试和基础视频下载接口。用户在
 工作台确认费用后，既有音频审核门才放行到原有音频/视频 Worker；单片段和多片段结果
-都按已确认音频时长标准化，多片段按顺序拼接。RunningHub 原始片段继续保留，标准化
-结果只标记为 `base_video`。音频完成后、4A 启动前，工作台仍可替换图片；启动请求绑定
-最后一次选择的当前图片。
+都按已确认音频时长标准化，多片段按顺序拼接，并在接缝使用 0.25 秒保时长叠化。
+RunningHub 原始片段继续保留，标准化结果只标记为 `base_video`。音频完成后、4A 启动前，
+工作台仍可替换图片；启动请求绑定最后一次选择的当前图片。
 
 新旧入口通过批次字段 `source_channel` 明确隔离：历史数据及原网页创建的批次为
 `legacy_web`，新工作台创建的声音批次为 `new_workbench`。原网页批次列表只显示
@@ -175,6 +175,9 @@ FFmpeg 同时抢占大量资源。
 - 任一组素材数量与表格行数不一致，或任一行参数无效时，整批只返回校验错误，
   不创建任何任务。
 - 校验通过后，每行创建一条独立 `PENDING` 任务，并按清单顺序进入原有 FIFO 队列。
+- 生成页顶部提供常显的“任务名称”。上传音频时默认取首个音频文件名（去掉扩展名），
+  文案生成时默认取首个任务编号或画面文件名；多条任务附带数量，用户可在提交前修改。
+  任务记录页优先显示该名称，批次 UUID 继续保留用于精确排障。
 - 批次详情和历史列表提供汇总进度、失败项重试和手动删除。终态批次以及没有活动
   视频/语音 Worker 的本地卡住批次可以删除；仍在排队或远程运行的任务禁止删除。
 - 只有“输入文案生成语音，并且实际语音不超过 45 秒”会在单个视频成功后进入自动
@@ -303,7 +306,7 @@ RunningHub 已明确返回 `FAILED` 的视频任务默认自动重试 3 次，�
 - audio_generation_attempts：每次 MiniMax 生成的完整音频、字幕、远程编号和审核结果
 - workflow_configs：每个用户、每个工作流的远程 ID、实例类型、默认提示词和启用状态
 - generation_tasks：本地任务 ID、远程 taskId、输入素材、时间范围、状态、错误、usage 与本地结果路径
-- generation_batches / generation_batch_items：带 `source_channel` 的批次元数据、脚本
+- generation_batches / generation_batch_items：带 `source_channel`、`correlation_id` 的批次元数据、脚本
   父任务和原始清单行
 - generation_segments：完整流程的分段脚本、时间区间、分段素材和 RunningHub 子任务关系
 - staged_assets：批量创建前已经校验、等待清单引用的暂存素材

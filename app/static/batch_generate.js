@@ -5,6 +5,7 @@
   const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
   const workflowSelect = document.getElementById("batch-workflow");
   const audioModeSelect = document.getElementById("batch-audio-mode");
+  const batchNameInput = document.getElementById("batch-name");
   const personModeSelect = document.getElementById("batch-person-mode");
   const instanceTypeSelect = document.getElementById("batch-instance-type");
   const resolutionInput = document.getElementById("batch-resolution");
@@ -51,6 +52,9 @@
   let requestKey = crypto.randomUUID();
   let activeEntry = "quick";
   let draggedAsset = null;
+  // Automatic names follow the current first task until the user explicitly
+  // edits the field. Reordering stays readable without replacing a chosen name.
+  let batchNameWasEdited = false;
 
   const groupElements = {
     primary: document.getElementById("quick-primary-list"),
@@ -72,6 +76,57 @@
 
   function isSpeechMode() {
     return audioModeSelect.value === "minimax";
+  }
+
+  function identifierWithoutExtension(value) {
+    return String(value || "").trim().replace(/\.[^./\\]+$/, "");
+  }
+
+  function formatAutoBatchName(identifier, count) {
+    const suffix = count > 1 ? ` 等${count}条` : "";
+    const availableLength = Math.max(1, 100 - Array.from(suffix).length);
+    return `${Array.from(identifier).slice(0, availableLength).join("")}${suffix}`;
+  }
+
+  function autoBatchNameParts() {
+    const advanced = activeEntry === "manifest";
+    const primaryAssets = advanced
+      ? assetGroups.advancedPrimary
+      : assetGroups.primary;
+    const audioAssets = advanced
+      ? assetGroups.advancedAudio
+      : assetGroups.audio;
+    const rowCount = advanced
+      ? Math.max(advancedRows.length, primaryAssets.length, audioAssets.length)
+      : quickRowCount();
+
+    if (!isSpeechMode() && audioAssets.length) {
+      return {
+        identifier: identifierWithoutExtension(audioAssets[0].originalName),
+        count: rowCount,
+      };
+    }
+    if (advanced && advancedRows.length) {
+      const rowIdentifier = String(advancedRows[0].row_id || "").trim();
+      if (rowIdentifier) {
+        return {identifier: rowIdentifier, count: rowCount};
+      }
+    }
+    if (primaryAssets.length) {
+      return {
+        identifier: identifierWithoutExtension(primaryAssets[0].originalName),
+        count: rowCount,
+      };
+    }
+    return {identifier: "", count: 0};
+  }
+
+  function syncAutoBatchName() {
+    if (batchNameWasEdited) return;
+    const {identifier, count} = autoBatchNameParts();
+    batchNameInput.value = identifier
+      ? formatAutoBatchName(identifier, count)
+      : "";
   }
 
   function escapeHtml(value) {
@@ -518,6 +573,7 @@
             ? "请先上传画面素材并填写口播脚本。"
             : "请先上传画面素材和对应音频。"
         );
+    syncAutoBatchName();
   }
 
   function renderAdvancedRows() {
@@ -552,6 +608,7 @@
     document.getElementById("advanced-ready-summary").textContent = advancedRows.length
       ? `已读取 ${advancedRows.length} 行，已暂存 ${allAssetIds("advanced").length} 个文件。`
       : "请先导入清单并上传素材。";
+    syncAutoBatchName();
   }
 
   function finalVideoPrompt(row) {
@@ -863,6 +920,7 @@
     document.getElementById("manifest-entry-panel").classList.toggle("hidden", entry !== "manifest");
     document.getElementById("quick-entry-button").classList.toggle("active", entry === "quick");
     document.getElementById("manifest-entry-button").classList.toggle("active", entry === "manifest");
+    syncAutoBatchName();
   }
 
   async function submitBatch(rows, entry, buttonId, errorId) {
@@ -1046,6 +1104,7 @@
     const input = event.target.closest(".batch-cell-input");
     if (!input) return;
     advancedRows[Number(input.dataset.rowIndex)][input.dataset.key] = input.value;
+    syncAutoBatchName();
     resetConfirmation();
   });
 
@@ -1141,6 +1200,10 @@
   personModeSelect.addEventListener("change", updateDualAudioUi);
   resolutionInput.addEventListener("input", resetConfirmation);
   instanceTypeSelect.addEventListener("change", resetConfirmation);
+  batchNameInput.addEventListener("input", () => {
+    batchNameWasEdited = true;
+    resetConfirmation();
+  });
   document.getElementById("quick-entry-button").addEventListener("click", () => setEntry("quick"));
   document.getElementById("manifest-entry-button").addEventListener("click", () => setEntry("manifest"));
   voiceSourceButtons.forEach((button) => {

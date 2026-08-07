@@ -87,6 +87,8 @@ def _audio_log_context(task: AudioGenerationTask) -> dict[str, object]:
         "user_id": task.user_id,
         "username": task.user.username if task.user else None,
         "batch_id": batch.id if batch else None,
+        "source_channel": batch.source_channel if batch else None,
+        "correlation_id": (batch.correlation_id or batch.id) if batch else None,
         "batch_item_id": task.batch_item_id,
         "task_id": task.id,
     }
@@ -188,11 +190,12 @@ def claim_next_pending_task(db: Session) -> str | None:
     )
     db.commit()
     if result.rowcount == 1:
+        task = _load_task(db, task_id)
         log_event(
             logger,
             "audio.claimed",
             "语音 Worker 已领取脚本任务",
-            task_id=task_id,
+            **(_audio_log_context(task) if task is not None else {"task_id": task_id}),
         )
         return task_id
     return None

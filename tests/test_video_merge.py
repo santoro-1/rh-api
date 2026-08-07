@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -128,6 +129,63 @@ def test_normalization_rejects_materially_truncated_picture(monkeypatch, tmp_pat
             tmp_path / "base.mp4",
             target_durations=[30.0],
         )
+
+
+def test_workbench_merge_uses_length_preserving_dissolve(monkeypatch, tmp_path):
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        "app.services.video_merge._probe_video",
+        lambda _path: (1080, 1920, 3.0),
+    )
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        Path(command[-1]).write_bytes(b"merged")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("app.services.video_merge.subprocess.run", fake_run)
+    target = tmp_path / "base.mp4"
+    merge_segment_videos(
+        [Path("one.mp4"), Path("two.mp4")],
+        target,
+        target_durations=[2.0, 3.0],
+    )
+
+    filter_graph = captured["command"][
+        captured["command"].index("-filter_complex") + 1
+    ]
+    assert "stop_duration=0.250000" in filter_graph
+    assert (
+        "[v0][v1]xfade=transition=fade:duration=0.250000:"
+        "offset=2.000000[vout]"
+    ) in filter_graph
+    assert "[a0][a1]concat=n=2:v=0:a=1[aout]" in filter_graph
+    assert target.read_bytes() == b"merged"
+
+
+def test_legacy_merge_keeps_hard_concat(monkeypatch, tmp_path):
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        "app.services.video_merge._probe_video",
+        lambda _path: (1080, 1920, 3.0),
+    )
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        Path(command[-1]).write_bytes(b"merged")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("app.services.video_merge.subprocess.run", fake_run)
+    merge_segment_videos(
+        [Path("one.mp4"), Path("two.mp4")],
+        tmp_path / "legacy.mp4",
+    )
+
+    filter_graph = captured["command"][
+        captured["command"].index("-filter_complex") + 1
+    ]
+    assert "xfade=" not in filter_graph
+    assert "concat=n=2:v=1:a=1[vout][aout]" in filter_graph
 
 
 def test_handoff_merge_status_keeps_legacy_single_segment_unchanged():

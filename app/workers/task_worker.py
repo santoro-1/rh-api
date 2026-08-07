@@ -13,7 +13,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import GenerationTask, RunningHubConfig, TaskStatus, User
+from app.models import (
+    GenerationBatchItem,
+    GenerationSegment,
+    GenerationTask,
+    RunningHubConfig,
+    TaskStatus,
+    User,
+)
 from app.services.runninghub import (
     RunningHubClient,
     RunningHubError,
@@ -74,10 +81,16 @@ def _allow_immediate_capacity_check(user_id: int) -> None:
 
 
 def _video_log_context(task: GenerationTask) -> dict[str, object]:
+    item = task.batch_item or (task.segment.batch_item if task.segment else None)
+    batch = item.batch if item else None
     return {
         "user_id": task.user_id,
         "username": task.user.username if task.user else None,
         "task_id": task.id,
+        "batch_id": batch.id if batch else None,
+        "batch_item_id": item.id if item else None,
+        "source_channel": batch.source_channel if batch else None,
+        "correlation_id": (batch.correlation_id or batch.id) if batch else None,
     }
 
 
@@ -371,12 +384,16 @@ def claim_next_pending_task(db: Session) -> str | None:
         )
         db.commit()
         if result.rowcount == 1:
+            task = _load_task(db, task_id)
             log_event(
                 logger,
                 "video.claimed",
                 "视频 Worker 已领取任务",
-                task_id=task_id,
-                user_id=user_id,
+                **(
+                    _video_log_context(task)
+                    if task is not None
+                    else {"task_id": task_id, "user_id": user_id}
+                ),
                 concurrency_limit=limit,
             )
             return task_id
@@ -389,6 +406,12 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
         .options(
             selectinload(GenerationTask.user).selectinload(User.runninghub_config),
             selectinload(GenerationTask.user).selectinload(User.workflow_configs),
+            selectinload(GenerationTask.batch_item).selectinload(
+                GenerationBatchItem.batch
+            ),
+            selectinload(GenerationTask.segment)
+            .selectinload(GenerationSegment.batch_item)
+            .selectinload(GenerationBatchItem.batch),
         )
         .where(GenerationTask.id == task_id)
     )

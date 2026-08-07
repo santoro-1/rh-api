@@ -282,6 +282,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
             "access_token": token,
             "name": "WB-20260804 声音批次",
             "request_key": "wb-audio-project-1",
+            "correlation_id": "workbench-correlation-001",
             "rows": [
                 {
                     "row_id": "1",
@@ -303,12 +304,15 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
     )
     assert created.status_code == 201, created.text
     batch_id = created.json()["batch_id"]
+    assert created.json()["correlation_id"] == "workbench-correlation-001"
+    assert created.json()["source_channel"] == "new_workbench"
     item_id = created.json()["items"][0]["item_id"]
     with SessionLocal() as db:
         batch = db.get(GenerationBatch, batch_id)
         task = db.query(AudioGenerationTask).one()
         assert batch.review_required is True
         assert batch.source_channel == "new_workbench"
+        assert batch.correlation_id == "workbench-correlation-001"
         assert db.query(GenerationTask).count() == 0
         assert task.primary_kind is None
         assert task.primary_path is None
@@ -372,6 +376,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
             "idempotency_key": "composition-project-1",
             "cost_confirmed": True,
             "image_asset_id": staged_id,
+            "correlation_id": "workbench-correlation-001",
         },
     )
     assert started.status_code == 200, started.text
@@ -383,6 +388,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
             "idempotency_key": "composition-project-1",
             "cost_confirmed": True,
             "image_asset_id": staged_id,
+            "correlation_id": "workbench-correlation-001",
         },
     )
     assert repeated.status_code == 200, repeated.text

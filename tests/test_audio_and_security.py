@@ -150,6 +150,35 @@ def test_admin_log_chunk_only_returns_new_operator_events():
     assert update["cursor"] > initial["cursor"]
 
 
+def test_admin_log_chunk_filters_business_source_without_mixing_channels():
+    log_path = get_settings().data_dir / "source-filter-display-test.log"
+    legacy = (
+        '2026-08-07 INFO app: [EVENT batch.created] legacy '
+        '{"source_channel":"legacy_web","batch_id":"legacy-1"}'
+    )
+    workbench = (
+        '2026-08-07 INFO app: [EVENT workbench.created] workbench '
+        '{"source_channel":"new_workbench","batch_id":"workbench-1"}'
+    )
+    system = "2026-08-07 ERROR app: system error without a business source"
+    log_path.write_text(
+        "\n".join((legacy, workbench, system)) + "\n",
+        encoding="utf-8",
+    )
+
+    assert _read_log_chunk(
+        log_path,
+        None,
+        source_channel="legacy_web",
+    )["lines"] == [legacy]
+    assert _read_log_chunk(
+        log_path,
+        None,
+        source_channel="new_workbench",
+    )["lines"] == [workbench]
+    assert _read_log_chunk(log_path, None)["lines"] == [legacy, workbench, system]
+
+
 def test_audio_duration_falls_back_to_mutagen_when_ffprobe_fails(monkeypatch):
     sample = get_settings().data_dir / "sample.wav"
     with wave.open(str(sample), "wb") as output:

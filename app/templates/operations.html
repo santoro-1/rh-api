@@ -51,8 +51,15 @@
 </section>
 
 <details class="panel operations-filter-panel">
-  <summary>按账号、任务或错误筛选日志</summary>
+  <summary>按来源、账号、任务或错误筛选日志</summary>
   <form method="get" action="/admin/operations" class="operations-filter-form">
+    <label>来源
+      <select id="log-source-filter" name="source_channel">
+        {% for key, label in source_channel_options %}
+          <option value="{{ key }}" {% if filters.sourceChannel == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>账号
       <select name="account_id">
         <option value="">全部账号</option>
@@ -123,6 +130,6 @@
   </details>
 {% endfor %}
 
-<p class="field-help">页面每 5 秒更新资源与事件，不会整页刷新或打断滚动位置。管理员可下载最近 7 天的原始服务日志；日志设置单文件大小上限，API Key、Bearer Token 和工作流访问密码会在写入前脱敏。</p>
+<p class="field-help">页面每 5 秒更新资源与事件，不会整页刷新或打断滚动位置。来源筛选同时作用于首次加载、历史查询和后续实时日志；管理员下载的最近 7 天原始服务日志不受当前筛选影响。日志设置单文件大小上限，API Key、Bearer Token 和工作流访问密码会在写入前脱敏。</p>
 <script src="/static/operations.js" defer></script>
 {% endblock %}

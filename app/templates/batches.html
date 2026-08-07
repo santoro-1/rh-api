@@ -12,7 +12,7 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>创建时间</th>{% if current_user.is_admin %}<th>用户</th>{% endif %}<th>批次</th><th>工作流</th><th>进度</th><th>状态</th><th>操作</th></tr>
+        <tr><th>创建时间</th>{% if current_user.is_admin %}<th>用户</th>{% endif %}<th>任务名称</th><th>工作流</th><th>进度</th><th>状态</th><th>操作</th></tr>
       </thead>
       <tbody>
         {% for batch in batches %}

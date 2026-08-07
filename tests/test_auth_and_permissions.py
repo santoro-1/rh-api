@@ -81,6 +81,9 @@ def test_admin_can_view_operations_without_terminal(client):
     assert "语音 Worker" in response.text
     assert "视频 Worker" in response.text
     assert "下载最近 7 天日志" in response.text
+    assert 'name="source_channel"' in response.text
+    assert "旧网页" in response.text
+    assert "新工作台" in response.text
 
     update = client.get(
         "/admin/operations/updates",
@@ -104,6 +107,12 @@ def test_admin_can_view_operations_without_terminal(client):
         "video_worker",
         "launcher",
     }
+
+    filtered_update = client.get(
+        "/admin/operations/updates",
+        params={"source_channel": "new_workbench"},
+    )
+    assert filtered_update.status_code == 200
 
 
 def test_production_operations_hide_local_launcher(client, monkeypatch):

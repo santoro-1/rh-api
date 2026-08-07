@@ -31,6 +31,7 @@ MERGED_VIDEO_READY = "READY"
 MERGED_PREVIEW_READY = "PREVIEW_READY"
 MERGE_FAILED = "MERGE_FAILED"
 MAX_VIDEO_SHORTFALL_SECONDS = 1.0
+WORKBENCH_DISSOLVE_SECONDS = 0.25
 
 
 class VideoMergeError(RuntimeError):
@@ -151,6 +152,15 @@ def merge_segment_videos(
 
     filters: list[str] = []
     concat_inputs: list[str] = []
+    dissolve_seconds = 0.0
+    if durations is not None and len(inputs) > 1:
+        # A normal xfade shortens the finished timeline at every boundary.
+        # Pad the preceding clip with its tail frame before overlapping it so
+        # the next clip still starts on its original audio/subtitle timestamp.
+        dissolve_seconds = min(
+            WORKBENCH_DISSOLVE_SECONDS,
+            min(durations) / 2.0,
+        )
     for index in range(len(inputs)):
         video_filter = (
             f"[{index}:v:0]setpts=PTS-STARTPTS,"
@@ -171,13 +181,37 @@ def merge_segment_videos(
             audio_filter += (
                 f",apad=pad_dur={duration_text},atrim=duration={duration_text}"
             )
-        filters.append(video_filter + ",format=yuv420p" + f"[v{index}]")
+        video_filter += ",format=yuv420p,settb=AVTB"
+        if dissolve_seconds > 0 and index < len(inputs) - 1:
+            video_filter += (
+                ",tpad=stop_mode=clone:"
+                f"stop_duration={dissolve_seconds:.6f}"
+            )
+        filters.append(video_filter + f"[v{index}]")
         filters.append(audio_filter + f"[a{index}]")
         concat_inputs.append(f"[v{index}][a{index}]")
-    filters.append(
-        "".join(concat_inputs)
-        + f"concat=n={len(inputs)}:v=1:a=1[vout][aout]"
-    )
+    if dissolve_seconds > 0:
+        previous_video = "v0"
+        offset_seconds = durations[0]
+        for index in range(1, len(inputs)):
+            output_video = "vout" if index == len(inputs) - 1 else f"vx{index}"
+            filters.append(
+                f"[{previous_video}][v{index}]"
+                "xfade=transition=fade:"
+                f"duration={dissolve_seconds:.6f}:"
+                f"offset={offset_seconds:.6f}[{output_video}]"
+            )
+            previous_video = output_video
+            offset_seconds += durations[index]
+        filters.append(
+            "".join(f"[a{index}]" for index in range(len(inputs)))
+            + f"concat=n={len(inputs)}:v=0:a=1[aout]"
+        )
+    else:
+        filters.append(
+            "".join(concat_inputs)
+            + f"concat=n={len(inputs)}:v=1:a=1[vout][aout]"
+        )
     command.extend(
         [
             "-filter_complex",

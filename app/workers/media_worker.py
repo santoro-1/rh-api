@@ -25,6 +25,26 @@ from app.services.long_audio import (
 logger = logging.getLogger(__name__)
 
 
+def _media_log_context(
+    project: LongAudioProject,
+    *,
+    batch=None,
+) -> dict[str, object]:
+    linked_batch = batch or project.batch
+    return {
+        "project_id": project.id,
+        "user_id": project.user_id,
+        "username": project.user.username if project.user else None,
+        "batch_id": linked_batch.id if linked_batch else None,
+        "source_channel": linked_batch.source_channel if linked_batch else None,
+        "correlation_id": (
+            linked_batch.correlation_id or linked_batch.id
+            if linked_batch
+            else None
+        ),
+    }
+
+
 def recover_inflight_projects(db: Session) -> None:
     if get_settings().media_processing_mode != "local":
         return
@@ -119,9 +139,7 @@ def process_next(db: Session) -> bool:
                 logger,
                 event,
                 message,
-                project_id=project.id,
-                batch_id=batch.id,
-                user_id=project.user_id,
+                **_media_log_context(project, batch=batch),
             )
             db.commit()
             return True
@@ -130,8 +148,7 @@ def process_next(db: Session) -> bool:
             logger,
             event,
             message,
-            project_id=project.id,
-            user_id=project.user_id,
+            **_media_log_context(project),
         )
     except Exception as exc:
         db.rollback()
@@ -151,7 +168,7 @@ def process_next(db: Session) -> bool:
             "media.failed",
             "长音频预处理失败",
             level=logging.WARNING,
-            project_id=project.id,
+            **_media_log_context(project),
             action=action,
             error=str(exc),
         )

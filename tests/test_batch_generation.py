@@ -174,11 +174,22 @@ def test_batch_page_and_templates_support_excel_and_csv(client):
     assert "长音频拆分后先试听确认" in page.text
     assert "长音频拆分" not in page.text.split("<nav", 1)[-1].split("</nav>", 1)[0]
     assert "输入文案并选择音色" in page.text
+    assert 'id="batch-name"' in page.text
+    assert "上传音频时默认使用首个音频文件名" in page.text
+    assert page.text.index('id="batch-name"') < page.text.index(
+        '<details class="advanced-settings">'
+    )
     script = client.get("/static/batch_generate.js")
     assert script.status_code == 200
     assert "batchParameters" in script.text
     assert "moveAsset" in script.text
     assert "reuseAsset" in script.text
+    assert "syncAutoBatchName" in script.text
+    assert "identifierWithoutExtension(audioAssets[0].originalName)" in script.text
+    assert "batchNameWasEdited" in script.text
+    batches_page = client.get("/batches")
+    assert batches_page.status_code == 200
+    assert "<th>任务名称</th>" in batches_page.text
     assert "image_asset_id: primary.assetId" in script.text
     assert "source_video_asset_id: primary.assetId" in script.text
     assert "不重新上传，复制一条素材引用" in script.text
@@ -300,6 +311,7 @@ def test_minimax_batch_creates_persistent_audio_tasks_before_video_tasks(
         voices = db.query(MiniMaxVoiceAsset).all()
         assert batch.audio_mode == "minimax"
         assert batch.source_channel == BATCH_SOURCE_LEGACY_WEB
+        assert batch.correlation_id
         assert db.query(GenerationTask).count() == 0
         assert audio_task.status == "PENDING"
         assert json.loads(audio_task.pronunciation_dict_json) == [

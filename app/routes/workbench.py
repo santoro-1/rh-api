@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ from app.services.content_analysis.analysis import (
     analyze_content,
 )
 from app.services.postproduction import postproduction_manifest
+from app.services.logging_config import log_event
 from app.services.security import verify_password
 from app.services.speech.minimax import MiniMaxAPIError
 from app.services.speech.voice_studio import create_voice_task, request_voice_save
@@ -88,6 +90,7 @@ from app.services.workbench_auth import (
 )
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["workbench"])
 
 
@@ -197,6 +200,8 @@ def _audio_batch_payload(batch: GenerationBatch) -> dict[str, Any]:
     return {
         "schema": "runninghub.workbench-audio-batch.v1",
         "batch_id": batch.id,
+        "correlation_id": batch.correlation_id or batch.id,
+        "source_channel": batch.source_channel,
         "name": batch.name,
         "review_required": batch.review_required,
         "items": items,
@@ -211,6 +216,7 @@ def _workbench_manifest(item: GenerationBatchItem) -> dict[str, Any]:
         )
         video.pop("preview_url", None)
     manifest["batch_name"] = item.batch.name
+    manifest["correlation_id"] = item.batch.correlation_id or item.batch.id
     manifest["created_at"] = item.batch.created_at.isoformat()
     manifest["updated_at"] = item.updated_at.isoformat()
     manifest["composition"] = _composition_payload(item)
@@ -683,9 +689,21 @@ def create_workbench_audio_batch(
             name=str(payload.get("name") or "工作台声音批次"),
             request_key=request_key,
             plan=plan,
+            correlation_id=str(payload.get("correlation_id") or "").strip() or None,
         )
         db.commit()
         batch = _batch_for_user(batch.id, user, db)
+        log_event(
+            logger,
+            "workbench.audio_batch_created",
+            "新版工作台声音批次已创建",
+            user_id=user.id,
+            username=user.username,
+            batch_id=batch.id,
+            source_channel=batch.source_channel,
+            correlation_id=batch.correlation_id or batch.id,
+            item_count=batch.total_items,
+        )
     except BatchValidationError as exc:
         db.rollback()
         for directory in created_directories:
@@ -775,6 +793,10 @@ def start_workbench_composition(
     if not str(payload.get("idempotency_key") or "").strip():
         raise HTTPException(status_code=422, detail="画面生成请求缺少幂等键")
     batch = _batch_for_user(batch_id, user, db)
+    request_correlation_id = str(payload.get("correlation_id") or "").strip()
+    batch_correlation_id = batch.correlation_id or batch.id
+    if request_correlation_id and request_correlation_id != batch_correlation_id:
+        raise HTTPException(status_code=409, detail="日志关联标识与声音批次不一致")
     item = next((candidate for candidate in batch.items if candidate.id == item_id), None)
     if item is None or item.audio_task is None:
         raise HTTPException(status_code=404, detail="声音任务不存在")
@@ -835,6 +857,17 @@ def start_workbench_composition(
             materialized_image.unlink(missing_ok=True)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
+    log_event(
+        logger,
+        "workbench.composition_started",
+        "新版工作台画面生成已开始",
+        user_id=user.id,
+        username=user.username,
+        batch_id=batch.id,
+        batch_item_id=item.id,
+        source_channel=batch.source_channel,
+        correlation_id=batch_correlation_id,
+    )
     return _workbench_manifest(_item_for_user(item_id, user, db))
 
 

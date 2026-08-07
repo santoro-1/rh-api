@@ -63,6 +63,11 @@ _WEB_STARTUP_MARKERS = (
     "Application startup complete",
     "Uvicorn running on",
 )
+SOURCE_CHANNELS = {
+    "all": "全部",
+    "legacy_web": "旧网页",
+    "new_workbench": "新工作台",
+}
 
 
 class LogChunk(TypedDict):
@@ -105,12 +110,29 @@ def _is_visible_log_line(line: str) -> bool:
     )
 
 
+def _normalize_source_channel(value: str) -> str:
+    value = value.strip().lower()
+    return value if value in SOURCE_CHANNELS else "all"
+
+
+def _matches_source_channel(line: str, source_channel: str) -> bool:
+    if source_channel == "all":
+        return True
+    return bool(
+        re.search(
+            rf'"source_channel"\s*:\s*"{re.escape(source_channel)}"',
+            line,
+        )
+    )
+
+
 def _read_log_chunk(
     path: Path,
     cursor: int | None,
     *,
     maximum_lines: int = 120,
     maximum_bytes: int = 256 * 1024,
+    source_channel: str = "all",
 ) -> LogChunk:
     """Read complete new lines after cursor without resetting page scroll."""
 
@@ -158,7 +180,13 @@ def _read_log_chunk(
             complete = raw[: last_newline + 1]
         next_cursor = read_start + len(complete)
         lines = complete.decode("utf-8", errors="replace").splitlines()
-        visible = [line for line in lines if _is_visible_log_line(line)]
+        source_channel = _normalize_source_channel(source_channel)
+        visible = [
+            line
+            for line in lines
+            if _is_visible_log_line(line)
+            and _matches_source_channel(line, source_channel)
+        ]
         return {
             "cursor": next_cursor,
             "lines": visible[-maximum_lines:],
@@ -218,6 +246,7 @@ def _search_log_history(
     task_query: str,
     level: str,
     days: int,
+    source_channel: str = "all",
     maximum_lines: int = 300,
 ) -> list[str]:
     selected_services = (
@@ -234,6 +263,7 @@ def _search_log_history(
                 None,
                 maximum_lines=maximum_lines,
                 maximum_bytes=min(get_settings().log_max_bytes, 1024 * 1024),
+                source_channel=source_channel,
             )
             for line in reversed(chunk["lines"]):
                 lowered = line.lower()
@@ -361,10 +391,12 @@ def operations_page(
     task: str = Query("", max_length=100),
     service: str = Query("all", max_length=30),
     level: str = Query("", max_length=10),
+    source_channel: str = Query("all", max_length=30),
     days: int = Query(7, ge=1, le=7),
     current_user: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
 ):
+    source_channel = _normalize_source_channel(source_channel)
     queue = _queue_snapshot(db)
     services = _service_snapshot()
     visible_log_files = _visible_log_files()
@@ -372,6 +404,7 @@ def operations_page(
         name: _read_log_chunk(
             get_settings().logs_dir / filename,
             None,
+            source_channel=source_channel,
         )
         for name, filename in visible_log_files.items()
     }
@@ -392,8 +425,13 @@ def operations_page(
             task_query=task,
             level=level,
             days=days,
+            source_channel=source_channel,
         )
-        if account_id or task.strip() or service != "all" or level
+        if account_id
+        or task.strip()
+        or service != "all"
+        or level
+        or source_channel != "all"
         else []
     )
     return templates.TemplateResponse(
@@ -403,6 +441,7 @@ def operations_page(
             "current_user": current_user,
             "services": services,
             "service_options": _service_options(),
+            "source_channel_options": SOURCE_CHANNELS.items(),
             "video_counts": queue["videoCounts"],
             "audio_counts": queue["audioCounts"],
             "media_counts": queue["mediaCounts"],
@@ -418,10 +457,15 @@ def operations_page(
                 "service": service,
                 "level": level,
                 "days": days,
+                "sourceChannel": source_channel,
             },
             "history_lines": history_lines,
             "history_searched": bool(
-                account_id or task.strip() or service != "all" or level
+                account_id
+                or task.strip()
+                or service != "all"
+                or level
+                or source_channel != "all"
             ),
         },
     )
@@ -434,12 +478,14 @@ def operations_updates(
     media_worker: int | None = None,
     video_worker: int | None = None,
     launcher: int | None = None,
+    source_channel: str = Query("all", max_length=30),
     current_user: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
 ):
     """Return new operator events and fresh cards without reloading the page."""
 
     del current_user
+    source_channel = _normalize_source_channel(source_channel)
     cursors = {
         "web": web,
         "audio_worker": audio_worker,
@@ -456,6 +502,7 @@ def operations_updates(
             service: _read_log_chunk(
                 get_settings().logs_dir / filename,
                 cursors[service],
+                source_channel=source_channel,
             )
             for service, filename in visible_log_files.items()
         },

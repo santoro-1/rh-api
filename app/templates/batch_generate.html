@@ -14,6 +14,16 @@
     <h2>1. 选择生成方式</h2>
     <p class="muted">页面只会显示当前选择真正需要填写的内容。</p>
   </div>
+  <label>任务名称
+    <input
+      id="batch-name"
+      maxlength="100"
+      placeholder="上传素材后自动填写，也可以手动输入"
+      aria-describedby="batch-name-help"
+      required
+    >
+    <span id="batch-name-help" class="field-help">上传音频时默认使用首个音频文件名；文案生成时默认使用首个任务编号或画面文件名。多条任务会附带数量，手动修改后不再自动覆盖。</span>
+  </label>
   <div class="two-columns">
     <label>素材类型
       <select id="batch-workflow">
@@ -37,9 +47,6 @@
   <details class="advanced-settings">
     <summary>高级设置</summary>
     <div class="advanced-settings-body stack-form">
-      <label>任务名称
-        <input id="batch-name" maxlength="100" value="视频生成任务" required>
-      </label>
       <div id="digital-batch-settings" class="two-columns">
         <label>最长分辨率
           <input id="batch-resolution" type="number" min="1" value="1024">

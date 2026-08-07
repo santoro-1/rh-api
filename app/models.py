@@ -492,6 +492,9 @@ class GenerationBatch(Base):
     source_channel: Mapped[str] = mapped_column(
         String(30), nullable=False, default=BATCH_SOURCE_LEGACY_WEB, index=True
     )
+    correlation_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     audio_mode: Mapped[str] = mapped_column(String(30), nullable=False, default="upload")
     review_required: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False

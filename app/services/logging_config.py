@@ -30,7 +30,7 @@ _SECRET_PATTERNS = (
     re.compile(
         r"""(?ix)
         (authorization["']?\s*[:=]\s*["']?\s*bearer\s+)
-        [^"',\s}]+
+        [^"',&\s}]+
         """
     ),
     re.compile(

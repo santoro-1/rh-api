@@ -122,6 +122,8 @@
     if (nextPollTimer) clearTimeout(nextPollTimer);
     try {
       const url = new URL("/admin/operations/updates", window.location.origin);
+      const sourceFilter = document.getElementById("log-source-filter");
+      if (sourceFilter) url.searchParams.set("source_channel", sourceFilter.value);
       for (const [key, element] of logElements) {
         url.searchParams.set(key, element.dataset.logCursor || "0");
       }

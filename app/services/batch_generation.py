@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -846,6 +847,7 @@ def create_batch(
     name: str,
     request_key: str,
     plan: BatchPlan,
+    correlation_id: str | None = None,
 ) -> tuple[GenerationBatch, list[Path]]:
     """Atomically create a batch and its independently queued task rows."""
 
@@ -871,12 +873,23 @@ def create_batch(
     clean_name = name.strip()
     if not 1 <= len(clean_name) <= 100:
         raise BatchValidationError(
-            [{"rowNumber": 0, "rowId": "", "message": "批次名称需为 1–100 个字符"}]
+            [{"rowNumber": 0, "rowId": "", "message": "任务名称需为 1–100 个字符"}]
         )
     if not request_key or len(request_key) > 64:
         raise BatchValidationError(
             [{"rowNumber": 0, "rowId": "", "message": "批次请求标识不合法"}]
         )
+
+    clean_correlation_id = str(correlation_id or "").strip()
+    if clean_correlation_id and (
+        len(clean_correlation_id) > 64
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", clean_correlation_id) is None
+    ):
+        raise BatchValidationError(
+            [{"rowNumber": 0, "rowId": "", "message": "日志关联标识不合法"}]
+        )
+    if not clean_correlation_id:
+        clean_correlation_id = uuid.uuid4().hex
 
     batch = GenerationBatch(
         id=str(uuid.uuid4()),
@@ -884,6 +897,7 @@ def create_batch(
         name=clean_name,
         workflow_type=plan.workflow_type,
         source_channel=plan.source_channel,
+        correlation_id=clean_correlation_id,
         audio_mode=plan.audio_mode,
         review_required=plan.review_required,
         video_review_required=plan.video_review_required,
