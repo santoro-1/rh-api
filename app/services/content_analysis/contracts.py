@@ -5,8 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from enum import Enum
+import logging
 from typing import Any, Literal
 
+import jieba
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -43,6 +45,29 @@ CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID = (
 )
 
 _LOCAL_PREFERRED_BREAK_CHARACTERS = frozenset("，。！？；：、,.!?;:\n\r")
+_STRUCTURAL_PARTICLES = frozenset("的地得")
+
+jieba.setLogLevel(logging.ERROR)
+_JIEBA_TOKENIZER = jieba.Tokenizer()
+
+
+def _lexical_unsafe_break_positions(original_script: str) -> set[int]:
+    """Return boundaries inside general Chinese tokens or around particles."""
+
+    unsafe: set[int] = set()
+    for token, start, end in _JIEBA_TOKENIZER.tokenize(
+        original_script, mode="default", HMM=False
+    ):
+        if len(token) <= 1 or token.isspace():
+            continue
+        unsafe.update(range(int(start) + 1, int(end)))
+    for position in range(1, len(original_script)):
+        if (
+            original_script[position] in _STRUCTURAL_PARTICLES
+            or original_script[position - 1] in _STRUCTURAL_PARTICLES
+        ):
+            unsafe.add(position)
+    return unsafe
 
 LevelScore = Field(ge=1, le=5, description="Integer level from 1 (low) to 5 (high).")
 ConfidenceScore = confloat(strict=True, ge=0.0, le=1.0)
@@ -352,6 +377,7 @@ def subtitle_break_candidate_positions(original_script: str) -> list[int]:
     if not isinstance(original_script, str) or not original_script:
         return []
     positions: list[int] = []
+    unsafe_positions = _lexical_unsafe_break_positions(original_script)
     for position in range(1, len(original_script)):
         left = original_script[position - 1]
         right = original_script[position]
@@ -363,6 +389,8 @@ def subtitle_break_candidate_positions(original_script: str) -> list[int]:
         ):
             continue
         if left.isascii() and right.isascii() and left.isalnum() and right.isalnum():
+            continue
+        if position in unsafe_positions:
             continue
         positions.append(position)
     return positions

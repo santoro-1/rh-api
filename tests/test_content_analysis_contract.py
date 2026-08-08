@@ -22,6 +22,7 @@ from app.services.content_analysis.contracts import (
     boundary_indexed_script,
     content_analysis_provider_json_schema,
     parse_subtitle_break_plan_payload,
+    subtitle_break_candidate_positions,
 )
 
 
@@ -273,6 +274,19 @@ def test_boundary_indexed_script_withholds_punctuation_and_ascii_word_breaks() -
     assert "，⟦" not in indexed
     assert "高，百" in indexed
     assert indexed.replace("⟦", "").count("B") > 0
+
+
+def test_boundary_candidates_withhold_general_chinese_words_and_particles() -> None:
+    script = "破罐子破摔，工作上的情绪，从原来的160斤"
+    positions = set(subtitle_break_candidate_positions(script))
+
+    idiom_start = script.index("破罐子破摔")
+    emotion_start = script.index("情绪")
+    particle = script.index("的", script.index("原来"))
+    assert not positions.intersection(range(idiom_start + 1, idiom_start + len("破罐子破摔")))
+    assert emotion_start + 1 not in positions
+    assert particle not in positions
+    assert particle + 1 not in positions
 
 
 def test_break_plan_is_expanded_from_exact_source_slices() -> None:

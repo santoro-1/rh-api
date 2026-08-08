@@ -42,7 +42,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v5"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v6"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -146,8 +146,9 @@ def _system_prompt() -> str:
 
         ## 3. 输入说明
         - original_script：未经修改的原始脚本，是内容理解的依据。
-        - boundary_indexed_script：与原文相同，但在可选字符边界插入 ⟦B编号⟧。标记不是原文，
-          编号表示“在标记左侧字符之后断开”。只有已出现的编号可以被选择。
+        - boundary_indexed_script：与原文相同，但只在通用中文分词和结构助词校验通过的可选边界
+          插入 ⟦B编号⟧。标记不是原文，编号表示“在标记左侧字符之后断开”。只有已出现的编号
+          可以被选择；不要试图绕过未提供的词内边界。
 
         ## 4. 输出要求
         按 response_format JSON Schema 输出一个 JSON 对象，不要输出 Markdown、解释或前后缀。
