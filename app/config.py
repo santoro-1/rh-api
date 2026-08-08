@@ -229,7 +229,7 @@ class Settings:
             runninghub_auto_retry_base_delay_seconds=(
                 runninghub_auto_retry_base_delay_seconds
             ),
-            max_image_size_mb=_as_int("MAX_IMAGE_SIZE_MB", 20),
+            max_image_size_mb=_as_int("MAX_IMAGE_SIZE_MB", 200),
             max_audio_size_mb=_as_int("MAX_AUDIO_SIZE_MB", 100),
             max_video_size_mb=_as_int("MAX_VIDEO_SIZE_MB", 500),
             upload_retention_days=_as_int("UPLOAD_RETENTION_DAYS", 2),

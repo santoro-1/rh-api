@@ -333,7 +333,15 @@ def test_nginx_template_supports_current_upload_limit_and_proxy_headers():
     config = (
         PROJECT_ROOT / "deploy" / "nginx" / "runninghub-video.conf.template"
     ).read_text(encoding="utf-8")
+    development_environment = (PROJECT_ROOT / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    production_environment = (PROJECT_ROOT / ".env.production.example").read_text(
+        encoding="utf-8"
+    )
     assert "client_max_body_size 550M;" in config
+    assert "MAX_IMAGE_SIZE_MB=200" in development_environment
+    assert "MAX_IMAGE_SIZE_MB=200" in production_environment
     assert "proxy_pass http://127.0.0.1:18083;" in config
     assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in config
     assert "Content-Security-Policy" in config

@@ -267,7 +267,9 @@ python -m app.workers.task_worker
 
 - 应用与安全：`APP_ENV`、`APP_SECRET_KEY`、`APP_ENCRYPTION_KEY`、
   `COOKIE_SECURE`、`ALLOWED_HOSTS`。
-- 存储与限制：`DATABASE_URL`、`DATA_DIR`、各素材大小和保留时间。
+- 存储与限制：`DATABASE_URL`、`DATA_DIR`、各素材大小和保留时间；
+  `MAX_IMAGE_SIZE_MB` 的默认值为 200，适用于旧单条页、旧批量页和工作台 4A
+  暂存的数字人 JPG/PNG/WEBP 图片。
 - RunningHub：基础地址、轮询、超时以及自动重试次数与等待。
 - 长音频：`LONG_AUDIO_ALIGNMENT_PROVIDER`、`ASR_BASE_URL`、ASR 超时。
 - 媒体节点：`MEDIA_PROCESSING_MODE`、`MEDIA_WORKER_TOKEN`、租约和归档上限。

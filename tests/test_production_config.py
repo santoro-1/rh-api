@@ -39,6 +39,24 @@ def test_production_settings_accept_explicit_domain(monkeypatch):
     assert settings.runninghub_remote_watchdog_seconds == 14400
 
 
+def test_default_image_upload_limit_is_200_mb(monkeypatch):
+    _set_valid_production_environment(monkeypatch)
+    monkeypatch.delenv("MAX_IMAGE_SIZE_MB", raising=False)
+
+    settings = Settings.from_environment()
+
+    assert settings.max_image_size_mb == 200
+
+
+def test_image_upload_limit_keeps_explicit_environment_override(monkeypatch):
+    _set_valid_production_environment(monkeypatch)
+    monkeypatch.setenv("MAX_IMAGE_SIZE_MB", "64")
+
+    settings = Settings.from_environment()
+
+    assert settings.max_image_size_mb == 64
+
+
 def test_runninghub_watchdog_ignores_removed_one_hour_timeout(monkeypatch):
     _set_valid_production_environment(monkeypatch)
     monkeypatch.delenv("RUNNINGHUB_REMOTE_WATCHDOG_SECONDS", raising=False)

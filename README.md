@@ -46,6 +46,7 @@
 - APP_SECRET_KEY：一段随机长字符串
 - 生产环境必须设置 APP_ENCRYPTION_KEY：Fernet URL-safe Base64 key
 - COOKIE_SECURE=false：仅限本地 HTTP；上线 HTTPS 后改为 true
+- MAX_IMAGE_SIZE_MB：数字人 JPG/PNG/WEBP 单张图片上传上限，默认 200 MB
 - MAX_VIDEO_SIZE_MB：LTX 源视频上传上限，默认 500 MB
 - LONG_AUDIO_ALIGNMENT_PROVIDER：长音频默认对齐器，当前为 `funasr_http`
 - ASR_BASE_URL：独立 ASR 服务地址，本地默认 `http://127.0.0.1:18084`

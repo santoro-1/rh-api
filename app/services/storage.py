@@ -113,7 +113,9 @@ def save_upload(
             while chunk := upload.file.read(1024 * 1024):
                 written += len(chunk)
                 if written > max_bytes:
-                    raise UploadValidationError("上传文件超过大小限制")
+                    raise UploadValidationError(
+                        f"上传文件超过 {max_megabytes} MB 大小限制"
+                    )
                 output.write(chunk)
         if written == 0:
             raise UploadValidationError("上传文件不能为空")
