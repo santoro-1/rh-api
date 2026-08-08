@@ -360,7 +360,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
                 {
                     "row_id": "1",
                     "speech_script": "第一条真实语音测试脚本。",
-                    "prompt": "人物自然说话",
+                    "prompt": "人物自然地说话",
                 }
             ],
             "speech_options": {
@@ -472,7 +472,9 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         assert task.primary_kind == "image"
         assert task.primary_path
         assert task.primary_original_name == "person.png"
-        assert json.loads(task.video_parameters_json)["timing_mode"] == "exact_timestamps"
+        video_parameters = json.loads(task.video_parameters_json)
+        assert video_parameters["timing_mode"] == "exact_timestamps"
+        assert video_parameters["prompt"] == "测试提示词"
         base = get_settings().outputs_dir / "workbench-base.mp4"
         base.write_bytes(b"normalized-base-video")
         task.batch_item.merged_video_path = to_relative_data_path(base, get_settings())

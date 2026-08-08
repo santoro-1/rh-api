@@ -89,6 +89,7 @@ from app.services.task_management import (
     TaskManagementError,
     prepare_task_retry,
 )
+from app.services.workflow_configs import get_user_workflow_config
 from app.services.video_merge import (
     MERGE_FAILED,
     MERGED_PREVIEW_READY,
@@ -108,6 +109,7 @@ from app.services.workbench_auth import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["workbench"])
+_LEGACY_WORKBENCH_DIGITAL_PROMPT = "人物自然地说话"
 
 
 def _token_user(token: str, db: Session) -> User:
@@ -926,6 +928,23 @@ def start_workbench_composition(
         # the existing whole-second ceiling (24.4 -> 25), but do not apply the
         # legacy 0.5-second silent tail used by upload-audio batch workflows.
         video_parameters["timing_mode"] = "exact_timestamps"
+        # Older local workbench builds injected this short placeholder into
+        # every row, which accidentally overrode the user's complete server
+        # configuration. Refresh only that exact legacy value at the paid 4A
+        # handoff; custom row prompts remain untouched.
+        if (
+            batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
+            and str(video_parameters.get("prompt") or "").strip()
+            == _LEGACY_WORKBENCH_DIGITAL_PROMPT
+        ):
+            configured_prompt = str(
+                get_user_workflow_config(
+                    user, DIGITAL_HUMAN_WORKFLOW
+                ).default_prompt
+                or ""
+            ).strip()
+            if configured_prompt:
+                video_parameters["prompt"] = configured_prompt
         task.video_parameters_json = json.dumps(
             video_parameters, ensure_ascii=False
         )
