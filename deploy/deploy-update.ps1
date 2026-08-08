@@ -269,6 +269,7 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
         "scripts/remote_media_node.py",
         "scripts/remote_media_worker.py",
         "启动ASR服务.cmd",
+	"WORKBENCH_INTEGRATION_20260803.md",
         "启动远程媒体节点.cmd"
     )
     if ($deletedFiles) {
