@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -108,6 +109,82 @@ from app.services.workbench_auth import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _payload_image_sha256(payload: dict[str, Any]) -> str:
+    value = str(payload.get("image_sha256") or "").strip().lower()
+    if not value:
+        return ""
+    if len(value) != 64:
+        raise AudioReviewError("当前项目图片指纹不合法")
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise AudioReviewError("当前项目图片指纹不合法") from exc
+    return value
+
+
+def _reset_video_handoff_for_new_image(
+    db: Session,
+    item: GenerationBatchItem,
+) -> None:
+    """Discard only video-stage state while preserving approved MiniMax audio."""
+
+    video_tasks = [
+        segment.generation_task
+        for segment in item.segments
+        if segment.generation_task is not None
+    ]
+    if item.generation_task is not None:
+        video_tasks.append(item.generation_task)
+    active_statuses = {
+        TaskStatus.PENDING.value,
+        TaskStatus.UPLOADING.value,
+        TaskStatus.SUBMITTED.value,
+        TaskStatus.RUNNING.value,
+    }
+    if any(task.status in active_statuses for task in video_tasks):
+        raise AudioReviewError("旧图片的画面任务仍在运行，请完成后再更换图片")
+    if item.merged_video_status == "MERGING":
+        raise AudioReviewError("旧图片的视频仍在合并，请完成后再更换图片")
+
+    # Keep the former output file recoverable.  Only detach its database
+    # pointer here; the next merge writes a new item-scoped result, and normal
+    # retention cleanup may remove the orphan later.
+    item.merged_video_status = "MERGE_PENDING"
+    item.merged_video_path = None
+    item.merged_video_error = None
+    item.merged_at = None
+    item.merged_reviewed_at = None
+    for video_task in video_tasks:
+        video_task.segment = None
+        video_task.batch_item = None
+        db.delete(video_task)
+    db.flush()
+    item.segments.clear()
+    db.flush()
+
+    audio_task = item.audio_task
+    if audio_task is None:
+        raise AudioReviewError("声音任务不存在")
+    audio_task.status = AudioTaskStatus.PENDING.value
+    audio_task.error_code = None
+    audio_task.error_message = None
+    audio_task.completed_at = None
+    item.audio_status = "AUDIO_APPROVED"
+    item.status = "AUDIO_APPROVED"
+    item.error_code = None
+    item.error_message = None
+
+
 router = APIRouter(tags=["workbench"])
 _LEGACY_WORKBENCH_DIGITAL_PROMPT = "人物自然地说话"
 
@@ -289,6 +366,7 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         "status": status,
         "segment_count": len(tasks),
         "merge_status": item.merged_video_status,
+        "image_sha256": audio_task.primary_sha256 if audio_task is not None else None,
         "base_video_ready": status == "BASE_VIDEO_READY",
         "base_video_download_url": (
             f"/api/workbench/tasks/{item.id}/base-video"
@@ -897,6 +975,10 @@ def start_workbench_composition(
         raise HTTPException(status_code=404, detail="声音任务不存在")
     task = item.audio_task
     try:
+        requested_image_sha256 = _payload_image_sha256(payload)
+    except AudioReviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
         selected_account_ids = validate_workbench_execution_account_selection(
             db,
             user,
@@ -948,7 +1030,25 @@ def start_workbench_composition(
         task.video_parameters_json = json.dumps(
             video_parameters, ensure_ascii=False
         )
-        if not task.primary_path:
+        current_image_sha256 = str(task.primary_sha256 or "").strip().lower()
+        if task.primary_path and not current_image_sha256:
+            try:
+                current_image_path = safe_relative_path(
+                    task.primary_path, get_settings().data_dir
+                )
+            except ValueError as exc:
+                raise AudioReviewError("已绑定的项目图片路径不合法") from exc
+            if not current_image_path.is_file():
+                raise AudioReviewError("已绑定的项目图片不存在")
+            current_image_sha256 = _file_sha256(current_image_path)
+            task.primary_sha256 = current_image_sha256
+
+        image_changed = bool(
+            task.primary_path
+            and requested_image_sha256
+            and requested_image_sha256 != current_image_sha256
+        )
+        if not task.primary_path or image_changed:
             image_asset_id = str(payload.get("image_asset_id") or "").strip()
             if not image_asset_id:
                 raise AudioReviewError("4A 画面生成缺少当前项目图片")
@@ -958,7 +1058,17 @@ def start_workbench_composition(
                 raise AudioReviewError(str(exc)) from exc
             if image_asset.kind != "image":
                 raise AudioReviewError("4A 画面素材必须是图片")
-            source = safe_relative_path(image_asset.relative_path, get_settings().data_dir)
+            source = safe_relative_path(
+                image_asset.relative_path, get_settings().data_dir
+            )
+            uploaded_image_sha256 = _file_sha256(source)
+            if (
+                requested_image_sha256
+                and uploaded_image_sha256 != requested_image_sha256
+            ):
+                raise AudioReviewError("上传图片与当前项目图片版本不一致")
+            if task.primary_path:
+                _reset_video_handoff_for_new_image(db, item)
             materialized_image = materialize_staged_asset(
                 source,
                 task_upload_dir(
@@ -971,6 +1081,7 @@ def start_workbench_composition(
                 materialized_image, get_settings()
             )
             task.primary_original_name = image_asset.original_name
+            task.primary_sha256 = uploaded_image_sha256
             image_asset.consumed_at = datetime.now(timezone.utc)
             db.flush()
         if task.status == AudioTaskStatus.AWAITING_REVIEW.value:
@@ -999,6 +1110,7 @@ def start_workbench_composition(
         batch_item_id=item.id,
         source_channel=batch.source_channel,
         correlation_id=batch_correlation_id,
+        image_sha256=task.primary_sha256,
         runninghub_execution_account_ids=selected_account_ids,
     )
     return _workbench_manifest(_item_for_user(item_id, user, db))

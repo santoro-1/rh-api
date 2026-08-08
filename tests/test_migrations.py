@@ -101,7 +101,7 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('visual_analysis_caches')"
             )
         }
-    assert revision == "0026_visual_analysis_cache"
+    assert revision == "0027_audio_primary_sha256"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -122,6 +122,7 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
     assert audio_task_columns["primary_kind"][3] == 0
     assert audio_task_columns["primary_path"][3] == 0
     assert audio_task_columns["primary_original_name"][3] == 0
+    assert audio_task_columns["primary_sha256"][3] == 0
     assert {
         "user_id",
         "enabled",
@@ -282,7 +283,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0026_visual_analysis_cache"
+        assert version == "0027_audio_primary_sha256"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -344,7 +345,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0026_visual_analysis_cache"
+        assert revision == "0027_audio_primary_sha256"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -517,7 +518,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0026_visual_analysis_cache"
+        assert revision == "0027_audio_primary_sha256"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,

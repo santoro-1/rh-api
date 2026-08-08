@@ -994,6 +994,7 @@ class AudioGenerationTask(Base):
     primary_original_name: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
+    primary_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     speech_script: Mapped[str] = mapped_column(Text, nullable=False)
     pronunciation_dict_json: Mapped[str] = mapped_column(
         Text, nullable=False, default="[]"

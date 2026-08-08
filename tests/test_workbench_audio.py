@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 
@@ -10,6 +11,7 @@ from app.models import (
     AudioGenerationTask,
     AudioTaskStatus,
     GenerationBatch,
+    GenerationSegment,
     GenerationTask,
     MiniMaxConfig,
     MiniMaxVoiceAsset,
@@ -434,10 +436,12 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
     assert audio.status_code == 200
     assert audio.content == b"ID3generated-audio"
 
+    first_image = b"\x89PNG\r\n\x1a\npayload"
+    first_image_sha256 = hashlib.sha256(first_image).hexdigest()
     staged = client.post(
         "/api/workbench/batch-assets",
         data={"access_token": token, "kind": "image"},
-        files={"file": ("person.png", b"\x89PNG\r\n\x1a\npayload", "image/png")},
+        files={"file": ("person.png", first_image, "image/png")},
     )
     assert staged.status_code == 201, staged.text
     staged_id = staged.json()["asset_id"]
@@ -449,6 +453,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
             "idempotency_key": "composition-project-1",
             "cost_confirmed": True,
             "image_asset_id": staged_id,
+            "image_sha256": first_image_sha256,
             "correlation_id": "workbench-correlation-001",
         },
     )
@@ -461,6 +466,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
             "idempotency_key": "composition-project-1",
             "cost_confirmed": True,
             "image_asset_id": staged_id,
+            "image_sha256": first_image_sha256,
             "correlation_id": "workbench-correlation-001",
         },
     )
@@ -472,6 +478,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         assert task.primary_kind == "image"
         assert task.primary_path
         assert task.primary_original_name == "person.png"
+        assert task.primary_sha256 == first_image_sha256
         video_parameters = json.loads(task.video_parameters_json)
         assert video_parameters["timing_mode"] == "exact_timestamps"
         assert video_parameters["prompt"] == "测试提示词"
@@ -479,16 +486,82 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         base.write_bytes(b"normalized-base-video")
         task.batch_item.merged_video_path = to_relative_data_path(base, get_settings())
         task.batch_item.merged_video_status = "PREVIEW_READY"
+        segment = GenerationSegment(
+            id="old-image-segment",
+            batch_item_id=task.batch_item_id,
+            segment_index=1,
+            script_text="第一条。",
+            start_seconds=0.0,
+            end_seconds=1.2,
+            audio_path=task.output_path,
+            prompt="测试提示词",
+            status="TASK_CREATED",
+        )
+        db.add(segment)
+        db.flush()
+        db.add(
+            GenerationTask(
+                id="old-image-video-task",
+                user_id=task.user_id,
+                segment_id=segment.id,
+                workflow_type="digital_human",
+                image_path=task.primary_path,
+                audio_path=task.output_path,
+                image_original_name=task.primary_original_name,
+                audio_original_name="workbench-audio.mp3",
+                audio_duration_seconds=1.2,
+                start_seconds=0.0,
+                end_seconds=1.2,
+                prompt="测试提示词",
+                status="SUCCESS",
+            )
+        )
+        task.status = AudioTaskStatus.SUCCESS.value
+        task.batch_item.status = "SEGMENTS_CREATED"
         db.commit()
+
+    replacement_image = b"\x89PNG\r\n\x1a\nreplacement-payload"
+    replacement_sha256 = hashlib.sha256(replacement_image).hexdigest()
+    replacement_staged = client.post(
+        "/api/workbench/batch-assets",
+        data={"access_token": token, "kind": "image"},
+        files={"file": ("replacement.png", replacement_image, "image/png")},
+    )
+    assert replacement_staged.status_code == 201, replacement_staged.text
+    replaced = client.post(
+        f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition",
+        json={
+            "access_token": token,
+            "idempotency_key": "composition-project-1-new-image",
+            "cost_confirmed": True,
+            "image_asset_id": replacement_staged.json()["asset_id"],
+            "image_sha256": replacement_sha256,
+            "correlation_id": "workbench-correlation-001",
+        },
+    )
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["composition"]["status"] == "COMPOSITION_QUEUED"
+    assert replaced.json()["composition"]["image_sha256"] == replacement_sha256
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).one()
+        assert task.primary_original_name == "replacement.png"
+        assert task.primary_sha256 == replacement_sha256
+        assert task.status == AudioTaskStatus.PENDING.value
+        assert task.output_path
+        assert task.subtitle_path
+        assert task.batch_item.merged_video_path is None
+        assert task.batch_item.merged_video_status == "MERGE_PENDING"
+        assert task.batch_item.segments == []
+        assert db.query(GenerationTask).count() == 0
 
     manifest = client.post(
         f"/api/workbench/tasks/{item_id}", json={"access_token": token}
     )
     assert manifest.status_code == 200
-    assert manifest.json()["composition"]["status"] == "BASE_VIDEO_READY"
+    assert manifest.json()["composition"]["status"] == "COMPOSITION_QUEUED"
+    assert manifest.json()["composition"]["image_sha256"] == replacement_sha256
     base_video = client.get(
         f"/api/workbench/tasks/{item_id}/base-video",
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert base_video.status_code == 200
-    assert base_video.content == b"normalized-base-video"
+    assert base_video.status_code == 409

@@ -280,7 +280,7 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0024_shared_minimax_voices`。SQLite 启用 WAL、外键和 busy timeout，设计目标
+当前迁移头为 `0027_audio_primary_sha256`。SQLite 启用 WAL、外键和 busy timeout，设计目标
 是一个 Web 加三个本地 Worker 的单服务器部署，不是多主集群。
 
 修改模型时：
@@ -554,3 +554,13 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
   运行中请求不得重复提交 MiniMax。
 - 当前代码仍按原始 `speech_script` 直接调用 MiniMax。本节只是冻结下一阶段边界，不能在
   未实现契约、迁移和跨项目测试前宣称功能已经生效。
+
+## 24. 新工作台图片版本绑定（2026-08-08）
+
+- 迁移 `0027_audio_primary_sha256` 给 `AudioGenerationTask` 增加 `primary_sha256`。4A 客户端
+  上传当前图片时同时提交内容摘要；服务端校验上传字节并把摘要返回到任务清单。
+- 摘要相同视为 HTTP 幂等重试，不重复创建 RunningHub 任务。摘要变化时仅在旧画面子任务
+  已结束后清除旧分段任务和合并结果，把已批准音频任务重新置为 `PENDING` 以重做分段交接；
+  `output_path`、`subtitle_path`、当前音频 attempt 和审核记录保持不变，不重新调用 MiniMax。
+- 工作台下载 `base_video` 前必须核对云端 `composition.image_sha256` 与本地操作快照；缺失或
+  不一致以 `REMOTE_IMAGE_VERSION_MISMATCH` 失败，禁止把旧图片视频登记为当前版本。
