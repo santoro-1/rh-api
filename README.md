@@ -15,6 +15,8 @@
 - [WORKFLOW_EXTENSION.md](WORKFLOW_EXTENSION.md)：新增 RunningHub 工作流适配器的最小步骤。
 - [PROJECT_STATUS.md](PROJECT_STATUS.md)：阶段快照和历史交接；当前技术事实以开发者指南
   和代码为准。
+- [../语音标点停顿配方开发文档.md](../语音标点停顿配方开发文档.md)：工作台脚本标点、
+  人工停顿、MiniMax 编译、幂等与费用保护的跨项目开发依据（当前仅完成方案，尚未实施）。
 
 ## 本地前置条件
 

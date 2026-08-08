@@ -23,6 +23,8 @@
 - 修改生产部署、服务器配置、备份或恢复：读 `deploy/README.md`。
 - 修改固定电脑媒体处理、FunASR 或便携媒体节点：读 `media_node/README.md`。
 - 修改数字人与工作台之间的接口：同时读工作台的 `docs/WEB_API.md` 和 `docs/RENDER_JOB_SCHEMA.md`。
+- 修改 MiniMax 文本合成、脚本标点、人工停顿、音频幂等或 raw cues 绑定：同时读工作区
+  `D:\工作内容\轻盈健\数字人\语音标点停顿配方开发文档.md`。
 
 ## 信息优先级
 
