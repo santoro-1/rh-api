@@ -71,7 +71,7 @@ function Invoke-RemoteScript {
     try {
         $output = & ssh -n -T -i $SshKey `
             -o BatchMode=yes -o ConnectTimeout=10 `
-            -o ConnectionAttempts=1 -o ServerAliveInterval=5 `
+            -o ConnectionAttempts=3 -o ServerAliveInterval=5 `
             -o ServerAliveCountMax=3 `
             $Server "printf %s $encoded | base64 -d | bash" 2>&1
         $exitCode = $LASTEXITCODE
@@ -354,14 +354,14 @@ echo "代码备份：`$code_backup"
 
     Write-Step "上传并校验发布包（服务器写操作 2，仅写临时目录）"
     & scp -i $SshKey -o BatchMode=yes -o ConnectTimeout=10 `
-        -o ConnectionAttempts=1 -o ServerAliveInterval=5 `
+        -o ConnectionAttempts=3 -o ServerAliveInterval=5 `
         -o ServerAliveCountMax=3 $archive `
         "${Server}:$script:RemoteTemp/release.tar"
     if ($LASTEXITCODE -ne 0) {
         throw "上传发布包失败。"
     }
     & scp -i $SshKey -o BatchMode=yes -o ConnectTimeout=10 `
-        -o ConnectionAttempts=1 -o ServerAliveInterval=5 `
+        -o ConnectionAttempts=3 -o ServerAliveInterval=5 `
         -o ServerAliveCountMax=3 $addedFilesManifest `
         "${Server}:$script:RemoteTemp/added-files.txt"
     if ($LASTEXITCODE -ne 0) {
