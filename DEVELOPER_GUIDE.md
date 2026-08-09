@@ -435,10 +435,10 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 
 - 权威代码位于 `app/services/content_analysis/`，契约版本为
   `jyd.content-analysis.v1`。
-- 对工作台公开的响应仍包含 `music_intent` 和 `subtitle_units`；内部 Ark 响应使用紧凑的
-  `jyd.content-analysis.provider.v2`，只返回 `music_intent` 与字幕断点编号
-  `subtitle_breaks`。服务端按原脚本本地切片生成公开 v1 单元。前景图片关键词延期到后续
-  契约版本，v1 禁止 `visual_cues`。
+- 对工作台公开的响应包含 `music_intent`、`subtitle_units` 和 `visual_plan`；内部 Ark 响应
+  使用紧凑的 `jyd.content-analysis.provider.v3`，只返回音乐意图、字幕断点编号与选中的
+  `anchor_id`/`concept_id`/`priority`。服务端按原脚本本地切片，并校验视觉项只能引用请求中
+  提供的候选。模型不返回视觉时间、素材身份或呈现参数。
 - `subtitle_units` 使用 Python Unicode code point 的左闭右开字符位置，必须首尾相接、
   完整覆盖原始脚本，且每段满足 `original_script[start:end] == text`。
 - 模型不得返回字幕时间戳或本地音乐文件身份。MiniMax 时间轴映射、真实字体测宽和本地
@@ -468,12 +468,13 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 
 ## 18. 统一内容分析接口与缓存（2026-08-06）
 
-- `POST /api/workbench/content-analysis` 使用现有工作台短期令牌，只接收精确原始脚本和
-  可选 `force_refresh`；浏览器和工作台不会获得 Ark Key。
+- `POST /api/workbench/content-analysis` 使用现有工作台短期令牌，接收精确原始脚本、可选
+  `force_refresh` 和可选 `visual_context`；后者只含 catalog 版本、概念说明和原文字符锚点，
+  禁止素材路径、时间戳及剪映轨道信息。浏览器和工作台不会获得 Ark Key。
 - `app/services/content_analysis/analysis.py` 负责固定 Prompt、Ark JSON Schema、响应提取、
-  音乐与字幕分支独立校验、确定性字符索引修复、成功分支保护和脱敏状态日志。
-- 迁移 `0022_content_analysis_cache` 按用户、脚本 SHA-256、模型、契约版本和 Prompt
-  版本缓存结果。缓存不保存豆包原始完整响应；完整失败不形成粘性缓存，部分成功和完整
+  音乐、字幕与视觉分支独立校验、确定性字符索引修复、成功分支保护和脱敏状态日志。
+- 迁移 `0028_unified_content_visual_plan` 在原缓存上增加视觉状态与结果，并把 catalog 版本和
+  visual context SHA-256 纳入缓存键。缓存不保存豆包原始完整响应；完整失败不形成粘性缓存，部分成功和完整
   成功可复用，强制刷新失败不得覆盖此前合法分支。
 - 迁移 `0023_batch_correlation_id` 为批次增加独立日志关联号；历史批次用批次 ID 回填，
   新工作台传入的关联号会被语音、媒体和视频 Worker 持续继承。不得用 `request_key`
@@ -542,6 +543,10 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
   素材目录版本、候选集合摘要、响应契约、Prompt 和模型；强制刷新更新同一精确缓存项。
 - 云端只输出 `SHOW/REVIEW/SKIP`、概念、用法、重要度、置信度和原因码，不选择具体图片、
   不计算时间。无效响应、Ark 错误或排队超时返回独立失败状态且不写缓存。
+
+该接口现为迁移期兼容入口。工作台项目主流程已改为通过 content-analysis provider v3 在
+同一次 Ark 请求中取得 selected-only `visual_plan`；旧视觉缓存不与新统一缓存互相命中。
+具体素材、raw cues 时间和剪映写入仍全部由工作台本地处理。
 
 ## 23. 语音标点停顿配方（方案已确认，尚未实施）
 

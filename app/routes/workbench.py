@@ -477,17 +477,21 @@ def workbench_content_analysis(
     user = _token_user(str(payload.get("access_token", "")), db)
     original_script = payload.get("original_script")
     force_refresh = payload.get("force_refresh", False)
+    visual_context = payload.get("visual_context")
     if not isinstance(original_script, str):
         raise HTTPException(status_code=400, detail="original_script 必须是字符串")
     if type(force_refresh) is not bool:
         raise HTTPException(status_code=400, detail="force_refresh 必须是布尔值")
+    if visual_context is not None and not isinstance(visual_context, dict):
+        raise HTTPException(status_code=400, detail="visual_context 必须是对象")
     try:
-        return analyze_content(
-            db,
-            user,
-            original_script=original_script,
-            force_refresh=force_refresh,
-        )
+        kwargs: dict[str, Any] = {
+            "original_script": original_script,
+            "force_refresh": force_refresh,
+        }
+        if visual_context is not None:
+            kwargs["visual_context_payload"] = visual_context
+        return analyze_content(db, user, **kwargs)
     except ContentAnalysisInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ContentAnalysisUnavailable as exc:

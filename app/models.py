@@ -259,11 +259,19 @@ class ContentAnalysisCache(Base):
     schema_version: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(100), nullable=False)
     model: Mapped[str] = mapped_column(String(200), nullable=False)
+    visual_catalog_version: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="none"
+    )
+    visual_context_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="0" * 64
+    )
     overall_status: Mapped[str] = mapped_column(String(20), nullable=False)
     music_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
     subtitle_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    visual_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
     music_intent_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     subtitle_units_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    visual_plan_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     music_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     music_error_summary: Mapped[Optional[str]] = mapped_column(
         String(500), nullable=True
@@ -272,6 +280,10 @@ class ContentAnalysisCache(Base):
         String(100), nullable=True
     )
     subtitle_error_summary: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    visual_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    visual_error_summary: Mapped[Optional[str]] = mapped_column(
         String(500), nullable=True
     )
     provider_request_id: Mapped[Optional[str]] = mapped_column(
@@ -293,6 +305,8 @@ class ContentAnalysisCache(Base):
             "schema_version",
             "prompt_version",
             "model",
+            "visual_catalog_version",
+            "visual_context_sha256",
             name="uq_content_analysis_cache_key",
         ),
     )

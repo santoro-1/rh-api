@@ -26,14 +26,22 @@ from app.services.content_analysis.analysis import (
 
 from app.services.content_analysis.contracts import (
     CONTENT_ANALYSIS_SCHEMA_VERSION,
+    CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
+    ContentVisualContext,
     ContentAnalysisContractError,
     ContentAnalysisResult,
     MusicIntent,
     SubtitleUnit,
+    VisualAnchor,
+    VisualConcept,
+    VisualPlanItem,
     content_analysis_json_schema,
     parse_content_analysis_payload,
     parse_music_intent_payload,
+    parse_content_visual_context,
     parse_subtitle_units_payload,
+    parse_visual_plan_payload,
+    visual_context_sha256,
     validate_subtitle_units,
 )
 from app.services.content_analysis.taxonomy import (
@@ -54,6 +62,7 @@ from app.services.content_analysis.taxonomy import (
 
 __all__ = [
     "CONTENT_ANALYSIS_SCHEMA_VERSION",
+    "CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION",
     "ARK_DEFAULT_BASE_URL",
     "CONTENT_ANALYSIS_PROMPT_VERSION",
     "ArkConcurrencyLimiter",
@@ -67,6 +76,7 @@ __all__ = [
     "MUSIC_MATCHER_WEIGHTS_V1",
     "ContentAnalysisContractError",
     "ContentAnalysisResult",
+    "ContentVisualContext",
     "ContentFormat",
     "ContentTopic",
     "MusicAvoidTrait",
@@ -77,6 +87,9 @@ __all__ = [
     "Pace",
     "SpeechDensity",
     "SubtitleUnit",
+    "VisualAnchor",
+    "VisualConcept",
+    "VisualPlanItem",
     "Valence",
     "VocalPreference",
     "ArkAPIError",
@@ -85,8 +98,11 @@ __all__ = [
     "content_analysis_json_schema",
     "parse_content_analysis_payload",
     "parse_music_intent_payload",
+    "parse_content_visual_context",
     "parse_subtitle_units_payload",
+    "parse_visual_plan_payload",
     "save_ark_config",
     "validate_ark_config",
     "validate_subtitle_units",
+    "visual_context_sha256",
 ]

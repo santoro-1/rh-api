@@ -17,6 +17,11 @@
   和代码为准。
 - [../语音标点停顿配方开发文档.md](../语音标点停顿配方开发文档.md)：工作台脚本标点、
   人工停顿、MiniMax 编译、幂等与费用保护的跨项目开发依据（当前仅完成方案，尚未实施）。
+- [语义视觉素材库与智能编排开发文档.md](语义视觉素材库与智能编排开发文档.md)：单次大模型
+  内容分析、字幕边界复用、图片/视频统一调度、相关素材与空镜的实施与验收依据；阶段 0～7
+  已完成，B-roll 源素材质量作为后续素材库迭代。
+- [语义视觉素材统一协议设计.md](语义视觉素材统一协议设计.md)：语义图片和视频的 catalog、
+  asset、recipe、路径及 renderer 底层协议。
 
 ## 本地前置条件
 
@@ -92,9 +97,10 @@ RunningHub 原始片段继续保留，标准化结果只标记为 `base_video`�
 账号、RunningHub 调用或变体任务；4B 失败重试不会重新调用本项目已成功的付费任务。
 
 后续智能内容分析模块 1～8 已完成本地 mock 自动化闭环。本项目的
-`POST /api/workbench/content-analysis` 每次只接收一条精确脚本，同时返回分别校验的
-`music_intent` 与无时间戳 `subtitle_units`；工作台负责逐行版本快照、MiniMax `raw_cues`
-映射、真实字体宽度排版和 46 首本地音乐唯一 Top1。跨项目测试会把本项目实际响应直接交给
+`POST /api/workbench/content-analysis` 每次只接收一条精确脚本，并可接收不含路径和时间的
+本地视觉候选；一次 Ark 请求返回分别校验的 `music_intent`、无时间戳 `subtitle_units` 和
+三字段 `visual_plan`。工作台仍负责本地选材、MiniMax `raw_cues` 映射、时间调度、剪映写入、
+真实字体宽度排版和 46 首本地音乐唯一 Top1。跨项目测试会把本项目实际响应直接交给
 工作台消费。内容分析失败不得触发 MiniMax、RunningHub 或剪映，也不得使已有基础视频失效。
 完整 mock 回归为本项目 `216 passed`、工作台 `260 passed`；真实服务与生产发布仍需另行授权。
 
@@ -339,10 +345,14 @@ RunningHub 已明确返回 `FAILED` 的视频任务默认自动重试 3 次，�
 服务器默认不再安装或启动 FunASR；长媒体使用 Windows 节点时，服务器媒体 Worker
 只负责保留队列心跳，实际 ASR 与 FFmpeg 由授权节点执行。
 
-## 工作台语义前景图片
+## 工作台语义视觉图片与视频
 
-云端提供独立的 `POST /api/workbench/visual-analysis`。工作台只提交精确脚本、字符候选和
+云端暂时保留兼容用的独立 `POST /api/workbench/visual-analysis`。工作台只提交精确脚本、字符候选和
 允许的概念；云端使用用户级 Ark 配置做语境消歧，并按用户、脚本、目录、候选集合、模型、
 Prompt 和契约版本独立缓存。接口不会接收本地素材路径或音视频时间，失败也不会改变声音、
 字幕、BGM、RunningHub 或已有视频。请求契约为 `jyd.visual-analysis.request.v1`，响应契约为
 `jyd.visual-analysis.v1`。
+
+新统一链路通过 `/api/workbench/content-analysis` 的可选 `visual_context` 在同一次 Ark 调用中
+产生 `visual_plan`；工作台项目主流程已经完成阶段 2 切换，原视觉按钮也复用统一协调器。
+独立视觉接口暂不删除，仅作为迁移期兼容入口。

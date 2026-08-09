@@ -5,6 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from enum import Enum
+import hashlib
+import json
 import logging
 from typing import Any, Literal
 
@@ -39,9 +41,9 @@ CONTENT_ANALYSIS_SCHEMA_VERSION = "jyd.content-analysis.v1"
 CONTENT_ANALYSIS_SCHEMA_ID = (
     "https://video.lanyingjk01.com/schemas/jyd.content-analysis.v1.json"
 )
-CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION = "jyd.content-analysis.provider.v2"
+CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION = "jyd.content-analysis.provider.v3"
 CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID = (
-    "https://video.lanyingjk01.com/schemas/jyd.content-analysis.provider.v2.json"
+    "https://video.lanyingjk01.com/schemas/jyd.content-analysis.provider.v3.json"
 )
 
 _LOCAL_PREFERRED_BREAK_CHARACTERS = frozenset("，。！？；：、,.!?;:\n\r")
@@ -183,12 +185,62 @@ class SubtitleBreakPlan(ContractModel):
         return self
 
 
-class ContentAnalysisProviderResult(ContractModel):
-    """Internal Ark response kept compact while the public v1 contract stays stable."""
+class VisualConcept(ContractModel):
+    concept_id: StrictStr = Field(min_length=1, max_length=100)
+    description: StrictStr = Field(min_length=1, max_length=300)
 
-    schema_version: Literal[CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION]
+
+class VisualAnchor(ContractModel):
+    anchor_id: StrictStr = Field(pattern=r"^(?:START|B[0-9]+)$", max_length=32)
+    char_start: StrictInt = Field(ge=0)
+    char_end: StrictInt = Field(gt=0)
+    text: StrictStr = Field(min_length=1)
+    allowed_concepts: list[StrictStr] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "VisualAnchor":
+        if self.char_end <= self.char_start:
+            raise ValueError("visual anchor end must be greater than start")
+        expected_id = "START" if self.char_start == 0 else f"B{self.char_start}"
+        if self.anchor_id != expected_id:
+            raise ValueError("visual anchor id must match its character start")
+        if len(self.allowed_concepts) != len(set(self.allowed_concepts)):
+            raise ValueError("visual anchor concepts must be unique")
+        return self
+
+
+class ContentVisualContext(ContractModel):
+    catalog_version: StrictStr = Field(min_length=1, max_length=128)
+    concepts: list[VisualConcept] = Field(max_length=200)
+    anchors: list[VisualAnchor] = Field(max_length=200)
+
+    @model_validator(mode="after")
+    def validate_references(self) -> "ContentVisualContext":
+        concept_ids = [item.concept_id for item in self.concepts]
+        if len(concept_ids) != len(set(concept_ids)):
+            raise ValueError("visual concept ids must be unique")
+        anchor_ids = [item.anchor_id for item in self.anchors]
+        if len(anchor_ids) != len(set(anchor_ids)):
+            raise ValueError("visual anchor ids must be unique")
+        available = set(concept_ids)
+        for anchor in self.anchors:
+            if not set(anchor.allowed_concepts).issubset(available):
+                raise ValueError("visual anchor references an unavailable concept")
+        return self
+
+
+class VisualPlanItem(ContractModel):
+    anchor_id: StrictStr = Field(pattern=r"^(?:START|B[0-9]+)$", max_length=32)
+    concept_id: StrictStr = Field(min_length=1, max_length=100)
+    priority: StrictInt = Field(ge=0, le=2)
+
+
+class ContentAnalysisProviderResult(ContractModel):
+    """Compact one-call Ark response; infrastructure metadata stays server-side."""
+
     music_intent: MusicIntent
     subtitle_breaks: SubtitleBreakPlan
+    visual_plan: list[VisualPlanItem] = Field(max_length=100)
 
 
 class ContentAnalysisContractError(ValueError):
@@ -475,7 +527,8 @@ def parse_content_analysis_provider_payload(
     payload: Mapping[str, Any],
     *,
     original_script: str,
-) -> tuple[MusicIntent, list[SubtitleUnit]]:
+    visual_context: ContentVisualContext | None = None,
+) -> tuple[MusicIntent, list[SubtitleUnit], list[VisualPlanItem]]:
     """Validate one complete compact provider response."""
 
     provider_result = ContentAnalysisProviderResult.model_validate(payload)
@@ -483,7 +536,87 @@ def parse_content_analysis_provider_payload(
         provider_result.subtitle_breaks.model_dump(mode="json"),
         original_script=original_script,
     )
-    return provider_result.music_intent, units
+    visual_plan = parse_visual_plan_payload(
+        provider_result.visual_plan,
+        visual_context=visual_context,
+    )
+    return provider_result.music_intent, units, visual_plan
+
+
+def parse_content_visual_context(
+    payload: Mapping[str, Any] | None,
+    *,
+    original_script: str,
+) -> ContentVisualContext:
+    """Validate visual candidates against the exact script before calling Ark."""
+
+    if payload is None:
+        return ContentVisualContext(
+            catalog_version="none",
+            concepts=[],
+            anchors=[],
+        )
+    context = ContentVisualContext.model_validate(payload)
+    for anchor in context.anchors:
+        if anchor.char_end > len(original_script):
+            raise ContentAnalysisContractError(
+                "visual_anchor_out_of_bounds",
+                "visual anchor exceeds the source script",
+            )
+        if original_script[anchor.char_start : anchor.char_end] != anchor.text:
+            raise ContentAnalysisContractError(
+                "visual_anchor_text_mismatch",
+                "visual anchor text does not match the source script",
+            )
+    return context
+
+
+def parse_visual_plan_payload(
+    payload: Any,
+    *,
+    visual_context: ContentVisualContext | None,
+) -> list[VisualPlanItem]:
+    """Validate selected-only visual decisions against offered anchors and concepts."""
+
+    if not isinstance(payload, list):
+        raise TypeError("visual plan must be a list")
+    plan = [VisualPlanItem.model_validate(item) for item in payload]
+    context = visual_context or ContentVisualContext(
+        catalog_version="none",
+        concepts=[],
+        anchors=[],
+    )
+    anchors = {item.anchor_id: item for item in context.anchors}
+    received_anchor_ids = [item.anchor_id for item in plan]
+    if len(received_anchor_ids) != len(set(received_anchor_ids)):
+        raise ContentAnalysisContractError(
+            "visual_plan_duplicate_anchor",
+            "visual plan must select an anchor at most once",
+        )
+    for item in plan:
+        anchor = anchors.get(item.anchor_id)
+        if anchor is None:
+            raise ContentAnalysisContractError(
+                "visual_plan_anchor_invalid",
+                "visual plan contains an anchor that was not offered",
+            )
+        if item.concept_id not in anchor.allowed_concepts:
+            raise ContentAnalysisContractError(
+                "visual_plan_concept_invalid",
+                "visual plan concept is not allowed for its anchor",
+            )
+    return plan
+
+
+def visual_context_sha256(context: ContentVisualContext) -> str:
+    canonical = context.model_dump(mode="json")
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def content_analysis_json_schema() -> dict[str, Any]:
@@ -534,13 +667,13 @@ def _inline_local_schema_refs(canonical: dict[str, Any]) -> dict[str, Any]:
 
 
 def content_analysis_provider_json_schema() -> dict[str, Any]:
-    """Return compact provider v2 schema with local refs inlined.
+    """Return compact provider v3 schema with local refs inlined.
 
-    Ark selects semantic break IDs and never echoes the split script. The server
-    expands the plan into the stable public ``jyd.content-analysis.v1`` shape.
+    Ark selects subtitle boundaries and visual anchors but never echoes the script,
+    timestamps, infrastructure metadata or local asset details.
     """
 
     schema = ContentAnalysisProviderResult.model_json_schema(mode="validation")
     schema["$id"] = CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID
-    schema["title"] = "JYD Content Analysis Provider v2"
+    schema["title"] = "JYD Content Analysis Provider v3"
     return _inline_local_schema_refs(schema)

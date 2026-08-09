@@ -247,22 +247,22 @@ def test_schema_is_versioned_strict_and_provider_neutral() -> None:
     assert "bgm_identity" not in serialized
 
 
-def test_provider_schema_returns_only_music_and_compact_break_positions() -> None:
+def test_provider_schema_returns_only_compact_three_branch_decisions() -> None:
     schema = content_analysis_provider_json_schema()
 
-    assert schema["$id"].endswith("jyd.content-analysis.provider.v2.json")
+    assert schema["$id"].endswith("jyd.content-analysis.provider.v3.json")
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["schema_version"]["const"] == (
-        CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION
-    )
     assert schema["required"] == [
-        "schema_version",
         "music_intent",
         "subtitle_breaks",
+        "visual_plan",
     ]
     serialized = json.dumps(schema, ensure_ascii=False)
+    assert "schema_version" not in schema["properties"]
     assert "subtitle_units" not in serialized
     assert '"text"' not in serialized
+    assert "timestamp" not in serialized
+    assert "asset" not in serialized
 
 
 def test_boundary_indexed_script_withholds_punctuation_and_ascii_word_breaks() -> None:

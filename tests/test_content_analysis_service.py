@@ -40,12 +40,12 @@ def _provider_payload(
     allow_after: list[int] | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
         "music_intent": _valid_payload()["music_intent"],
         "subtitle_breaks": {
             "prefer_after": prefer_after or [],
             "allow_after": allow_after or [],
         },
+        "visual_plan": [],
     }
 
 
@@ -116,7 +116,7 @@ def test_analysis_saves_valid_branches_and_reuses_cache() -> None:
     assert second["subtitle_units"] == first["subtitle_units"]
     assert len(fake.calls) == 1
     assert fake.calls[0]["temperature"] == 0.0
-    assert fake.calls[0]["max_tokens"] == 4096
+    assert fake.calls[0]["max_tokens"] == 1536
     assert fake.calls[0]["response_format"]["type"] == "json_schema"
     with SessionLocal() as db:
         record = db.query(ContentAnalysisCache).one()
@@ -168,17 +168,18 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     system_prompt = fake.calls[0]["messages"][0]["content"]
     assert '"$ref"' not in serialized_schema
     assert response_schema["required"] == [
-        "schema_version",
         "music_intent",
         "subtitle_breaks",
+        "visual_plan",
     ]
-    assert "## 1. 角色定义" in system_prompt
-    assert "## 6. 示例（few-shot）" in system_prompt
-    assert "只返回候选编号，不返回拆分后的文案" in system_prompt
+    assert "一次完成 music_intent、subtitle_breaks、visual_plan 三项任务" in system_prompt
+    assert "每项仅含 anchor_id、concept_id、priority" in system_prompt
+    assert "不返回时间戳" in system_prompt
 
 
 def test_long_script_gets_full_safe_output_budget_in_one_request() -> None:
-    assert _content_analysis_max_tokens("健" * 730) == 8192
+    assert _content_analysis_max_tokens("健" * 730) == 2920
+    assert _content_analysis_max_tokens("健" * 2000, visual_anchor_count=200) == 4096
 
 
 def test_music_only_provider_object_is_partial_without_a_second_request() -> None:
@@ -347,44 +348,79 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
     system_prompt = messages[0]["content"]
 
     assert len(messages) == 2
-    assert "字幕时间戳" in system_prompt
-    assert "长脚本也要完成两项分析" in system_prompt
-    assert "不得超过 13 个全角中文字符的等效宽度" in system_prompt
-    assert "13 是单行上限，不是建议长度" in system_prompt
-    assert "只选择满足宽度所需的最少断点" in system_prompt
-    assert "完整保留“世界冠军”" in system_prompt
-    assert [
-        heading in system_prompt
-        for heading in (
-            "## 1. 角色定义",
-            "## 2. 任务目标",
-            "## 3. 输入说明",
-            "## 4. 输出要求",
-            "## 5. 业务规则约束",
-            "## 6. 示例（few-shot）",
-        )
-    ] == [True] * 6
+    assert "一次完成 music_intent、subtitle_breaks、visual_plan 三项任务" in system_prompt
+    assert "长脚本也不能" in system_prompt
+    assert "不得超过 13 个全角中文字符等效宽度" in system_prompt
+    assert "13 是上限，不是固定长度" in system_prompt
+    assert "只选最少量自然边界" in system_prompt
+    assert "不返回时间戳" in system_prompt
     user_payload = json.loads(messages[1]["content"])
-    assert set(user_payload) == {"original_script", "boundary_indexed_script"}
+    assert set(user_payload) == {
+        "original_script",
+        "boundary_indexed_script",
+        "visual_context",
+    }
     assert user_payload["original_script"] == script
     assert user_payload["boundary_indexed_script"] == boundary_indexed_script(script)
 
-    example_json = system_prompt.split("正确输出示例：\n", maxsplit=1)[1]
+    assert user_payload["visual_context"] == {
+        "catalog_version": "none",
+        "concepts": [],
+        "anchors": [],
+    }
+    example_json = system_prompt.split("输出示例：\n", maxsplit=1)[1]
     example_payload = json.loads(example_json)
-    assert example_payload["schema_version"] == CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION
     assert example_payload["subtitle_breaks"] == {
         "prefer_after": [6],
-        "allow_after": [13],
+        "allow_after": [],
     }
-    _, example_units = parse_content_analysis_provider_payload(
+    _, example_units, visual_plan = parse_content_analysis_provider_payload(
         example_payload,
-        original_script="百分之八十四是由呼吸的形式来离开我们身体的",
+        original_script="百分之八十四是由呼吸离开身体的",
     )
     assert [unit.text for unit in example_units] == [
         "百分之八十四",
-        "是由呼吸的形式",
-        "来离开我们身体的",
+        "是由呼吸离开身体的",
     ]
+    assert visual_plan == []
+
+
+def test_one_call_visual_plan_uses_only_offered_local_candidates() -> None:
+    user_id = _configured_user("visual-plan")
+    visual_context = {
+        "catalog_version": "food-motion-v1",
+        "concepts": [
+            {"concept_id": "food.cucumber", "description": "黄瓜菜品"},
+            {"concept_id": "exercise.walk", "description": "步行动作"},
+        ],
+        "anchors": [
+            {
+                "anchor_id": "B2",
+                "char_start": 2,
+                "char_end": 4,
+                "text": "通过",
+                "allowed_concepts": ["exercise.walk"],
+            }
+        ],
+    }
+    payload = _provider_payload(prefer_after=[4])
+    payload["visual_plan"] = [
+        {"anchor_id": "B2", "concept_id": "exercise.walk", "priority": 1}
+    ]
+    fake = FakeArkClient([_ark_response(payload)])
+
+    result = _analyze(
+        user_id,
+        fake,
+        visual_context_payload=visual_context,
+    )
+
+    assert result["overall_status"] == "SUCCESS"
+    assert result["visual_analysis_status"] == "SUCCESS"
+    assert result["visual_catalog_version"] == "food-motion-v1"
+    assert result["visual_plan"] == payload["visual_plan"]
+    request_payload = json.loads(fake.calls[0]["messages"][1]["content"])
+    assert request_payload["visual_context"] == visual_context
 
 
 def test_compact_provider_breaks_expand_to_public_subtitle_units() -> None:

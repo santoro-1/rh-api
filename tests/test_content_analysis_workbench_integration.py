@@ -8,9 +8,6 @@ from typing import Any
 from app.database import SessionLocal
 from app.models import ArkConfig, User
 from app.services.content_analysis.analysis import analyze_content
-from app.services.content_analysis.contracts import (
-    CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
-)
 from app.services.security import encrypt_secret
 from tests.conftest import create_user
 
@@ -33,6 +30,14 @@ from jyd_probe.project_content_analysis import _validated_remote_result  # noqa:
 from jyd_probe.semantic_subtitles import (  # noqa: E402
     map_subtitle_units_to_raw_cues,
     semantic_break_groups,
+)
+from jyd_probe.semantic_visuals import (  # noqa: E402
+    load_semantic_visual_catalog,
+    recall_semantic_visual_candidates,
+)
+from jyd_probe.unified_visual_plan import (  # noqa: E402
+    build_content_visual_context,
+    validate_remote_visual_plan,
 )
 
 
@@ -61,17 +66,21 @@ def _fixture_payload() -> dict[str, Any]:
 
 def _provider_payload(*, prefer_after: list[int]) -> dict[str, Any]:
     return {
-        "schema_version": CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
         "music_intent": _fixture_payload()["music_intent"],
         "subtitle_breaks": {
             "prefer_after": prefer_after,
             "allow_after": [],
         },
+        "visual_plan": [],
     }
 
 
 def _analyze(
-    *, username: str, script: str, payload: dict[str, Any]
+    *,
+    username: str,
+    script: str,
+    payload: dict[str, Any],
+    visual_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     user = create_user(username, with_config=False)
     with SessionLocal() as db:
@@ -96,6 +105,7 @@ def _analyze(
             db,
             attached,
             original_script=script,
+            visual_context_payload=visual_context,
             client_factory=lambda _config: fake,
         )
     assert fake.calls == 1
@@ -131,6 +141,41 @@ def test_server_success_contract_drives_workbench_subtitles_and_top1() -> None:
     assert selection["bgm_identity"].startswith("music_id:")
     assert "candidates" not in selection
     assert "top3" not in selection
+
+
+def test_server_and_workbench_share_one_selected_only_visual_plan() -> None:
+    script = "每天吃一个鸡蛋"
+    catalog = load_semantic_visual_catalog(
+        WORKBENCH_ROOT / "data" / "libraries" / "semantic_visual_library"
+    )
+    candidate_request = recall_semantic_visual_candidates(script, catalog)
+    visual_context = build_content_visual_context(candidate_request)
+    anchor = visual_context["anchors"][0]
+    payload = _provider_payload(prefer_after=[])
+    payload["visual_plan"] = [
+        {
+            "anchor_id": anchor["anchor_id"],
+            "concept_id": anchor["allowed_concepts"][0],
+            "priority": 2,
+        }
+    ]
+
+    result = _analyze(
+        username="cross-project-visual-plan",
+        script=script,
+        payload=payload,
+        visual_context=visual_context,
+    )
+    consumed = _consume_in_workbench(result, script)
+    visual = validate_remote_visual_plan(
+        result,
+        candidate_request=candidate_request,
+    )
+
+    assert consumed["music_analysis_status"] == "SUCCESS"
+    assert consumed["subtitle_analysis_status"] == "SUCCESS"
+    assert visual["analysis_status"] == "SUCCESS"
+    assert visual["visual_plan"] == payload["visual_plan"]
 
 
 def test_server_partial_results_keep_each_valid_workbench_branch() -> None:
