@@ -280,7 +280,9 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0027_audio_primary_sha256`。SQLite 启用 WAL、外键和 busy timeout，设计目标
+当前迁移头为 `0028_unified_content_visual_plan`。其中 `0022_content_analysis_cache`
+建立最初的内容分析缓存，`0028` 在不丢失既有音乐与字幕结果的前提下扩展统一视觉计划字段和缓存键。
+SQLite 启用 WAL、外键和 busy timeout，设计目标
 是一个 Web 加三个本地 Worker 的单服务器部署，不是多主集群。
 
 修改模型时：
