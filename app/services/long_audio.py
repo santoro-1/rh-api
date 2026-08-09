@@ -237,7 +237,7 @@ def create_long_audio_project(
             {
                 "prompt_prefix": clean_prefix,
                 "instance_type": (
-                    instance_type if workflow_type == LTX_WORKFLOW else "default"
+                    instance_type if workflow_type == LTX_WORKFLOW else "plus"
                 ),
                 "digital_prompt": (
                     clean_digital_prompt
@@ -657,7 +657,7 @@ def materialize_long_audio_project(
                         "resolution": str(
                             parameters.get("resolution") or "1024"
                         ),
-                        "instance_type": "default",
+                        "instance_type": "plus",
                     }
                 )
             validated = validate_task_input(

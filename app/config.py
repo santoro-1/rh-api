@@ -138,7 +138,7 @@ class Settings:
         else:
             raise ValueError("生产环境必须设置 APP_ENCRYPTION_KEY")
 
-        instance_type = os.getenv("DEFAULT_RUNNINGHUB_INSTANCE_TYPE", "default").strip()
+        instance_type = os.getenv("DEFAULT_RUNNINGHUB_INSTANCE_TYPE", "plus").strip()
         if instance_type not in {"default", "plus"}:
             raise ValueError("DEFAULT_RUNNINGHUB_INSTANCE_TYPE 只能为 default 或 plus")
         media_processing_mode = os.getenv(

@@ -113,13 +113,13 @@ def test_task_creation_returns_immediately_without_calling_runninghub(client, mo
         assert payload["assets"]["audio"]["kind"] == "audio"
         assert payload["parameters"]["resolution"] == "1024"
         assert payload["parameters"]["person_mode"] == "1"
-        assert payload["parameters"]["instance_type"] == "default"
+        assert payload["parameters"]["instance_type"] == "plus"
         assert "overall_mode" not in payload["parameters"]
         assert "left_audio" not in payload["assets"]
         assert "right_audio" not in payload["assets"]
 
 
-def test_digital_human_task_rejects_plus_instance(client, monkeypatch):
+def test_digital_human_task_uses_plus_instance(client, monkeypatch):
     create_user("digital-plus-creator")
     login(client, "digital-plus-creator")
     monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda path: 15.5)
@@ -136,8 +136,11 @@ def test_digital_human_task_rejects_plus_instance(client, monkeypatch):
             "audio": ("voice.mp3", b"ID3audio-payload", "audio/mpeg"),
         },
     )
-    assert response.status_code == 400
-    assert "固定使用 Stand 运行（24G）" in response.json()["detail"]
+    assert response.status_code == 201, response.text
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, response.json()["taskId"])
+        payload = json.loads(task.input_payload)
+        assert payload["parameters"]["instance_type"] == "plus"
 
 
 def test_tasks_beyond_concurrency_limit_are_saved_for_queue(client, monkeypatch):

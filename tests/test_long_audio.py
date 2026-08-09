@@ -337,7 +337,7 @@ def test_digital_human_long_audio_auto_splits_without_asr(client, monkeypatch):
         assert all(task.end_seconds == 30 for task in tasks)
         payloads = [json.loads(task.input_payload) for task in tasks]
         assert all("image" in payload["assets"] for payload in payloads)
-        assert all(payload["parameters"]["instance_type"] == "default" for payload in payloads)
+        assert all(payload["parameters"]["instance_type"] == "plus" for payload in payloads)
 
 
 def test_long_audio_ltx_defaults_to_plus_instance(client, monkeypatch):

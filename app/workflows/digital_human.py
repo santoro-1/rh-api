@@ -14,6 +14,7 @@ from app.workflows.base import WorkflowAsset, WorkflowOutput
 
 DIGITAL_HUMAN_MAX_SECONDS = 45.0
 DIGITAL_HUMAN_TAIL_PADDING_SECONDS = 0.5
+DIGITAL_HUMAN_INSTANCE_TYPE = "plus"
 EXACT_TIMESTAMP_TIMING_MODE = "exact_timestamps"
 
 
@@ -101,10 +102,10 @@ class DigitalHumanWorkflow:
         except ValueError as exc:
             raise ValueError("最长分辨率必须是正整数") from exc
         requested_instance_type = str(
-            parameters.get("instance_type") or "default"
+            parameters.get("instance_type") or DIGITAL_HUMAN_INSTANCE_TYPE
         ).strip()
-        if requested_instance_type != "default":
-            raise ValueError("数字人工作流当前固定使用 Stand 运行（24G）")
+        if requested_instance_type not in {"default", "plus"}:
+            raise ValueError("实例类型不合法")
         return {
             "prompt": prompt,
             "start_seconds": start_seconds,
@@ -113,7 +114,8 @@ class DigitalHumanWorkflow:
             "end_time": format_timecode(end_seconds),
             "person_mode": person_mode,
             "resolution": resolution,
-            "instance_type": "default",
+            # Accept legacy 24G recipes above, but persist the current policy.
+            "instance_type": DIGITAL_HUMAN_INSTANCE_TYPE,
             "timing_mode": (
                 EXACT_TIMESTAMP_TIMING_MODE
                 if parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
@@ -212,9 +214,11 @@ class DigitalHumanWorkflow:
         values = self._input(task).get("parameters")
         if not isinstance(values, dict):
             raise ValueError("数字人任务参数不合法")
-        selected_instance_type = str(values.get("instance_type") or "default").strip()
-        if selected_instance_type != "default":
-            raise ValueError("数字人工作流当前固定使用 Stand 运行（24G）")
+        selected_instance_type = str(
+            values.get("instance_type") or DIGITAL_HUMAN_INSTANCE_TYPE
+        ).strip()
+        if selected_instance_type not in {"default", "plus"}:
+            raise ValueError("实例类型不合法")
         values = {
             **values,
             "image": uploaded_files["image"],
@@ -253,7 +257,8 @@ class DigitalHumanWorkflow:
             )
         return {
             "nodeInfoList": nodes,
-            "instanceType": "default",
+            # Upgrade queued legacy recipes to Plus when they reach RunningHub.
+            "instanceType": DIGITAL_HUMAN_INSTANCE_TYPE,
             "usePersonalQueue": False,
         }
 

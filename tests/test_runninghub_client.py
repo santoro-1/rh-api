@@ -55,7 +55,7 @@ def test_upload_and_submit_are_server_side_and_use_filename():
     filename = client.upload_file(media)
     payload = build_payload(filename, "openapi/audio.mp3", "0:00", "0:10", "提示", "plus")
     assert client.submit_task(payload) == "remote-123"
-    assert payload["instanceType"] == "default"
+    assert payload["instanceType"] == "plus"
     assert payload["usePersonalQueue"] is False
     assert "retainSeconds" not in payload
     assert any(node["fieldValue"] == "openapi/image.png" for node in payload["nodeInfoList"])

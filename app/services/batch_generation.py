@@ -367,7 +367,7 @@ def validate_workbench_audio_batch(
                         "end_time": "0:01",
                         "resolution": str(resolution or "1024"),
                         "person_mode": "1",
-                        "instance_type": "default",
+                        "instance_type": "plus",
                     },
                     asset_metadata={},
                 )
@@ -519,7 +519,7 @@ def validate_batch(
                 or first_row.get("resolution")
                 or "1024"
             )
-            batch_instance_type = "default"
+            batch_instance_type = "plus"
             if audio_mode == "minimax" and batch_person_mode != "1":
                 raise ValueError("脚本生成语音只支持数字人单人模式")
         else:
@@ -650,7 +650,7 @@ def validate_batch(
                     "end_time": format_duration_timecode(duration),
                     "resolution": batch_resolution,
                     "person_mode": batch_person_mode,
-                    "instance_type": "default",
+                    "instance_type": "plus",
                 }
                 metadata = {
                     "audio_duration_seconds": duration,

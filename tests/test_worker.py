@@ -491,7 +491,7 @@ def test_worker_submits_through_workflow_adapter(monkeypatch):
         assert task.runninghub_task_id == "submitted-remote-id"
         assert task.status == TaskStatus.SUBMITTED.value
     assert fake.submissions == 1
-    assert fake.last_payload["instanceType"] == "default"
+    assert fake.last_payload["instanceType"] == "plus"
 
 
 def test_worker_keeps_task_pending_when_remote_account_is_full(monkeypatch):

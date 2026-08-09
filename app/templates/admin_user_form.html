@@ -17,11 +17,11 @@
     <label>Base URL<input name="base_url" value="{{ config.base_url }}" required></label>
     <label>AI App ID<input name="ai_app_id" value="{{ config.ai_app_id }}" required></label>
   </div>
-  <input name="instance_type" type="hidden" value="default">
+  <input name="instance_type" type="hidden" value="plus">
   <div class="two-columns">
     <label>最大同时任务数<input name="max_concurrent_tasks" type="number" min="1" max="20" value="{{ config.max_concurrent_tasks }}" required></label>
   </div>
-  <p class="field-help">运行实例已移到用户创建任务页面，由每个任务单独选择。</p>
+  <p class="field-help">数字人固定使用 Plus 运行（48G）；视频对口型仍在其独立配置中选择。</p>
   <label>默认提示词<textarea name="default_prompt" rows="4">{{ config.default_prompt }}</textarea></label>
   </div>
   </details>

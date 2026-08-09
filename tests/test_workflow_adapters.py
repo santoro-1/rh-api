@@ -46,7 +46,7 @@ def test_digital_human_adapter_is_registered_and_owns_payload_mapping():
         settings={},
     )
 
-    assert payload["instanceType"] == "default"
+    assert payload["instanceType"] == "plus"
     assert payload["usePersonalQueue"] is False
     assert "retainSeconds" not in payload
     assert any(
@@ -66,6 +66,44 @@ def test_digital_human_adapter_is_registered_and_owns_payload_mapping():
     assert "738" not in expected_nodes
     assert all(node["fieldValue"] != "None" for node in payload["nodeInfoList"])
     assert "752" not in expected_nodes
+
+
+def test_digital_human_adapter_upgrades_legacy_default_recipe_to_plus():
+    workflow = get_workflow("digital_human")
+    parameters = workflow.validate_parameters(
+        {"prompt": "历史任务", "start_time": "0:00", "end_time": "0:10"},
+        {"audio_duration_seconds": 10.0},
+    )
+    payload_input = workflow.serialize_input(
+        [
+            WorkflowAsset("image", "image", "uploads/image.png", "image.png"),
+            WorkflowAsset("audio", "audio", "uploads/audio.mp3", "audio.mp3"),
+        ],
+        parameters,
+        {"audio_duration_seconds": 10.0},
+    )
+    payload_input["parameters"]["instance_type"] = "default"
+    task = SimpleNamespace(
+        input_payload=json.dumps(payload_input, ensure_ascii=False),
+        image_path="legacy/image.png",
+        audio_path="legacy/audio.mp3",
+        image_original_name="image.png",
+        audio_original_name="audio.mp3",
+        audio_duration_seconds=10.0,
+        start_seconds=0,
+        end_seconds=10,
+        prompt="历史任务",
+    )
+
+    payload = workflow.build_payload(
+        task,
+        {"image": "remote-image", "audio": "remote-audio"},
+        ai_app_id="app-id",
+        instance_type="default",
+        settings={},
+    )
+
+    assert payload["instanceType"] == "plus"
 
 
 def test_digital_human_adapter_maps_dual_person_audio_and_selected_modes():
