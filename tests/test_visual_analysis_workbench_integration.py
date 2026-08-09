@@ -132,5 +132,10 @@ def test_literal_egg_survives_but_idiom_negation_and_meta_mentions_do_not() -> N
         "SKIP",
     ]
     assert len(recipe["overlays"]) == 1
-    assert recipe["overlays"][0]["concept_id"] == "food.egg"
-    assert Path(recipe["overlays"][0]["bundle_path"]).is_dir()
+    overlay = recipe["overlays"][0]
+    assert overlay["concept_id"] == "food.egg"
+    assert overlay["renderer"] == "jyd_sticker_bundle"
+    bundle_path = (CATALOG_ROOT / overlay["resource_path"]).resolve()
+    assert bundle_path.is_relative_to(CATALOG_ROOT.resolve())
+    assert bundle_path.is_dir()
+    assert (bundle_path / "sticker.json").is_file()
