@@ -358,6 +358,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
             "name": "WB-20260804 声音批次",
             "request_key": "wb-audio-project-1",
             "correlation_id": "workbench-correlation-001",
+            "resolution": "1024",
             "rows": [
                 {
                     "row_id": "1",
@@ -455,10 +456,14 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
             "image_asset_id": staged_id,
             "image_sha256": first_image_sha256,
             "correlation_id": "workbench-correlation-001",
+            "resolution": "2048",
         },
     )
     assert started.status_code == 200, started.text
     assert started.json()["composition"]["status"] == "COMPOSITION_QUEUED"
+    with SessionLocal() as db:
+        stored_task = db.query(AudioGenerationTask).filter_by(batch_item_id=item_id).one()
+        assert json.loads(stored_task.video_parameters_json)["resolution"] == "2048"
     repeated = client.post(
         f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition",
         json={

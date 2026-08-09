@@ -1006,6 +1006,27 @@ def start_workbench_composition(
             raise AudioReviewError("画面生成参数不合法") from exc
         if not isinstance(video_parameters, dict):
             raise AudioReviewError("画面生成参数不合法")
+        requested_resolution = str(
+            payload.get("resolution")
+            or video_parameters.get("resolution")
+            or "1024"
+        ).strip()
+        try:
+            if int(requested_resolution) <= 0:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise AudioReviewError("数字人最长边分辨率必须是正整数") from exc
+        current_resolution = str(
+            video_parameters.get("resolution") or "1024"
+        ).strip()
+        handoff_started = bool(
+            task.reviewed_at is not None
+            or item.segments
+            or item.generation_task
+        )
+        if handoff_started and requested_resolution != current_resolution:
+            raise AudioReviewError("当前画面生成任务的分辨率已经锁定，不能修改")
+        video_parameters["resolution"] = requested_resolution
         # The new workbench hands MiniMax timestamped audio to 4A.  Preserve
         # the existing whole-second ceiling (24.4 -> 25), but do not apply the
         # legacy 0.5-second silent tail used by upload-audio batch workflows.
