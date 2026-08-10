@@ -307,6 +307,99 @@ def test_workbench_composition_reports_video_enhancing_stage(client):
     assert response.json()["composition"]["enhancement_status"] == "RUNNING"
 
 
+def test_workbench_backfills_seedvr2_from_saved_digital_human_results(client):
+    _batch_id, item_id = _text_item(segment_count=2)
+    settings = get_settings()
+    original_remote_ids: dict[str, str] = {}
+    with SessionLocal() as db:
+        tasks = db.scalars(
+            select(GenerationTask).order_by(GenerationTask.id)
+        ).all()
+        for index, task in enumerate(tasks, start=1):
+            source = settings.data_dir / str(task.result_path)
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(f"digital-source-{index}".encode())
+            task.runninghub_task_id = f"digital-human-paid-{index}"
+            task.output_metadata = json.dumps({"provider": "4A", "index": index})
+            original_remote_ids[task.id] = task.runninghub_task_id
+        db.commit()
+
+    login_response = client.post(
+        "/api/auth/center/login",
+        json={"username": "postproduction-text-2", "password": "password123"},
+    )
+    token = login_response.json()["access_token"]
+    response = client.post(
+        f"/api/workbench/tasks/{item_id}/enhancement/backfill",
+        json={"access_token": token, "cost_confirmed": True},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["composition"]["status"] == "VIDEO_ENHANCING"
+    assert payload["seedvr2_backfill"] == {
+        "queued_count": 2,
+        "retried_count": 0,
+        "already_attached_count": 0,
+        "digital_human_rerun_count": 0,
+        "instance_type": "plus",
+        "gpu_memory": "48G",
+    }
+
+    with SessionLocal() as db:
+        tasks = db.scalars(
+            select(GenerationTask).order_by(GenerationTask.id)
+        ).all()
+        assert len(tasks) == 2
+        for index, task in enumerate(tasks, start=1):
+            assert task.runninghub_task_id == original_remote_ids[task.id]
+            assert task.status == TaskStatus.RUNNING.value
+            assert task.result_path is None
+            assert task.enhancement is not None
+            assert task.enhancement.status == EnhancementStatus.PENDING.value
+            source = settings.data_dir / task.enhancement.source_result_path
+            assert source.read_bytes() == f"digital-source-{index}".encode()
+            assert task.enhancement.source_output_metadata_json
+
+    repeated = client.post(
+        f"/api/workbench/tasks/{item_id}/enhancement/backfill",
+        json={"access_token": token, "cost_confirmed": True},
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["seedvr2_backfill"]["queued_count"] == 0
+    assert repeated.json()["seedvr2_backfill"]["already_attached_count"] == 2
+
+
+def test_workbench_seedvr2_backfill_is_atomic_when_a_source_is_missing(client):
+    _batch_id, item_id = _text_item(segment_count=2)
+    settings = get_settings()
+    with SessionLocal() as db:
+        tasks = db.scalars(
+            select(GenerationTask).order_by(GenerationTask.id)
+        ).all()
+        available = settings.data_dir / str(tasks[0].result_path)
+        available.parent.mkdir(parents=True, exist_ok=True)
+        available.write_bytes(b"available-digital-source")
+        db.commit()
+
+    login_response = client.post(
+        "/api/auth/center/login",
+        json={"username": "postproduction-text-2", "password": "password123"},
+    )
+    response = client.post(
+        f"/api/workbench/tasks/{item_id}/enhancement/backfill",
+        json={
+            "access_token": login_response.json()["access_token"],
+            "cost_confirmed": True,
+        },
+    )
+    assert response.status_code == 409
+    assert "源片段已丢失" in response.json()["detail"]
+    with SessionLocal() as db:
+        tasks = db.scalars(select(GenerationTask)).all()
+        assert all(task.status == TaskStatus.SUCCESS.value for task in tasks)
+        assert all(task.enhancement is None for task in tasks)
+
+
 def test_legacy_batch_page_and_polling_show_current_seedvr2_phase(client):
     batch_id, _item_id = _text_item(segment_count=1)
     settings = get_settings()

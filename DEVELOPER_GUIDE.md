@@ -149,6 +149,10 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
   单分段仍只生成标准化基础视频。基础视频不是字幕/BGM 成片；4A 不调用剪映、不生成变体。
 - 重试接口只重置失败的 RunningHub/下载任务或失败的拼接，不重做已经成功的付费子任务。
   清晰化失败只重做 SeedVR2，绝不重新执行已成功的数字人阶段。
+- 迁移前已成功且尚无增强记录的数字人分段，不会后台自动计费补跑。工作台在用户明确确认
+  清晰化费用后可调用 `POST /api/workbench/tasks/{item_id}/enhancement/backfill`；服务端把
+  原 `result_path` 原子迁入 `GenerationTaskEnhancement.source_result_path`，保留数字人远端
+  ID，只把父任务恢复为 `RUNNING` 等待 SeedVR2 48G。整行先校验后变更，重复调用不重复提交。
 - 单片段标准化、逐段按音频时长补帧/裁切只适用于 `new_workbench`。`legacy_web`
   单片段继续绕过拼接，旧多片段继续使用不带目标时长的原快速拼接；不得把工作台算法
   再次扩散为全局默认。

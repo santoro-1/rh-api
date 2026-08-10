@@ -424,6 +424,12 @@ GET /api/workbench/tasks/{item_id}/videos/{video_index}/source
 
 - “新老都更新”按第 1 节的现行入口范围执行。
 - 历史已完成任务不自动补跑。
+- 历史已完成任务可由工作台在用户再次确认 SeedVR2 费用后显式补跑：直接复用各
+  `GenerationTask.result_path` 中已保存的数字人 MP4，补建一对一
+  `GenerationTaskEnhancement`，不得清除或重新提交原数字人 `runninghub_task_id`。
+- 显式补跑使用 `POST /api/workbench/tasks/{item_id}/enhancement/backfill`。接口先验证整行
+  所有分段源文件，再统一入队；任一源文件缺失则整行不变并返回 409，避免多段任务半补跑。
+  重复请求保持幂等；已有增强失败时只按既有规则重试 SeedVR2。
 - 原始片段保留，默认输出切换为清晰片段。
 - SeedVR2 固定 48G、1920 参数，每段一对一处理。
 - 不对 LTX 增加放大。

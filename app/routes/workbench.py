@@ -91,6 +91,11 @@ from app.services.task_management import (
     TaskManagementError,
     prepare_task_retry,
 )
+from app.services.video_enhancement import (
+    VideoEnhancementBackfillError,
+    historical_source_path,
+    queue_historical_seedvr2_enhancement,
+)
 from app.services.workflow_configs import get_user_workflow_config
 from app.services.video_merge import (
     MERGE_FAILED,
@@ -1254,6 +1259,96 @@ def retry_workbench_composition(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
     return _workbench_manifest(_item_for_user(item_id, user, db))
+
+
+@router.post("/api/workbench/tasks/{item_id}/enhancement/backfill")
+def backfill_workbench_video_enhancement(
+    item_id: str,
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Send saved digital-human source segments to SeedVR2 without rerunning 4A."""
+
+    user = _token_user(str(payload.get("access_token", "")), db)
+    if payload.get("cost_confirmed") is not True:
+        raise HTTPException(
+            status_code=409,
+            detail="请确认补跑 SeedVR2 48G 视频清晰化会产生 RunningHub 费用",
+        )
+    item = _item_for_user(item_id, user, db)
+    tasks = [
+        segment.generation_task
+        for segment in sorted(item.segments, key=lambda value: value.segment_index)
+        if segment.generation_task is not None
+    ]
+    if not tasks and item.generation_task is not None:
+        tasks = [item.generation_task]
+    if not tasks:
+        raise HTTPException(status_code=409, detail="当前任务没有数字人源片段")
+
+    settings = get_settings()
+    try:
+        # Validate the complete row before changing any stage so six-segment
+        # rows cannot be left half queued when one historical file is missing.
+        for task in tasks:
+            enhancement = task.enhancement
+            if enhancement is None:
+                historical_source_path(task, settings)
+            elif enhancement.status != EnhancementStatus.SUCCESS.value:
+                historical_source_path(task, settings)
+                if enhancement.status == EnhancementStatus.CANCELLED.value:
+                    raise VideoEnhancementBackfillError(
+                        "SeedVR2 清晰化已取消，不能自动补跑"
+                    )
+
+        queued_count = 0
+        retried_count = 0
+        for task in tasks:
+            enhancement = task.enhancement
+            if enhancement is None:
+                queue_historical_seedvr2_enhancement(task, settings)
+                queued_count += 1
+            elif task.status in {
+                TaskStatus.FAILED.value,
+                TaskStatus.DOWNLOAD_FAILED.value,
+            }:
+                prepare_task_retry(task, settings)
+                retried_count += 1
+        if queued_count or retried_count:
+            invalidate_merged_video(item, settings)
+    except (
+        VideoEnhancementBackfillError,
+        TaskManagementError,
+        OSError,
+        ValueError,
+    ) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    db.commit()
+    refreshed = _item_for_user(item_id, user, db)
+    manifest = _workbench_manifest(refreshed)
+    manifest["seedvr2_backfill"] = {
+        "queued_count": queued_count,
+        "retried_count": retried_count,
+        "already_attached_count": len(tasks) - queued_count - retried_count,
+        "digital_human_rerun_count": 0,
+        "instance_type": "plus",
+        "gpu_memory": "48G",
+    }
+    log_event(
+        logger,
+        "workbench.seedvr2_backfill_queued",
+        "历史数字人源片段已进入 SeedVR2 48G 清晰化",
+        user_id=user.id,
+        username=user.username,
+        batch_id=item.batch_id,
+        batch_item_id=item.id,
+        queued_count=queued_count,
+        retried_count=retried_count,
+        digital_human_rerun_count=0,
+    )
+    return manifest
 
 
 @router.get("/api/workbench/tasks/{item_id}/base-video")

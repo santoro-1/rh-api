@@ -1,6 +1,104 @@
 from __future__ import annotations
 
-from app.models import EnhancementStatus, GenerationTask, TaskStatus
+from datetime import datetime, timezone
+import hashlib
+from pathlib import Path
+import uuid
+
+from app.config import Settings
+from app.models import (
+    EnhancementStatus,
+    GenerationTask,
+    GenerationTaskEnhancement,
+    TaskStatus,
+)
+from app.services.storage import safe_relative_path
+
+
+class VideoEnhancementBackfillError(ValueError):
+    """A historical digital-human result cannot enter SeedVR2 safely."""
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def historical_source_path(
+    task: GenerationTask,
+    settings: Settings,
+) -> Path:
+    """Validate and return a pre-SeedVR2 digital-human result."""
+
+    if task.workflow_type != "digital_human":
+        raise VideoEnhancementBackfillError("当前任务不是数字人视频任务")
+    if task.enhancement is not None:
+        try:
+            source = safe_relative_path(
+                task.enhancement.source_result_path, settings.data_dir
+            )
+        except ValueError as exc:
+            raise VideoEnhancementBackfillError(
+                "数字人源片段路径不合法，不能执行 SeedVR2 清晰化"
+            ) from exc
+        if not source.is_file():
+            raise VideoEnhancementBackfillError(
+                "数字人源片段已丢失，不能只补跑 SeedVR2 清晰化"
+            )
+        return source
+    if task.status != TaskStatus.SUCCESS.value or not task.result_path:
+        raise VideoEnhancementBackfillError(
+            "数字人源片段不存在或未成功，不能只补跑 SeedVR2 清晰化"
+        )
+    try:
+        source = safe_relative_path(task.result_path, settings.data_dir)
+    except ValueError as exc:
+        raise VideoEnhancementBackfillError(
+            "历史数字人结果路径不合法，不能执行 SeedVR2 清晰化"
+        ) from exc
+    if not source.is_file():
+        raise VideoEnhancementBackfillError(
+            "历史数字人源片段已丢失，不能只补跑 SeedVR2 清晰化"
+        )
+    return source
+
+
+def queue_historical_seedvr2_enhancement(
+    task: GenerationTask,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+) -> GenerationTaskEnhancement:
+    """Attach SeedVR2 to a successful historical result without rerunning 4A."""
+
+    if task.enhancement is not None:
+        raise VideoEnhancementBackfillError("当前数字人片段已经存在 SeedVR2 阶段")
+    source = historical_source_path(task, settings)
+    enhancement = GenerationTaskEnhancement(
+        id=str(uuid.uuid4()),
+        generation_task_id=task.id,
+        status=EnhancementStatus.PENDING.value,
+        source_result_path=str(task.result_path),
+        source_filename=source.name,
+        source_size=source.stat().st_size,
+        source_sha256=_file_sha256(source),
+        source_output_metadata_json=task.output_metadata,
+        execution_account_id=task.execution_account_id,
+    )
+    task.enhancement = enhancement
+    task.status = TaskStatus.RUNNING.value
+    task.result_path = None
+    task.output_metadata = None
+    task.error_code = None
+    task.error_message = None
+    task.runninghub_failed_reason = None
+    task.runninghub_auto_retry_after = None
+    task.completed_at = None
+    task.updated_at = now or datetime.now(timezone.utc)
+    return enhancement
 
 
 def task_processing_stage(task: GenerationTask) -> str | None:
