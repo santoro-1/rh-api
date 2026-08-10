@@ -20,6 +20,8 @@
 
 - 修改任务生成、45 秒切分、状态机、取消、重试、数据库或 Worker：读 `MAINTENANCE.md`、`PROJECT_STATUS.md` 和 `CHANGELOG.md` 的最新日期。
 - 修改或增加 RunningHub 工作流：读 `WORKFLOW_EXTENSION.md`。
+- 修改 SeedVR2 视频放大、数字人清晰化阶段、清晰片段输出或其重试/取消/费用保护：同时读
+  `SeedVR2视频清晰化流程开发文档.md` 和工作区根目录 `SeedVr2放大api文档.md`。
 - 修改生产部署、服务器配置、备份或恢复：读 `deploy/README.md`。
 - 修改固定电脑媒体处理、FunASR 或便携媒体节点：读 `media_node/README.md`。
 - 修改数字人与工作台之间的接口：同时读工作台的 `docs/WEB_API.md` 和 `docs/RENDER_JOB_SCHEMA.md`。

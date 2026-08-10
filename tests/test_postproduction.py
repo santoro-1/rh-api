@@ -9,10 +9,12 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     AudioGenerationTask,
+    EnhancementStatus,
     GenerationBatch,
     GenerationBatchItem,
     GenerationSegment,
     GenerationTask,
+    GenerationTaskEnhancement,
     MiniMaxConfig,
     MiniMaxVoiceAsset,
     TaskStatus,
@@ -24,6 +26,7 @@ from app.services.postproduction import (
     postproduction_manifest,
     postproduction_mode,
 )
+from app.services.batch_status import batch_detail_status, batch_query
 from app.services.security import encrypt_secret
 from app.services.speech.accounts import credential_fingerprint
 from tests.conftest import create_user, login
@@ -227,6 +230,118 @@ def test_workbench_uses_existing_account_and_lists_only_its_tasks(client):
     )
     assert download.status_code == 200
     assert download.content == b"video-result"
+
+
+def test_workbench_manifest_exposes_seedvr2_quality_and_protected_source(client):
+    _batch_id, item_id = _text_item(segment_count=1)
+    settings = get_settings()
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "video-task-1-1")
+        source = settings.outputs_dir / str(task.user_id) / task.id / "source" / "digital.mp4"
+        result = settings.outputs_dir / str(task.user_id) / "result-1.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        result.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"digital-source")
+        result.write_bytes(b"seedvr2-result")
+        task.enhancement = GenerationTaskEnhancement(
+            id="postproduction-seedvr2-enhancement",
+            generation_task_id=task.id,
+            status=EnhancementStatus.SUCCESS.value,
+            source_result_path=source.relative_to(settings.data_dir).as_posix(),
+            result_path=result.relative_to(settings.data_dir).as_posix(),
+        )
+        db.commit()
+
+    login_response = client.post(
+        "/api/auth/center/login",
+        json={"username": "postproduction-text-1", "password": "password123"},
+    )
+    token = login_response.json()["access_token"]
+    response = client.post(
+        f"/api/workbench/tasks/{item_id}",
+        json={"access_token": token},
+    )
+    assert response.status_code == 200
+    video = response.json()["source"]["videos"][0]
+    assert video["quality_variant"] == "seedvr2_upscaled"
+    assert video["enhancement_status"] == "SUCCESS"
+    assert video["source_download_url"].endswith("/videos/1/source")
+    source_download = client.get(
+        video["source_download_url"],
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert source_download.status_code == 200
+    assert source_download.content == b"digital-source"
+
+
+def test_workbench_composition_reports_video_enhancing_stage(client):
+    _batch_id, item_id = _text_item(segment_count=1)
+    settings = get_settings()
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "video-task-1-1")
+        source = settings.outputs_dir / str(task.user_id) / task.id / "source" / "digital.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"digital-source")
+        task.status = TaskStatus.RUNNING.value
+        task.result_path = None
+        task.completed_at = None
+        task.enhancement = GenerationTaskEnhancement(
+            id="postproduction-active-seedvr2",
+            generation_task_id=task.id,
+            status=EnhancementStatus.RUNNING.value,
+            source_result_path=source.relative_to(settings.data_dir).as_posix(),
+            remote_task_id="seedvr2-active-id",
+        )
+        db.commit()
+
+    login_response = client.post(
+        "/api/auth/center/login",
+        json={"username": "postproduction-text-1", "password": "password123"},
+    )
+    response = client.post(
+        f"/api/workbench/tasks/{item_id}",
+        json={"access_token": login_response.json()["access_token"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["composition"]["status"] == "VIDEO_ENHANCING"
+    assert response.json()["composition"]["enhancement_status"] == "RUNNING"
+
+
+def test_legacy_batch_page_and_polling_show_current_seedvr2_phase(client):
+    batch_id, _item_id = _text_item(segment_count=1)
+    settings = get_settings()
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "video-task-1-1")
+        source = settings.outputs_dir / str(task.user_id) / task.id / "source" / "digital.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"digital-source")
+        task.status = TaskStatus.RUNNING.value
+        task.result_path = None
+        task.completed_at = None
+        task.runninghub_task_id = "digital-human-finished-id"
+        task.enhancement = GenerationTaskEnhancement(
+            id="legacy-batch-active-seedvr2",
+            generation_task_id=task.id,
+            status=EnhancementStatus.RUNNING.value,
+            source_result_path=source.relative_to(settings.data_dir).as_posix(),
+            remote_task_id="seedvr2-current-id",
+            auto_retry_count=1,
+        )
+        db.commit()
+
+        batch = db.scalar(batch_query().where(GenerationBatch.id == batch_id))
+        payload = batch_detail_status(batch)
+        assert payload[0]["status"] == "VIDEO_ENHANCING"
+        assert payload[0]["segments"][0]["status"] == "VIDEO_ENHANCING"
+        assert payload[0]["segments"][0]["runninghubTaskId"] == "seedvr2-current-id"
+        assert payload[0]["segments"][0]["autoRetryCount"] == 1
+
+    login(client, "postproduction-text-1")
+    response = client.get(f"/batches/{batch_id}")
+    assert response.status_code == 200
+    assert "视频清晰化中（SeedVR2 48G）" in response.text
+    assert "seedvr2-current-id" in response.text
+    assert "自动重试 1/" in response.text
 
 
 def test_workbench_token_is_invalid_after_password_change(client):

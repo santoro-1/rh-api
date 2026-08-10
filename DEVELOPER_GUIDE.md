@@ -62,7 +62,10 @@
 2. 视频 Worker 按用户 `max_concurrent_tasks` 和创建时间 FIFO 领取任务。
 3. Worker 上传素材，保存 RunningHub 返回的远程文件名，再提交工作流。
 4. 保存 `runninghub_task_id` 后只查询该任务，不因进程重启而重复提交。
-5. 成功后选择工作流输出并下载到 `data/outputs`；失败时保存结构化原因和尝试历史。
+5. LTX 成功后直接选择输出并下载到 `data/outputs`。数字人成功后先保存不可覆盖的源片段，
+   创建一对一 `GenerationTaskEnhancement`，再上传到固定 48G 的 SeedVR2 AI App。
+6. SeedVR2 远端 ID 一经保存只查询该 ID；清晰视频下载完成后才把父任务置为 `SUCCESS`。
+   失败时数字人与清晰化分别保存结构化原因和尝试历史。
 
 数字人和视频对口型共享同一个用户并发额度。槽位计入 `UPLOADING`、`SUBMITTED`、
 `RUNNING`；槽位满时新任务仍留在本地 `PENDING` 队列，不向用户返回并发错误。
@@ -72,6 +75,9 @@
 RunningHub 取消。取消成功后写入 `REMOTE_WATCHDOG_TIMEOUT` 终态；取消失败则保持活动
 状态继续查询并重试取消，绝不释放槽位或重新提交。配置项为
 `RUNNINGHUB_REMOTE_WATCHDOG_SECONDS`，旧的 `RUNNINGHUB_TASK_TIMEOUT_SECONDS` 不再读取。
+数字人子任务在两阶段间持续占用同一逻辑槽位，因此并发 5 的 6 段任务会先让前 5 段各自
+完成“数字人 -> SeedVR2”，释放任一槽位后再领取第 6 段。两个阶段分别使用自己的提交时间
+执行看门狗。
 
 ### 3.2 批量上传和长音频自动分流
 
@@ -133,14 +139,16 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 - `POST /api/workbench/audio-batches/{batch_id}/items/{item_id}/composition` 在显式费用确认
   后接收工作台当时的当前图片，把图片绑定到已生成音频，再通过既有声音审核门，并复用
   原有媒体、RunningHub 视频和拼接 Worker。声音阶段不会提前上传或绑定图片。
-- 工作台通过任务清单中的 `composition` 字段读取排队、数字人生成、拼接、完成或失败
-  状态；浏览器仍不直接访问本服务。
-- 每个 RunningHub 成功结果均可作为不可变原始分段下载。无论一个还是多个分段，都以
+- 工作台通过任务清单中的 `composition` 字段读取排队、数字人生成、`VIDEO_ENHANCING`、
+  拼接、完成或失败状态；浏览器仍不直接访问本服务。
+- 每个数字人源片段在云端保留；主分段下载返回 SeedVR2 清晰片段，独立 `/source` 地址
+  返回数字人源片段。无论一个还是多个分段，都以
   已确认音频时长为目标进行视频/音频归一化；明显短于音频超过 1 秒时失败，不静默补长。
 - 多分段按原顺序拼接，接缝使用 0.25 秒画面叠化。上一段先补同长度尾帧再与下一段
   开头重叠，音频仍按目标时长顺序拼接，因此基础视频总时长和字幕绝对时间轴不缩短。
   单分段仍只生成标准化基础视频。基础视频不是字幕/BGM 成片；4A 不调用剪映、不生成变体。
 - 重试接口只重置失败的 RunningHub/下载任务或失败的拼接，不重做已经成功的付费子任务。
+  清晰化失败只重做 SeedVR2，绝不重新执行已成功的数字人阶段。
 - 单片段标准化、逐段按音频时长补帧/裁切只适用于 `new_workbench`。`legacy_web`
   单片段继续绕过拼接，旧多片段继续使用不带目标时长的原快速拼接；不得把工作台算法
   再次扩散为全局默认。
@@ -168,6 +176,18 @@ PENDING -> UPLOADING -> SUBMITTED -> RUNNING -> SUCCESS
                                       \-> DOWNLOAD_FAILED
 任一允许取消的活动状态 ----------------> CANCELLED
 ```
+
+数字人父任务在源片段完成后保持 `RUNNING`，清晰化子状态独立持久化：
+
+```text
+PENDING -> UPLOADING -> SUBMITTED -> RUNNING -> SUCCESS
+                                      |          `-> DOWNLOAD_FAILED
+                                      `-> FAILED
+任一允许取消的活动状态 ----------------> CANCELLED
+```
+
+外部接口将这一段派生为 `VIDEO_ENHANCING`。`generation_tasks.result_path` 只在清晰化成功
+后指向 SeedVR2 结果；源片段位于 `GenerationTaskEnhancement.source_result_path`。
 
 RunningHub 明确返回 `FAILED` 时，默认最多自动重试 3 次，基础等待 60 秒，实际等待为
 60、120、240 秒；分别由 `RUNNINGHUB_AUTO_RETRY_LIMIT` 和
@@ -280,8 +300,9 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0028_unified_content_visual_plan`。其中 `0022_content_analysis_cache`
-建立最初的内容分析缓存，`0028` 在不丢失既有音乐与字幕结果的前提下扩展统一视觉计划字段和缓存键。
+当前迁移头为 `0029_seedvr2_video_enhancement`。统一内容分析缓存从
+`0022_content_analysis_cache` 开始，`0028` 扩展统一视觉计划字段和缓存键；`0029` 只新增
+数字人清晰化与尝试表，不重建 `generation_tasks`，历史已完成任务不自动补跑。
 SQLite 启用 WAL、外键和 busy timeout，设计目标
 是一个 Web 加三个本地 Worker 的单服务器部署，不是多主集群。
 

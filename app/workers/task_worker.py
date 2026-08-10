@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import tempfile
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -14,9 +16,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
+    EnhancementStatus,
     GenerationBatchItem,
     GenerationSegment,
     GenerationTask,
+    GenerationTaskEnhancement,
+    GenerationTaskEnhancementAttempt,
     RunningHubConfig,
     RunningHubExecutionAccount,
     TaskStatus,
@@ -45,7 +50,13 @@ from app.services.logging_config import (
 )
 from app.services.audio import add_silence_tail
 from app.services.security import decrypt_secret
-from app.services.storage import create_download_target, to_relative_data_path
+from app.services.storage import (
+    create_download_target,
+    create_enhanced_download_target,
+    create_source_download_target,
+    safe_relative_path,
+    to_relative_data_path,
+)
 from app.services.workflow_configs import get_user_workflow_config
 from app.services.video_merge import (
     process_pending_video_merges,
@@ -54,6 +65,10 @@ from app.services.video_merge import (
 from app.workflows import get_workflow
 from app.workflows.base import WorkflowAdapter, resolve_asset_path
 from app.workflows.digital_human import generation_tail_padding_seconds
+from app.workflows.seedvr2_upscale import (
+    SEEDVR2_AI_APP_ID,
+    seedvr2_upscale_workflow,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +88,14 @@ SLOT_OCCUPYING_TASK_STATUSES = (
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _capacity_check_is_deferred(user_id: int) -> bool:
@@ -414,8 +437,19 @@ def recover_interrupted_tasks(db: Session) -> int:
             error_message=None,
         )
     )
+    enhancement_result = db.execute(
+        update(GenerationTaskEnhancement)
+        .where(
+            GenerationTaskEnhancement.status == EnhancementStatus.UPLOADING.value,
+            GenerationTaskEnhancement.remote_task_id.is_(None),
+        )
+        .values(
+            status=EnhancementStatus.PENDING.value,
+            error_message=None,
+        )
+    )
     db.commit()
-    return int(result.rowcount or 0)
+    return int(result.rowcount or 0) + int(enhancement_result.rowcount or 0)
 
 
 def claim_next_pending_task(db: Session) -> str | None:
@@ -493,6 +527,9 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
             selectinload(GenerationTask.user).selectinload(User.runninghub_config),
             selectinload(GenerationTask.user).selectinload(User.workflow_configs),
             selectinload(GenerationTask.execution_account),
+            selectinload(GenerationTask.enhancement).selectinload(
+                GenerationTaskEnhancement.attempts
+            ),
             selectinload(GenerationTask.batch_item).selectinload(
                 GenerationBatchItem.batch
             ),
@@ -650,8 +687,14 @@ def _handle_remote_status(
         _mark_failed(task, "EMPTY_RESULT", "工作流成功但没有可下载的结果")
         db.commit()
         return
-    destination = create_download_target(
-        get_settings(), task.user_id, task.id, output.extension
+    destination = (
+        create_source_download_target(
+            get_settings(), task.user_id, task.id, output.extension
+        )
+        if task.workflow_type == "digital_human"
+        else create_download_target(
+            get_settings(), task.user_id, task.id, output.extension
+        )
     )
     log_event(
         logger,
@@ -679,6 +722,42 @@ def _handle_remote_status(
             **_video_log_context(task),
         )
         return
+    if task.workflow_type == "digital_human":
+        enhancement = task.enhancement
+        if enhancement is None:
+            enhancement = GenerationTaskEnhancement(
+                id=str(uuid.uuid4()),
+                generation_task_id=task.id,
+                status=EnhancementStatus.PENDING.value,
+                source_result_path=to_relative_data_path(destination, get_settings()),
+                source_filename=destination.name,
+                source_size=destination.stat().st_size,
+                source_sha256=_file_sha256(destination),
+                source_output_metadata_json=json.dumps(
+                    output.metadata, ensure_ascii=False
+                ),
+                execution_account_id=task.execution_account_id,
+            )
+            db.add(enhancement)
+        task.status = TaskStatus.RUNNING.value
+        task.result_path = None
+        task.output_metadata = None
+        task.error_code = None
+        task.error_message = None
+        task.runninghub_failed_reason = None
+        task.runninghub_auto_retry_after = None
+        task.completed_at = None
+        db.commit()
+        log_event(
+            logger,
+            "video.enhancement_queued",
+            "数字人源片段已保存，等待 SeedVR2 48G 清晰化",
+            runninghub_task_id=task.runninghub_task_id,
+            source_result_path=enhancement.source_result_path,
+            **_video_log_context(task),
+        )
+        return
+
     task.result_path = to_relative_data_path(destination, get_settings())
     task.output_metadata = json.dumps(output.metadata, ensure_ascii=False)
     task.status = TaskStatus.SUCCESS.value
@@ -694,6 +773,457 @@ def _handle_remote_status(
         "视频任务完成",
         runninghub_task_id=task.runninghub_task_id,
         result_path=task.result_path,
+        **_video_log_context(task),
+    )
+
+
+def _enhancement_attempt(
+    enhancement: GenerationTaskEnhancement,
+) -> GenerationTaskEnhancementAttempt | None:
+    return enhancement.attempts[-1] if enhancement.attempts else None
+
+
+def _new_enhancement_attempt(
+    enhancement: GenerationTaskEnhancement,
+) -> GenerationTaskEnhancementAttempt:
+    attempt = GenerationTaskEnhancementAttempt(
+        id=str(uuid.uuid4()),
+        enhancement_id=enhancement.id,
+        attempt_number=len(enhancement.attempts) + 1,
+        execution_account_id=enhancement.execution_account_id,
+        status="UPLOADING",
+    )
+    enhancement.attempts.append(attempt)
+    return attempt
+
+
+def _enhancement_failure(
+    task: GenerationTask,
+    enhancement: GenerationTaskEnhancement,
+    *,
+    code: str,
+    message: str,
+) -> None:
+    enhancement.status = EnhancementStatus.FAILED.value
+    enhancement.error_message = message
+    enhancement.auto_retry_after = None
+    enhancement.finished_at = _now()
+    task.status = TaskStatus.FAILED.value
+    task.error_code = code
+    task.error_message = message
+    task.completed_at = _now()
+
+
+def _schedule_enhancement_retry(
+    task: GenerationTask,
+    enhancement: GenerationTaskEnhancement,
+    *,
+    message: str,
+) -> tuple[int, int] | None:
+    settings = get_settings()
+    completed_retries = int(enhancement.auto_retry_count or 0)
+    if completed_retries >= settings.runninghub_auto_retry_limit:
+        return None
+    retry_number = completed_retries + 1
+    delay_seconds = settings.runninghub_auto_retry_base_delay_seconds * (
+        2 ** (retry_number - 1)
+    )
+    enhancement.auto_retry_count = retry_number
+    enhancement.auto_retry_after = _now() + timedelta(seconds=delay_seconds)
+    enhancement.remote_task_id = None
+    enhancement.submitted_at = None
+    enhancement.status = EnhancementStatus.PENDING.value
+    enhancement.error_message = (
+        f"{message}\n系统已安排 SeedVR2 第 {retry_number}/"
+        f"{settings.runninghub_auto_retry_limit} 次自动重试，约 {delay_seconds} 秒后执行。"
+    )
+    task.status = TaskStatus.RUNNING.value
+    task.error_code = None
+    task.error_message = enhancement.error_message
+    task.completed_at = None
+    return retry_number, delay_seconds
+
+
+def _enhancement_watchdog_expired(
+    enhancement: GenerationTaskEnhancement,
+) -> bool:
+    started_at = enhancement.submitted_at or enhancement.created_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return (
+        _now() - started_at
+    ).total_seconds() > get_settings().runninghub_remote_watchdog_seconds
+
+
+def _finish_enhancement_attempt(
+    enhancement: GenerationTaskEnhancement,
+    *,
+    status: str,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    failed_reason: dict[str, Any] | None = None,
+) -> None:
+    attempt = _enhancement_attempt(enhancement)
+    if attempt is None:
+        return
+    attempt.status = status
+    attempt.error_code = error_code
+    attempt.error_message = error_message
+    attempt.failed_reason_json = (
+        json.dumps(failed_reason, ensure_ascii=False)
+        if failed_reason is not None
+        else None
+    )
+    attempt.finished_at = _now()
+
+
+def _handle_enhancement_remote_status(
+    db: Session,
+    task: GenerationTask,
+    enhancement: GenerationTaskEnhancement,
+    client: RunningHubClient,
+) -> None:
+    assert enhancement.remote_task_id
+    try:
+        result = client.query_task(enhancement.remote_task_id)
+    except RunningHubError as exc:
+        if exc.is_task_not_found:
+            _finish_enhancement_attempt(
+                enhancement,
+                status="MISSING",
+                error_code=str(exc.error_code or "REMOTE_TASK_NOT_FOUND"),
+                error_message=str(exc),
+            )
+            _enhancement_failure(
+                task,
+                enhancement,
+                code="VIDEO_ENHANCEMENT_REMOTE_MISSING",
+                message="SeedVR2 任务不存在或已过期，可使用已保存的数字人源片段重试清晰化",
+            )
+            db.commit()
+            return
+        enhancement.error_message = str(exc)
+        task.error_code = "VIDEO_ENHANCEMENT_QUERY_ERROR"
+        task.error_message = "SeedVR2 状态查询暂时失败，系统会保留远端任务继续查询"
+        db.commit()
+        return
+
+    status = str(result.get("status") or "").upper()
+    failed_reason = _runninghub_failed_reason(result)
+    enhancement.failed_reason_json = (
+        json.dumps(failed_reason, ensure_ascii=False)
+        if failed_reason is not None
+        else None
+    )
+    usage = result.get("usage")
+    enhancement.usage_json = (
+        json.dumps(usage, ensure_ascii=False) if usage is not None else None
+    )
+    if status in {"QUEUED", "RUNNING"}:
+        enhancement.status = (
+            EnhancementStatus.RUNNING.value
+            if status == "RUNNING"
+            else EnhancementStatus.SUBMITTED.value
+        )
+        if enhancement.started_at is None and status == "RUNNING":
+            enhancement.started_at = _now()
+        task.status = TaskStatus.RUNNING.value
+        task.error_code = None
+        task.error_message = None
+        attempt = _enhancement_attempt(enhancement)
+        if attempt is not None:
+            attempt.status = status
+        db.commit()
+        if _enhancement_watchdog_expired(enhancement):
+            try:
+                client.cancel_task(enhancement.remote_task_id)
+            except RunningHubError as exc:
+                task.error_code = "VIDEO_ENHANCEMENT_WATCHDOG_CANCEL_FAILED"
+                task.error_message = (
+                    "SeedVR2 已超过安全等待上限，自动取消尚未成功；"
+                    "系统会保留远端任务继续查询。"
+                )
+                enhancement.error_message = task.error_message
+                db.commit()
+                return
+            _finish_enhancement_attempt(
+                enhancement,
+                status="WATCHDOG_CANCELLED",
+                error_code="REMOTE_WATCHDOG_TIMEOUT",
+            )
+            _enhancement_failure(
+                task,
+                enhancement,
+                code="VIDEO_ENHANCEMENT_WATCHDOG_TIMEOUT",
+                message="SeedVR2 超过安全等待上限，已取消远端任务",
+            )
+            db.commit()
+        return
+
+    if task.execution_account:
+        _remote_account_task_counts.pop(task.execution_account.id, None)
+    if status == "FAILED":
+        message = _runninghub_failure_message(result)
+        _finish_enhancement_attempt(
+            enhancement,
+            status="FAILED",
+            error_code=str(result.get("errorCode") or "") or None,
+            error_message=message,
+            failed_reason=failed_reason,
+        )
+        scheduled = _schedule_enhancement_retry(
+            task, enhancement, message=message
+        )
+        if scheduled is None:
+            _enhancement_failure(
+                task,
+                enhancement,
+                code="VIDEO_ENHANCEMENT_FAILED",
+                message=(
+                    f"{message}\n已用完 {get_settings().runninghub_auto_retry_limit} "
+                    "次 SeedVR2 自动重试，请人工检查后再重试清晰化。"
+                ),
+            )
+        db.commit()
+        return
+    if status != "SUCCESS":
+        _finish_enhancement_attempt(
+            enhancement,
+            status="UNKNOWN_STATUS",
+            error_message=f"RunningHub 返回未知任务状态：{status or '空'}",
+        )
+        _enhancement_failure(
+            task,
+            enhancement,
+            code="VIDEO_ENHANCEMENT_UNKNOWN_STATUS",
+            message=f"SeedVR2 返回未知任务状态：{status or '空'}",
+        )
+        db.commit()
+        return
+
+    output = seedvr2_upscale_workflow.select_output(result)
+    if output is None:
+        _finish_enhancement_attempt(
+            enhancement,
+            status="INVALID_OUTPUT",
+            error_code="EMPTY_OR_AMBIGUOUS_VIDEO_RESULT",
+        )
+        _enhancement_failure(
+            task,
+            enhancement,
+            code="VIDEO_ENHANCEMENT_INVALID_OUTPUT",
+            message="SeedVR2 已成功但没有唯一可确认的视频结果，未自动重复付费提交",
+        )
+        db.commit()
+        return
+
+    destination = create_enhanced_download_target(
+        get_settings(), task.user_id, task.id, output.extension
+    )
+    try:
+        client.download_result(output.url, destination)
+    except RunningHubError as exc:
+        enhancement.status = EnhancementStatus.DOWNLOAD_FAILED.value
+        enhancement.error_message = str(exc)
+        task.status = TaskStatus.DOWNLOAD_FAILED.value
+        task.error_code = "VIDEO_ENHANCEMENT_DOWNLOAD_FAILED"
+        task.error_message = str(exc)
+        task.completed_at = _now()
+        db.commit()
+        return
+
+    enhancement.status = EnhancementStatus.SUCCESS.value
+    enhancement.result_path = to_relative_data_path(destination, get_settings())
+    enhancement.result_filename = destination.name
+    enhancement.result_size = destination.stat().st_size
+    enhancement.result_sha256 = _file_sha256(destination)
+    enhancement.output_metadata_json = json.dumps(
+        output.metadata, ensure_ascii=False
+    )
+    enhancement.error_message = None
+    enhancement.failed_reason_json = None
+    enhancement.auto_retry_after = None
+    enhancement.finished_at = _now()
+    _finish_enhancement_attempt(enhancement, status="SUCCESS")
+    task.result_path = enhancement.result_path
+    task.output_metadata = json.dumps(
+        {
+            "quality_variant": "seedvr2_upscaled",
+            "enhanced_by": "runninghub_seedvr2",
+            "seedvr2": output.metadata,
+        },
+        ensure_ascii=False,
+    )
+    task.status = TaskStatus.SUCCESS.value
+    task.error_code = None
+    task.error_message = None
+    task.completed_at = _now()
+    db.commit()
+    log_event(
+        logger,
+        "video.enhancement_completed",
+        "SeedVR2 48G 清晰化完成",
+        seedvr2_task_id=enhancement.remote_task_id,
+        result_path=task.result_path,
+        **_video_log_context(task),
+    )
+
+
+def _process_enhancement(
+    db: Session,
+    task: GenerationTask,
+    enhancement: GenerationTaskEnhancement,
+    client: RunningHubClient,
+    execution_config: RunningHubConfig | RunningHubExecutionAccount,
+) -> None:
+    if enhancement.status == EnhancementStatus.SUCCESS.value:
+        if enhancement.result_path and not task.result_path:
+            task.result_path = enhancement.result_path
+            task.status = TaskStatus.SUCCESS.value
+            task.completed_at = enhancement.finished_at or _now()
+            db.commit()
+        return
+    if enhancement.status in {
+        EnhancementStatus.FAILED.value,
+        EnhancementStatus.DOWNLOAD_FAILED.value,
+        EnhancementStatus.CANCELLED.value,
+    }:
+        return
+    if enhancement.remote_task_id:
+        _handle_enhancement_remote_status(db, task, enhancement, client)
+        return
+    if enhancement.auto_retry_after is not None:
+        retry_after = enhancement.auto_retry_after
+        if retry_after.tzinfo is None:
+            retry_after = retry_after.replace(tzinfo=timezone.utc)
+        if retry_after > _now():
+            return
+
+    source_path = safe_relative_path(
+        enhancement.source_result_path, get_settings().data_dir
+    )
+    if not source_path.is_file():
+        _enhancement_failure(
+            task,
+            enhancement,
+            code="VIDEO_ENHANCEMENT_SOURCE_MISSING",
+            message="数字人源片段不存在，无法执行 SeedVR2 清晰化",
+        )
+        db.commit()
+        return
+
+    try:
+        current_tasks = client.get_account_current_task_count()
+    except RunningHubError as exc:
+        enhancement.error_message = str(exc)
+        task.error_code = "VIDEO_ENHANCEMENT_CAPACITY_QUERY_FAILED"
+        task.error_message = "暂时无法读取 SeedVR2 执行账号容量，将继续等待"
+        db.commit()
+        return
+    limit = int(execution_config.max_concurrent_tasks)
+    if current_tasks >= limit:
+        return
+
+    enhancement.status = EnhancementStatus.UPLOADING.value
+    enhancement.execution_account_id = task.execution_account_id
+    enhancement.error_message = None
+    task.status = TaskStatus.RUNNING.value
+    task.error_code = None
+    task.error_message = None
+    attempt = _new_enhancement_attempt(enhancement)
+    db.commit()
+    try:
+        uploaded_video = client.upload_file(source_path)
+        payload = seedvr2_upscale_workflow.build_payload(uploaded_video)
+        attempt.payload_summary_json = json.dumps(
+            {
+                "ai_app_id": SEEDVR2_AI_APP_ID,
+                "instance_type": payload["instanceType"],
+                "node_ids": [node["nodeId"] for node in payload["nodeInfoList"]],
+            },
+            ensure_ascii=False,
+        )
+        remote_task_id = client.submit_task(payload)
+    except RunningHubError as exc:
+        _finish_enhancement_attempt(
+            enhancement,
+            status="PRE_SUBMISSION_FAILED" if exc.retry_safe else "SUBMIT_UNKNOWN",
+            error_code=str(exc.error_code or "") or None,
+            error_message=str(exc),
+        )
+        if exc.is_capacity_limited:
+            attempt.status = "CAPACITY_WAIT"
+            enhancement.status = EnhancementStatus.PENDING.value
+            enhancement.auto_retry_after = _now() + timedelta(
+                seconds=REMOTE_CAPACITY_RECHECK_SECONDS
+            )
+            enhancement.error_message = "SeedVR2 执行账号并发已满，将继续等待"
+            task.status = TaskStatus.RUNNING.value
+            task.error_code = None
+            task.error_message = enhancement.error_message
+        elif exc.retry_safe:
+            scheduled = _schedule_enhancement_retry(
+                task, enhancement, message=str(exc)
+            )
+            if scheduled is None:
+                _enhancement_failure(
+                    task,
+                    enhancement,
+                    code="VIDEO_ENHANCEMENT_UPLOAD_FAILED",
+                    message=str(exc),
+                )
+        else:
+            _enhancement_failure(
+                task,
+                enhancement,
+                code="VIDEO_ENHANCEMENT_SUBMIT_UNKNOWN",
+                message=(
+                    f"{exc}\nSeedVR2 提交结果无法确认，未自动重复付费提交。"
+                ),
+            )
+        db.commit()
+        return
+    except (OSError, ValueError) as exc:
+        _finish_enhancement_attempt(
+            enhancement,
+            status="PRE_SUBMISSION_FAILED",
+            error_message=str(exc),
+        )
+        scheduled = _schedule_enhancement_retry(
+            task, enhancement, message=str(exc)
+        )
+        if scheduled is None:
+            _enhancement_failure(
+                task,
+                enhancement,
+                code="VIDEO_ENHANCEMENT_UPLOAD_FAILED",
+                message=str(exc),
+            )
+        db.commit()
+        return
+
+    enhancement.remote_task_id = remote_task_id
+    enhancement.status = EnhancementStatus.SUBMITTED.value
+    enhancement.submitted_at = _now()
+    enhancement.started_at = None
+    enhancement.error_message = None
+    enhancement.auto_retry_after = None
+    attempt.remote_task_id = remote_task_id
+    attempt.status = "SUBMITTED"
+    attempt.submitted_at = enhancement.submitted_at
+    task.status = TaskStatus.RUNNING.value
+    task.error_code = None
+    task.error_message = None
+    if task.execution_account:
+        _remote_account_task_counts[task.execution_account.id] = (
+            _remote_account_task_counts.get(task.execution_account.id, 0) + 1
+        )
+    db.commit()
+    log_event(
+        logger,
+        "video.enhancement_submitted",
+        "数字人源片段已提交 SeedVR2 48G 清晰化",
+        seedvr2_task_id=remote_task_id,
         **_video_log_context(task),
     )
 
@@ -855,6 +1385,18 @@ def process_task(db: Session, task_id: str) -> None:
     except (ValueError, RunningHubError) as exc:
         _mark_failed(task, "CONFIGURATION_ERROR", str(exc))
         db.commit()
+        return
+
+    if task.workflow_type == "digital_human" and task.enhancement is not None:
+        client.ai_app_id = SEEDVR2_AI_APP_ID
+        client.submission_type = seedvr2_upscale_workflow.submission_type
+        _process_enhancement(
+            db,
+            task,
+            task.enhancement,
+            client,
+            execution_config,
+        )
         return
 
     if task.runninghub_task_id:

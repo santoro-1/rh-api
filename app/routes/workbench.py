@@ -17,6 +17,7 @@ from app.database import get_db
 from app.models import (
     AudioTaskStatus,
     BATCH_SOURCE_NEW_WORKBENCH,
+    EnhancementStatus,
     GenerationBatch,
     GenerationBatchItem,
     MiniMaxVoiceAsset,
@@ -310,6 +311,10 @@ def _workbench_manifest(item: GenerationBatchItem) -> dict[str, Any]:
         video["download_url"] = (
             f"/api/workbench/tasks/{item.id}/videos/{video['index']}"
         )
+        if video.get("source_download_url"):
+            video["source_download_url"] = (
+                f"/api/workbench/tasks/{item.id}/videos/{video['index']}/source"
+            )
         video.pop("preview_url", None)
     manifest["batch_name"] = item.batch.name
     manifest["correlation_id"] = item.batch.correlation_id or item.batch.id
@@ -348,6 +353,12 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
             if task.status in {TaskStatus.FAILED.value, TaskStatus.DOWNLOAD_FAILED.value}
         )
         error_message = failed.error_message or failed.runninghub_failed_reason
+    elif any(
+        task.enhancement is not None
+        and task.enhancement.status != EnhancementStatus.SUCCESS.value
+        for task in tasks
+    ):
+        status = "VIDEO_ENHANCING"
     elif tasks and all(task.status == TaskStatus.SUCCESS.value for task in tasks):
         status = "VIDEO_MERGING"
     elif tasks:
@@ -362,8 +373,34 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         status = "COMPOSITION_FAILED"
     else:
         status = "AUDIO_READY"
+    enhancement_statuses = [
+        task.enhancement.status
+        for task in tasks
+        if task.enhancement is not None
+    ]
+    enhancement_status = next(
+        (
+            value
+            for value in enhancement_statuses
+            if value != EnhancementStatus.SUCCESS.value
+        ),
+        EnhancementStatus.SUCCESS.value if enhancement_statuses else None,
+    )
+    quality_variant = (
+        "seedvr2_upscaled"
+        if tasks
+        and len(enhancement_statuses) == len(tasks)
+        and all(
+            value == EnhancementStatus.SUCCESS.value
+            for value in enhancement_statuses
+        )
+        else None
+    )
     return {
         "status": status,
+        "processing_stage": status,
+        "enhancement_status": enhancement_status,
+        "quality_variant": quality_variant,
         "segment_count": len(tasks),
         "merge_status": item.merged_video_status,
         "image_sha256": audio_task.primary_sha256 if audio_task is not None else None,
@@ -564,6 +601,42 @@ def workbench_video(
         raise HTTPException(status_code=404, detail="视频文件不存在")
     filename = Path(task.audio_original_name or f"segment-{video_index}.mp4").stem + ".mp4"
     return FileResponse(path, media_type="video/mp4", filename=filename)
+
+
+@router.get("/api/workbench/tasks/{item_id}/videos/{video_index}/source")
+def workbench_source_video(
+    item_id: str,
+    video_index: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _bearer_user(request, db)
+    item = _item_for_user(item_id, user, db)
+    tasks = [
+        segment.generation_task
+        for segment in sorted(item.segments, key=lambda value: value.segment_index)
+        if segment.generation_task is not None
+    ] if item.segments else ([item.generation_task] if item.generation_task else [])
+    if video_index < 1 or video_index > len(tasks):
+        raise HTTPException(status_code=404, detail="视频片段不存在")
+    task = tasks[video_index - 1]
+    if task.enhancement is None:
+        raise HTTPException(status_code=404, detail="数字人源片段不存在")
+    try:
+        path = safe_relative_path(
+            task.enhancement.source_result_path,
+            get_settings().data_dir,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="数字人源片段不存在") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="数字人源片段不存在")
+    filename = Path(task.audio_original_name or f"segment-{video_index}.mp4").stem
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"{filename}-source{path.suffix}",
+    )
 
 
 @router.post("/api/workbench/voices")

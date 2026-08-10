@@ -77,14 +77,16 @@
                 {% endif %}
               </small>
               {% if task %}
+                {% set item_runninghub_id = item_runninghub_ids.get(item.id) %}
+                {% set item_retry_count = item_auto_retry_counts.get(item.id, 0) %}
                 <br><small class="muted">
                   RunningHub ID：
-                  <span data-item-runninghub-id="{{ item.id }}">{{ task.runninghub_task_id or "等待提交" }}</span>
+                  <span data-item-runninghub-id="{{ item.id }}">{{ item_runninghub_id or "等待提交" }}</span>
                 </small>
                 <br><small
-                  class="muted {% if not task.runninghub_auto_retry_count %}hidden{% endif %}"
+                  class="muted {% if not item_retry_count %}hidden{% endif %}"
                   data-item-retry="{{ item.id }}"
-                >自动重试 {{ task.runninghub_auto_retry_count }}/{{ auto_retry_limit }}</small>
+                >自动重试 {{ item_retry_count }}/{{ auto_retry_limit }}</small>
                 <br><small
                   class="error-text {% if not task.error_message %}hidden{% endif %}"
                   data-item-error="{{ item.id }}"
@@ -245,14 +247,16 @@
                               <strong>{{ "%.1f"|format(segment.start_seconds) }}–{{ "%.1f"|format(segment.end_seconds) }} 秒</strong>
                             </td>
                             <td class="segment-status-cell">
-                              {% set segment_status = child.status if child else segment.status %}
+                              {% set segment_status = segment_statuses.get(segment.id, segment.status) %}
+                              {% set segment_runninghub_id = segment_runninghub_ids.get(segment.id) %}
+                              {% set segment_retry_count = segment_auto_retry_counts.get(segment.id, 0) %}
                               <span class="segment-status-value" data-segment-status="{{ segment.id }}">{{ status_labels.get(segment_status, segment_status) }}</span>
                               <span class="segment-remote-label">RunningHub 任务 ID</span>
-                              <span class="segment-remote-id" data-runninghub-id="{{ segment.id }}">{{ child.runninghub_task_id if child and child.runninghub_task_id else "等待提交" }}</span>
+                              <span class="segment-remote-id" data-runninghub-id="{{ segment.id }}">{{ segment_runninghub_id or "等待提交" }}</span>
                               <small
-                                class="muted {% if not child or not child.runninghub_auto_retry_count %}hidden{% endif %}"
+                                class="muted {% if not segment_retry_count %}hidden{% endif %}"
                                 data-segment-retry="{{ segment.id }}"
-                              >自动重试 {{ child.runninghub_auto_retry_count if child else 0 }}/{{ auto_retry_limit }}</small>
+                              >自动重试 {{ segment_retry_count }}/{{ auto_retry_limit }}</small>
                               <small
                                 class="error-text {% if not child or not child.error_message %}hidden{% endif %}"
                                 data-segment-error="{{ segment.id }}"

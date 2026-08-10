@@ -2,7 +2,7 @@
 {% block title %}任务详情{% endblock %}
 {% block content %}
 <section class="page-heading">
-  <div><h1>任务详情</h1><p id="status-text" class="status">{{ status_labels.get(task.status, task.status) }}</p></div>
+  <div><h1>任务详情</h1><p id="status-text" class="status">{% if task.enhancement and task.status in ["FAILED", "DOWNLOAD_FAILED"] %}视频清晰化失败{% elif task.enhancement and task.enhancement.status != "SUCCESS" and task.status != "CANCELLED" %}视频清晰化中（SeedVR2 48G）{% elif task.enhancement and task.enhancement.status == "SUCCESS" %}清晰视频已完成{% else %}{{ status_labels.get(task.status, task.status) }}{% endif %}</p></div>
   <div class="button-row">
     {% if task.status in ["PENDING", "SUBMITTED", "RUNNING"] %}
       <form method="post" action="/tasks/{{ task.id }}/cancel" onsubmit="return confirm('确定取消这个生成任务吗？已提交的任务会同时请求 RunningHub 取消。');">
@@ -32,10 +32,11 @@
         <dt>音频方式</dt><dd>{{ task.audio_original_name }}</dd>
       {% endif %}
       <dt>RunningHub Task ID</dt><dd id="runninghub-task-id">{{ task.runninghub_task_id or "尚未提交" }}</dd>
+      {% if task.enhancement %}<dt>SeedVR2 Task ID</dt><dd>{{ task.enhancement.remote_task_id or "等待提交" }}</dd>{% endif %}
       <dt>自动重试</dt>
       <dd>
-        已使用 <span id="auto-retry-count">{{ task.runninghub_auto_retry_count }}</span>/{{ auto_retry_limit }} 次
-        <span id="auto-retry-wait" class="{% if not task.runninghub_auto_retry_after %}hidden{% endif %}">· 正在等待下一次重试</span>
+        已使用 <span id="auto-retry-count">{{ task.enhancement.auto_retry_count if task.enhancement and task.enhancement.status != "SUCCESS" else task.runninghub_auto_retry_count }}</span>/{{ auto_retry_limit }} 次
+        <span id="auto-retry-wait" class="{% if not ((task.enhancement.auto_retry_after if task.enhancement and task.enhancement.status != 'SUCCESS' else task.runninghub_auto_retry_after)) %}hidden{% endif %}">· 正在等待下一次重试</span>
       </dd>
       <dt>提示词</dt><dd class="pre-wrap">{{ task.prompt }}</dd>
     </dl>
@@ -79,7 +80,7 @@
     <div id="result-container">
       {% if task.status == "SUCCESS" and task.result_path %}
         <video class="video" controls src="/api/tasks/{{ task.id }}/preview"></video>
-        <p><a class="button" href="/api/tasks/{{ task.id }}/download">下载视频</a></p>
+        <p><a class="button" href="/api/tasks/{{ task.id }}/download">下载清晰视频</a>{% if task.enhancement %} <a class="button secondary" href="/api/tasks/{{ task.id }}/source-video">下载数字人源片段</a>{% endif %}</p>
       {% else %}<p class="muted">任务完成后，视频会自动下载到本机并显示在这里。</p>{% endif %}
     </div>
   </section>
@@ -87,7 +88,7 @@
 {% if task.status in ["PENDING", "UPLOADING", "SUBMITTED", "RUNNING"] %}
 <script>
 const labels = {{ status_labels|tojson }};
-const renderedAutoRetryCount = {{ task.runninghub_auto_retry_count }};
+const renderedAutoRetryCount = {{ task.enhancement.auto_retry_count if task.enhancement and task.enhancement.status != "SUCCESS" else task.runninghub_auto_retry_count }};
 async function refreshTask() {
   const response = await fetch("/api/tasks/{{ task.id }}");
   if (!response.ok) return;

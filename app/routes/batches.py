@@ -65,6 +65,9 @@ from app.services.batch_status import (
     batch_detail_status,
     batch_query,
     batch_view_revision,
+    current_auto_retry_count,
+    current_runninghub_task_id,
+    generation_task_display_status,
     item_display_status,
     summarize_batch,
 )
@@ -642,6 +645,34 @@ def batch_detail_page(
             "manifests": manifests,
             "item_statuses": {
                 item.id: item_display_status(item) for item in batch.items
+            },
+            "item_runninghub_ids": {
+                item.id: current_runninghub_task_id(item.generation_task)
+                for item in batch.items
+                if item.generation_task
+            },
+            "item_auto_retry_counts": {
+                item.id: current_auto_retry_count(item.generation_task)
+                for item in batch.items
+                if item.generation_task
+            },
+            "segment_statuses": {
+                segment.id: generation_task_display_status(segment.generation_task)
+                for item in batch.items
+                for segment in item.segments
+                if segment.generation_task
+            },
+            "segment_runninghub_ids": {
+                segment.id: current_runninghub_task_id(segment.generation_task)
+                for item in batch.items
+                for segment in item.segments
+                if segment.generation_task
+            },
+            "segment_auto_retry_counts": {
+                segment.id: current_auto_retry_count(segment.generation_task)
+                for item in batch.items
+                for segment in item.segments
+                if segment.generation_task
             },
             "postproduction_modes": {
                 item.id: postproduction_mode(item) for item in batch.items

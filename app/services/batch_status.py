@@ -12,8 +12,10 @@ from app.models import (
     GenerationBatch,
     GenerationBatchItem,
     GenerationSegment,
+    GenerationTask,
     TaskStatus,
 )
+from app.services.video_enhancement import task_processing_stage
 
 
 # Video states rendered as live work in batch pages. PENDING is active for the
@@ -62,6 +64,7 @@ STATUS_LABELS = {
     "MERGE_FAILED": "完整视频拼接失败",
     "AUTO_READY": "可自动进入BGM和字幕",
     "MANUAL_READY": "等待人工处理",
+    "VIDEO_ENHANCING": "视频清晰化中（SeedVR2 48G）",
 }
 
 TERMINAL_VIDEO_STATUSES = {
@@ -72,6 +75,41 @@ TERMINAL_VIDEO_STATUSES = {
 }
 
 
+def generation_task_display_status(task: GenerationTask) -> str:
+    """Return the user-visible phase for a two-stage video task."""
+
+    if task_processing_stage(task) == "VIDEO_ENHANCING":
+        return "VIDEO_ENHANCING"
+    return task.status
+
+
+def current_runninghub_task_id(task: GenerationTask) -> str | None:
+    """Expose the remote id that belongs to the phase currently being shown."""
+
+    enhancement = task.enhancement
+    if enhancement is not None and enhancement.remote_task_id:
+        return enhancement.remote_task_id
+    return task.runninghub_task_id
+
+
+def current_auto_retry_count(task: GenerationTask) -> int:
+    """Expose retry progress for the active digital-human or SeedVR2 phase."""
+
+    enhancement = task.enhancement
+    if enhancement is not None and enhancement.status != "SUCCESS":
+        return enhancement.auto_retry_count
+    return task.runninghub_auto_retry_count
+
+
+def current_auto_retry_after(task: GenerationTask):
+    """Expose the next retry time for the active phase, if one is scheduled."""
+
+    enhancement = task.enhancement
+    if enhancement is not None and enhancement.status != "SUCCESS":
+        return enhancement.auto_retry_after
+    return task.runninghub_auto_retry_after
+
+
 def item_display_status(item: GenerationBatchItem) -> str:
     """Aggregate one user-visible row without hiding segment failures."""
 
@@ -80,11 +118,11 @@ def item_display_status(item: GenerationBatchItem) -> str:
             from app.services.postproduction import postproduction_status
 
             return postproduction_status(item)
-        return item.generation_task.status
+        return generation_task_display_status(item.generation_task)
     if item.segments:
         statuses = [
             (
-                segment.generation_task.status
+                generation_task_display_status(segment.generation_task)
                 if segment.generation_task
                 else segment.status
             )
@@ -148,11 +186,18 @@ def batch_query():
             GenerationBatchItem.generation_task
         ),
         selectinload(GenerationBatch.items)
+        .selectinload(GenerationBatchItem.generation_task)
+        .selectinload(GenerationTask.enhancement),
+        selectinload(GenerationBatch.items)
         .selectinload(GenerationBatchItem.audio_task)
         .selectinload(AudioGenerationTask.attempts),
         selectinload(GenerationBatch.items)
         .selectinload(GenerationBatchItem.segments)
         .selectinload(GenerationSegment.generation_task),
+        selectinload(GenerationBatch.items)
+        .selectinload(GenerationBatchItem.segments)
+        .selectinload(GenerationSegment.generation_task)
+        .selectinload(GenerationTask.enhancement),
         selectinload(GenerationBatch.items).selectinload(
             GenerationBatchItem.long_audio_project
         ),
@@ -417,7 +462,7 @@ def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
             "id": item.id,
             "status": item_display_status(item),
             "runninghubTaskId": (
-                item.generation_task.runninghub_task_id
+                current_runninghub_task_id(item.generation_task)
                 if item.generation_task
                 else None
             ),
@@ -432,16 +477,14 @@ def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
             "postproductionMode": postproduction_mode(item),
             "postproductionStatus": postproduction_status(item),
             "autoRetryCount": (
-                item.generation_task.runninghub_auto_retry_count
+                current_auto_retry_count(item.generation_task)
                 if item.generation_task
                 else 0
             ),
             "autoRetryAfter": (
-                item.generation_task.runninghub_auto_retry_after.isoformat()
-                if (
-                    item.generation_task
-                    and item.generation_task.runninghub_auto_retry_after
-                )
+                current_auto_retry_after(item.generation_task).isoformat()
+                if item.generation_task
+                and current_auto_retry_after(item.generation_task)
                 else None
             ),
             "lastFailedRunninghubTaskId": _last_failed_task_id(
@@ -451,12 +494,12 @@ def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
                 {
                     "id": segment.id,
                     "status": (
-                        segment.generation_task.status
+                        generation_task_display_status(segment.generation_task)
                         if segment.generation_task
                         else segment.status
                     ),
                     "runninghubTaskId": (
-                        segment.generation_task.runninghub_task_id
+                        current_runninghub_task_id(segment.generation_task)
                         if segment.generation_task
                         else None
                     ),
@@ -466,7 +509,7 @@ def batch_detail_status(batch: GenerationBatch) -> list[dict[str, Any]]:
                         else None
                     ),
                     "autoRetryCount": (
-                        segment.generation_task.runninghub_auto_retry_count
+                        current_auto_retry_count(segment.generation_task)
                         if segment.generation_task
                         else 0
                     ),

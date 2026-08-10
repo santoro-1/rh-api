@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from app.models import GenerationTask, TaskStatus
+from app.models import EnhancementStatus, GenerationTask, TaskStatus
 from app.services.runninghub import RunningHubClient
 from app.services.security import decrypt_secret
 from app.services.workflow_configs import get_user_workflow_config
 from app.workflows import get_workflow
+from app.workflows.seedvr2_upscale import SEEDVR2_AI_APP_ID
 
 
 class TaskCancellationError(ValueError):
@@ -22,6 +23,10 @@ def _mark_cancelled(task: GenerationTask) -> None:
     task.error_message = "任务已由用户取消"
     task.runninghub_auto_retry_after = None
     task.completed_at = datetime.now(timezone.utc)
+    if task.enhancement is not None:
+        task.enhancement.status = EnhancementStatus.CANCELLED.value
+        task.enhancement.auto_retry_after = None
+        task.enhancement.finished_at = task.completed_at
 
 
 def cancel_generation_task(db: Session, task: GenerationTask) -> None:
@@ -35,6 +40,31 @@ def cancel_generation_task(db: Session, task: GenerationTask) -> None:
         TaskStatus.DOWNLOAD_FAILED.value,
     }:
         raise TaskCancellationError("已结束的任务不能取消")
+
+    enhancement = task.enhancement
+    if enhancement is not None and enhancement.status not in {
+        EnhancementStatus.SUCCESS.value,
+        EnhancementStatus.FAILED.value,
+        EnhancementStatus.DOWNLOAD_FAILED.value,
+        EnhancementStatus.CANCELLED.value,
+    }:
+        if not enhancement.remote_task_id:
+            if enhancement.status == EnhancementStatus.UPLOADING.value:
+                raise TaskCancellationError("清晰化源视频正在上传，请稍后再取消")
+            _mark_cancelled(task)
+            return
+        account = task.execution_account or task.user.runninghub_config
+        if account is None or not account.api_key_encrypted:
+            raise TaskCancellationError("账号缺少 RunningHub API Key，无法远程取消")
+        client = RunningHubClient(
+            api_key=decrypt_secret(account.api_key_encrypted),
+            base_url=account.base_url,
+            ai_app_id=SEEDVR2_AI_APP_ID,
+            submission_type="ai-app",
+        )
+        client.cancel_task(enhancement.remote_task_id)
+        _mark_cancelled(task)
+        return
 
     if task.status == TaskStatus.PENDING.value and not task.runninghub_task_id:
         result = db.execute(
@@ -62,16 +92,21 @@ def cancel_generation_task(db: Session, task: GenerationTask) -> None:
     if not task.runninghub_task_id:
         raise TaskCancellationError("任务状态正在变化，请刷新后重试")
 
-    account = task.user.runninghub_config
+    account = task.execution_account or task.user.runninghub_config
     if account is None or not account.api_key_encrypted:
         raise TaskCancellationError("账号缺少 RunningHub API Key，无法远程取消")
     try:
         workflow_config = get_user_workflow_config(task.user, task.workflow_type)
         adapter = get_workflow(task.workflow_type)
+        ai_app_id = (
+            task.execution_account.digital_human_ai_app_id
+            if task.execution_account is not None
+            else workflow_config.ai_app_id
+        )
         client = RunningHubClient(
             api_key=decrypt_secret(account.api_key_encrypted),
             base_url=account.base_url,
-            ai_app_id=workflow_config.ai_app_id,
+            ai_app_id=ai_app_id,
             submission_type=adapter.submission_type,
         )
     except ValueError as exc:

@@ -37,6 +37,17 @@ class TaskStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class EnhancementStatus(str, Enum):
+    PENDING = "PENDING"
+    UPLOADING = "UPLOADING"
+    SUBMITTED = "SUBMITTED"
+    RUNNING = "RUNNING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    DOWNLOAD_FAILED = "DOWNLOAD_FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class AudioTaskStatus(str, Enum):
     PENDING = "PENDING"
     CLONING = "CLONING"
@@ -618,6 +629,11 @@ class GenerationTask(Base):
         cascade="all, delete-orphan",
         order_by="GenerationTaskAttempt.attempt_number",
     )
+    enhancement: Mapped[Optional["GenerationTaskEnhancement"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     __table_args__ = (
         Index(
@@ -685,6 +701,127 @@ class GenerationTaskAttempt(Base):
             "generation_task_id",
             "attempt_number",
             name="uq_generation_task_attempt_number",
+        ),
+    )
+
+
+class GenerationTaskEnhancement(Base):
+    """Durable one-to-one SeedVR2 stage for one digital-human segment."""
+
+    __tablename__ = "generation_task_enhancements"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    generation_task_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="runninghub"
+    )
+    workflow_kind: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="seedvr2_upscale"
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=EnhancementStatus.PENDING.value, index=True
+    )
+    source_result_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    source_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    source_output_metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    remote_task_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True, unique=True, index=True
+    )
+    execution_account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("runninghub_execution_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    result_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    result_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    result_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    result_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    output_metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    failed_reason_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    usage_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    auto_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    auto_retry_after: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    task: Mapped[GenerationTask] = relationship(back_populates="enhancement")
+    execution_account: Mapped[Optional[RunningHubExecutionAccount]] = relationship()
+    attempts: Mapped[list["GenerationTaskEnhancementAttempt"]] = relationship(
+        back_populates="enhancement",
+        cascade="all, delete-orphan",
+        order_by="GenerationTaskEnhancementAttempt.attempt_number",
+    )
+
+
+class GenerationTaskEnhancementAttempt(Base):
+    """Immutable account binding and outcome for one SeedVR2 submission attempt."""
+
+    __tablename__ = "generation_task_enhancement_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    enhancement_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_task_enhancements.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("runninghub_execution_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    remote_task_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True, unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="RESERVED", index=True
+    )
+    payload_summary_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    failed_reason_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    enhancement: Mapped[GenerationTaskEnhancement] = relationship(
+        back_populates="attempts"
+    )
+    execution_account: Mapped[Optional[RunningHubExecutionAccount]] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "enhancement_id",
+            "attempt_number",
+            name="uq_generation_task_enhancement_attempt_number",
         ),
     )
 

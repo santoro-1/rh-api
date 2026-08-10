@@ -7,6 +7,10 @@ from app.config import Settings
 from app.models import GenerationBatchItem, GenerationTask, TaskStatus
 from app.services.speech.async_outputs import load_subtitle_cues
 from app.services.storage import safe_relative_path
+from app.services.video_enhancement import (
+    task_processing_stage,
+    task_quality_variant,
+)
 
 
 AUTO_POSTPROCESS = "AUTO_POSTPROCESS"
@@ -132,6 +136,16 @@ def postproduction_manifest(
                 "status": task.status,
                 "download_url": f"/api/tasks/{task.id}/download",
                 "preview_url": f"/api/tasks/{task.id}/preview",
+                "source_download_url": (
+                    f"/api/tasks/{task.id}/source-video"
+                    if task.workflow_type == "digital_human" and task.enhancement is not None
+                    else None
+                ),
+                "processing_stage": task_processing_stage(task),
+                "enhancement_status": (
+                    task.enhancement.status if task.enhancement is not None else None
+                ),
+                "quality_variant": task_quality_variant(task),
                 "script_text": segment.script_text if segment is not None else "",
                 "start_seconds": segment.start_seconds if segment is not None else 0.0,
                 "end_seconds": segment.end_seconds if segment is not None else task.audio_duration_seconds,

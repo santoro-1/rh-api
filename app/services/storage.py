@@ -195,3 +195,25 @@ def create_download_target(
     directory = task_output_dir(settings, user_id, task_id)
     directory.mkdir(parents=True, exist_ok=True)
     return directory / f"result.{extension}"
+
+
+def create_source_download_target(
+    settings: Settings, user_id: int, task_id: str, extension: str
+) -> Path:
+    extension = extension.lower().lstrip(".")
+    if extension not in {"mp4", "webm", "mov"}:
+        extension = "mp4"
+    directory = task_output_dir(settings, user_id, task_id) / "source"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"digital-human.{extension}"
+
+
+def create_enhanced_download_target(
+    settings: Settings, user_id: int, task_id: str, extension: str
+) -> Path:
+    extension = extension.lower().lstrip(".")
+    if extension not in {"mp4", "webm", "mov"}:
+        extension = "mp4"
+    directory = task_output_dir(settings, user_id, task_id) / "enhanced"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"seedvr2.{extension}"

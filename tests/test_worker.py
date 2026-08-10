@@ -6,11 +6,18 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.database import SessionLocal
-from app.models import GenerationTask, TaskStatus, WorkflowConfig
+from app.models import (
+    EnhancementStatus,
+    GenerationTask,
+    GenerationTaskEnhancement,
+    TaskStatus,
+    WorkflowConfig,
+)
 from app.config import get_settings
 from app.services.runninghub import RunningHubError
 from app.services.security import encrypt_secret
 from app.services.storage import to_relative_data_path
+from app.services.task_management import prepare_task_retry
 from app.workers import task_worker
 from app.workflows import get_workflow
 from app.workflows.base import WorkflowAsset
@@ -30,6 +37,8 @@ class FakeRunningHub:
         query_error: bool = False,
         cancel_error: bool = False,
         query_result: dict | None = None,
+        query_results: dict[str, dict] | None = None,
+        download_failures: int = 0,
     ):
         self.submissions = 0
         self.query_calls = 0
@@ -43,6 +52,9 @@ class FakeRunningHub:
         self.query_error = query_error
         self.cancel_error = cancel_error
         self.query_result = query_result
+        self.query_results = query_results or {}
+        self.download_failures = download_failures
+        self.download_calls = 0
         self.cancel_calls = 0
 
     def get_account_current_task_count(self):
@@ -80,6 +92,7 @@ class FakeRunningHub:
             )
         self.submissions += 1
         self.last_payload = payload
+        self.last_submission_ai_app_id = self.ai_app_id
         assert payload["instanceType"] in {"default", "plus"}
         assert payload["usePersonalQueue"] is False
         assert "retainSeconds" not in payload
@@ -94,6 +107,8 @@ class FakeRunningHub:
                 "查询任务失败：Task not found | 任务不存在或已过期",
                 error_code="1004",
             )
+        if task_id in self.query_results:
+            return self.query_results[task_id]
         if self.query_result is not None:
             return self.query_result
         return {"taskId": task_id, "status": "RUNNING", "usage": None}
@@ -105,6 +120,14 @@ class FakeRunningHub:
                 "取消 RunningHub 任务时网络请求失败",
                 diagnostics={"runninghub_operation": "task_cancel"},
             )
+
+    def download_result(self, url, destination):
+        self.download_calls += 1
+        if self.download_failures > 0:
+            self.download_failures -= 1
+            raise RunningHubError("下载生成结果时网络请求失败")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"\x00\x00\x00\x18ftypisomseedvr2-video")
 
 
 @pytest.fixture(autouse=True)
@@ -701,3 +724,236 @@ def test_worker_submits_ltx_task_to_workflow_endpoint(monkeypatch):
     assert fake.submission_type == "workflow"
     assert fake.last_payload["instanceType"] == "plus"
     assert fake.last_payload["accessPassword"] == "private-workflow-password"
+
+
+def test_digital_human_success_runs_one_seedvr2_48g_stage(monkeypatch):
+    user = create_user("seedvr2-pipeline-user")
+    _add_task(
+        user.id,
+        "seedvr2-pipeline-task",
+        TaskStatus.RUNNING.value,
+        "digital-human-remote-id",
+    )
+    fake = FakeRunningHub(
+        query_results={
+            "digital-human-remote-id": {
+                "taskId": "digital-human-remote-id",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "nodeId": "digital-output",
+                        "outputType": "mp4",
+                        "url": "https://x/digital.mp4",
+                    }
+                ],
+            },
+            "submitted-remote-id": {
+                "taskId": "submitted-remote-id",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "nodeId": "seed-output",
+                        "outputType": "mp4",
+                        "url": "https://x/seedvr2.mp4",
+                    }
+                ],
+            },
+        }
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+
+    with SessionLocal() as db:
+        task_worker.process_task(db, "seedvr2-pipeline-task")
+        task = db.get(GenerationTask, "seedvr2-pipeline-task")
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.result_path is None
+        assert task.enhancement is not None
+        assert task.enhancement.status == EnhancementStatus.PENDING.value
+        source_path = get_settings().data_dir / task.enhancement.source_result_path
+        assert source_path.is_file()
+
+        task_worker.process_task(db, task.id)
+        db.expire_all()
+        task = db.get(GenerationTask, task.id)
+        assert task.enhancement.remote_task_id == "submitted-remote-id"
+        assert task.enhancement.status == EnhancementStatus.SUBMITTED.value
+        assert fake.last_submission_ai_app_id == "2064116518987845634"
+        assert fake.last_payload["instanceType"] == "plus"
+        assert fake.last_payload["usePersonalQueue"] is False
+        nodes = {
+            node["nodeId"]: node["fieldValue"]
+            for node in fake.last_payload["nodeInfoList"]
+        }
+        assert nodes["108"] == "1"
+        assert nodes["112"] == "1920"
+
+        task_worker.process_task(db, task.id)
+        db.expire_all()
+        task = db.get(GenerationTask, task.id)
+        assert task.status == TaskStatus.SUCCESS.value
+        assert task.runninghub_task_id == "digital-human-remote-id"
+        assert task.enhancement.status == EnhancementStatus.SUCCESS.value
+        assert task.result_path == task.enhancement.result_path
+        assert task.enhancement.source_result_path != task.result_path
+        assert (get_settings().data_dir / task.result_path).is_file()
+        assert len(task.enhancement.attempts) == 1
+        assert task.enhancement.attempts[0].remote_task_id == "submitted-remote-id"
+
+    assert fake.submissions == 1
+    assert fake.download_calls == 2
+
+
+def test_seedvr2_remote_id_is_queried_without_resubmission(monkeypatch):
+    user = create_user("seedvr2-idempotent-user")
+    settings = get_settings()
+    source = settings.outputs_dir / str(user.id) / "seed-idempotent" / "source" / "digital.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"\x00\x00\x00\x18ftypisomsource")
+    _add_task(
+        user.id,
+        "seed-idempotent",
+        TaskStatus.RUNNING.value,
+        "digital-complete-id",
+    )
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "seed-idempotent")
+        task.enhancement = GenerationTaskEnhancement(
+            id="seed-idempotent-enhancement",
+            generation_task_id=task.id,
+            status=EnhancementStatus.SUBMITTED.value,
+            source_result_path=to_relative_data_path(source, settings),
+            remote_task_id="existing-seed-id",
+            submitted_at=datetime.now(timezone.utc),
+        )
+        db.commit()
+
+    fake = FakeRunningHub(
+        query_results={
+            "existing-seed-id": {
+                "taskId": "existing-seed-id",
+                "status": "RUNNING",
+            }
+        }
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    with SessionLocal() as db:
+        task_worker.process_task(db, "seed-idempotent")
+        task_worker.process_task(db, "seed-idempotent")
+        task = db.get(GenerationTask, "seed-idempotent")
+        assert task.enhancement.remote_task_id == "existing-seed-id"
+        assert task.enhancement.status == EnhancementStatus.RUNNING.value
+    assert fake.query_calls == 2
+    assert fake.submissions == 0
+
+
+def test_seedvr2_download_retry_does_not_resubmit_paid_task(monkeypatch):
+    user = create_user("seedvr2-download-user")
+    settings = get_settings()
+    source = settings.outputs_dir / str(user.id) / "seed-download" / "source" / "digital.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"\x00\x00\x00\x18ftypisomsource")
+    _add_task(
+        user.id,
+        "seed-download",
+        TaskStatus.RUNNING.value,
+        "digital-complete-download-id",
+    )
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "seed-download")
+        task.enhancement = GenerationTaskEnhancement(
+            id="seed-download-enhancement",
+            generation_task_id=task.id,
+            status=EnhancementStatus.SUBMITTED.value,
+            source_result_path=to_relative_data_path(source, settings),
+            remote_task_id="successful-seed-id",
+            submitted_at=datetime.now(timezone.utc),
+        )
+        db.commit()
+
+    fake = FakeRunningHub(
+        download_failures=1,
+        query_results={
+            "successful-seed-id": {
+                "taskId": "successful-seed-id",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "outputType": "mp4",
+                        "url": "https://x/seedvr2.mp4",
+                    }
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    with SessionLocal() as db:
+        task_worker.process_task(db, "seed-download")
+        task = db.get(GenerationTask, "seed-download")
+        assert task.status == TaskStatus.DOWNLOAD_FAILED.value
+        assert task.enhancement.status == EnhancementStatus.DOWNLOAD_FAILED.value
+        prepare_task_retry(task, settings)
+        db.commit()
+        task_worker.process_task(db, task.id)
+        db.expire_all()
+        task = db.get(GenerationTask, task.id)
+        assert task.status == TaskStatus.SUCCESS.value
+        assert task.enhancement.remote_task_id == "successful-seed-id"
+    assert fake.submissions == 0
+    assert fake.download_calls == 2
+
+
+def test_seedvr2_failure_retries_only_saved_source_stage(monkeypatch):
+    user = create_user("seedvr2-failed-stage-user")
+    settings = get_settings()
+    source = settings.outputs_dir / str(user.id) / "seed-failed" / "source" / "digital.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"\x00\x00\x00\x18ftypisomsource")
+    _add_task(
+        user.id,
+        "seed-failed",
+        TaskStatus.RUNNING.value,
+        "successful-digital-human-id",
+    )
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "seed-failed")
+        task.enhancement = GenerationTaskEnhancement(
+            id="seed-failed-enhancement",
+            generation_task_id=task.id,
+            status=EnhancementStatus.RUNNING.value,
+            source_result_path=to_relative_data_path(source, settings),
+            remote_task_id="failed-seedvr2-id",
+            submitted_at=datetime.now(timezone.utc),
+        )
+        db.commit()
+
+    fake = FakeRunningHub(
+        query_results={
+            "failed-seedvr2-id": {
+                "taskId": "failed-seedvr2-id",
+                "status": "FAILED",
+                "errorCode": "805",
+                "errorMessage": "SeedVR2 显存任务失败",
+            }
+        }
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    with SessionLocal() as db:
+        task_worker.process_task(db, "seed-failed")
+        task = db.get(GenerationTask, "seed-failed")
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.runninghub_task_id == "successful-digital-human-id"
+        assert task.enhancement.status == EnhancementStatus.PENDING.value
+        assert task.enhancement.remote_task_id is None
+        assert task.enhancement.auto_retry_count == 1
+        task.enhancement.auto_retry_after = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+
+        task_worker.process_task(db, task.id)
+        db.expire_all()
+        task = db.get(GenerationTask, task.id)
+        assert task.runninghub_task_id == "successful-digital-human-id"
+        assert task.enhancement.remote_task_id == "submitted-remote-id"
+        assert task.enhancement.status == EnhancementStatus.SUBMITTED.value
+
+    assert fake.submissions == 1
+    assert fake.upload_calls == 1

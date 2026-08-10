@@ -50,6 +50,11 @@ from app.services.task_management import (
     prepare_task_retry,
 )
 from app.services.runninghub import RunningHubError
+from app.services.video_enhancement import (
+    task_processing_stage,
+    task_quality_variant,
+    task_status_text,
+)
 from app.services.task_cancellation import (
     TaskCancellationError,
     cancel_generation_task,
@@ -87,7 +92,10 @@ BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def _task_query():
-    return select(GenerationTask).options(selectinload(GenerationTask.user))
+    return select(GenerationTask).options(
+        selectinload(GenerationTask.user),
+        selectinload(GenerationTask.enhancement),
+    )
 
 
 def _beijing_date_boundary(value: date) -> datetime:
@@ -129,11 +137,38 @@ def _task_attempt_history(task: GenerationTask) -> list[dict]:
 
 
 def _serialize_task(task: GenerationTask) -> dict:
+    enhancement = task.enhancement
+    fallback_status = STATUS_LABELS.get(task.status, task.status)
+    auto_retry_count = (
+        enhancement.auto_retry_count
+        if enhancement is not None
+        and enhancement.status != "SUCCESS"
+        else task.runninghub_auto_retry_count
+    )
+    auto_retry_after = (
+        enhancement.auto_retry_after
+        if enhancement is not None
+        and enhancement.status != "SUCCESS"
+        else task.runninghub_auto_retry_after
+    )
     return {
         "taskId": task.id,
-        "runninghubTaskId": task.runninghub_task_id,
+        "runninghubTaskId": (
+            enhancement.remote_task_id
+            if enhancement is not None and enhancement.remote_task_id
+            else task.runninghub_task_id
+        ),
+        "digitalHumanTaskId": task.runninghub_task_id,
+        "enhancementTaskId": (
+            enhancement.remote_task_id if enhancement is not None else None
+        ),
         "status": task.status,
-        "statusText": STATUS_LABELS.get(task.status, task.status),
+        "statusText": task_status_text(task, fallback_status),
+        "processingStage": task_processing_stage(task),
+        "enhancementStatus": (
+            enhancement.status if enhancement is not None else None
+        ),
+        "qualityVariant": task_quality_variant(task),
         "createdAt": task.created_at.isoformat(),
         "updatedAt": task.updated_at.isoformat(),
         "completedAt": task.completed_at.isoformat() if task.completed_at else None,
@@ -141,14 +176,19 @@ def _serialize_task(task: GenerationTask) -> dict:
         "errorMessage": task.error_message,
         "failedReason": _task_failed_reason(task),
         "attemptHistory": _task_attempt_history(task),
-        "autoRetryCount": task.runninghub_auto_retry_count,
+        "autoRetryCount": auto_retry_count,
         "autoRetryLimit": get_settings().runninghub_auto_retry_limit,
         "autoRetryAfter": (
-            task.runninghub_auto_retry_after.isoformat()
-            if task.runninghub_auto_retry_after
+            auto_retry_after.isoformat()
+            if auto_retry_after
             else None
         ),
         "workflowType": task.workflow_type,
+        "sourceDownloadUrl": (
+            f"/api/tasks/{task.id}/source-video"
+            if task.workflow_type == DIGITAL_HUMAN_WORKFLOW and enhancement is not None
+            else None
+        ),
         "downloadUrl": (
             f"/api/tasks/{task.id}/download"
             if task.status == TaskStatus.SUCCESS.value and task.result_path
@@ -612,15 +652,28 @@ def task_source_video(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     ensure_task_access(task, current_user)
-    if task.workflow_type != LTX_LIP_SYNC_WORKFLOW:
+    if task.workflow_type == DIGITAL_HUMAN_WORKFLOW:
+        if task.enhancement is None:
+            raise HTTPException(status_code=404, detail="数字人源片段不存在")
+        relative_path = task.enhancement.source_result_path
+    elif task.workflow_type == LTX_LIP_SYNC_WORKFLOW:
+        relative_path = task.image_path
+    else:
         raise HTTPException(status_code=404, detail="源视频不存在")
     try:
-        path = safe_relative_path(task.image_path, get_settings().data_dir)
+        path = safe_relative_path(relative_path, get_settings().data_dir)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="源视频不存在") from exc
     if not path.is_file():
         raise HTTPException(status_code=404, detail="源视频不存在")
-    return FileResponse(path)
+    if task.workflow_type == DIGITAL_HUMAN_WORKFLOW:
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            filename=f"source-{task.id}{path.suffix}",
+            content_disposition_type="attachment",
+        )
+    return FileResponse(path, media_type="video/mp4")
 
 
 @router.get("/api/tasks/{task_id}/download")

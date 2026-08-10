@@ -6,6 +6,14 @@
 > 不能单独作为当前实现依据。当前架构、状态机、开发、测试和部署总说明统一见
 > [`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md)；具体行为以代码和 Alembic 迁移为准。
 
+> 2026-08-10 当前事实：迁移头已为 `0029_seedvr2_video_enhancement`。所有现行数字人
+> 新旧入口均在每个数字人分段后执行一次固定 `plus`（48G）的 SeedVR2 清晰化；父任务、
+> 页面、合并和新版工作台默认使用清晰结果，数字人源片段另行保留。历史已完成任务不
+> 自动补跑，LTX 不接入。完整 mock 回归为数字人 `288 passed`、工作台 `369 passed`。
+> 2026-08-10 经用户授权的 5 秒真实付费冒烟已通过：数字人 576×1024，SeedVR2
+> 1080×1920，最终节点 `97/mp4`，音轨和 4.84 秒时长均保留。生产发布状态以安全发布脚本
+> 的现场 commit、迁移和健康检查为准。
+
 ## 0. 当前进度快照
 
 当前代码支持 **“主站持久化调度 + Windows 独立媒体节点处理长音频”**。是否已将某个
@@ -137,8 +145,10 @@
 - 管理员可以按用户启用 LTX 工作流、配置 Workflow ID、实例类型和默认提示词。
 - RunningHub 客户端支持 AI App 与私有 Workflow 两种 V2 提交端点。
 - 视频上传支持 MP4、MOV、WEBM，默认大小上限由 `MAX_VIDEO_SIZE_MB=500` 控制。
-- 统一生成页在两个工作流表单外提供任务级实例选择；数字人固定普通版 `default`（24G），LTX 可选 `default` 或 `plus`，选择随任务保存并由 Worker 使用。
-- 管理员页面不再提供重复的数字人实例选择；账户级旧字段固定保留 `default` 作为兼容值，实际新任务以创建页面选择为准。
+- 统一生成页支持数字人和 LTX；数字人适配器固定 `plus`（48G），并在成功后接续同为
+  `plus`（48G）的 SeedVR2。LTX 仍可独立选择 `default` 或 `plus`。
+- 管理员页面不提供数字人实例选择；历史配方即使保存 `default`，提交数字人和 SeedVR2 时
+  也会按当前策略固定为 `plus`。
 - 用户界面将 `ltx_lip_sync` 简称为“视频对口型”，实例选项显示为“Stand 运行（24G）”与“Plus 运行（48G）”，不展示 API 文档或 Worker 实现说明。
 - 所有 POST 表单和任务 API 均使用 Session 内的 CSRF Token 校验；登录成功后保留并继续使用当前 Token。
 - 生产配置会强制校验随机 `APP_SECRET_KEY`、有效 Fernet Key、`COOKIE_SECURE=true` 和明确的 `ALLOWED_HOSTS`，拒绝通配可信域名。
@@ -202,7 +212,7 @@ AI App ID 默认值：`2062251097452007426`（可由管理员为用户配置）�
 数字人实例类型：
 
 ```text
-固定 instanceType = default（24G）
+固定 instanceType = plus（48G）
 usePersonalQueue = false
 不传 retainSeconds
 ```
@@ -497,7 +507,8 @@ python -m scripts.create_admin admin
 
 2026-07-25 已将以下三部分作为同一次版本更新提交并推送到现有仓库：
 
-1. 数字人取消旧总体模式并固定 Stand 24G。
+1. 当时数字人取消旧总体模式并固定 Stand 24G；此项已在 2026-08-09 后被当前
+   Plus 48G 策略取代。
 2. 新增视频对口型工作流和按用户并发调度的持久化 FIFO 队列。
 3. 新增生产安全加固与 Ubuntu 单服务器部署前准备。
 

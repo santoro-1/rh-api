@@ -9,6 +9,10 @@ from app.services.security import encrypt_secret
 from app.services.workflow_configs import get_user_workflow_config
 from app.workflows import get_workflow, list_workflows
 from app.workflows.base import WorkflowAsset
+from app.workflows.seedvr2_upscale import (
+    SEEDVR2_AI_APP_ID,
+    seedvr2_upscale_workflow,
+)
 from app.workflows.digital_human import generation_tail_padding_seconds
 
 
@@ -104,6 +108,48 @@ def test_digital_human_adapter_upgrades_legacy_default_recipe_to_plus():
     )
 
     assert payload["instanceType"] == "plus"
+
+
+def test_seedvr2_adapter_is_fixed_to_48g_and_maps_video_nodes():
+    payload = seedvr2_upscale_workflow.build_payload("openapi/source.mp4")
+    assert SEEDVR2_AI_APP_ID == "2064116518987845634"
+    assert payload["instanceType"] == "plus"
+    assert payload["usePersonalQueue"] is False
+    nodes = {
+        (node["nodeId"], node["fieldName"]): node["fieldValue"]
+        for node in payload["nodeInfoList"]
+    }
+    assert nodes[("46", "video")] == "openapi/source.mp4"
+    assert nodes[("108", "select")] == "1"
+    assert nodes[("112", "value")] == "1920"
+
+
+def test_seedvr2_adapter_requires_one_unambiguous_video_output():
+    output = seedvr2_upscale_workflow.select_output(
+        {
+            "results": [
+                {"outputType": "png", "url": "https://x/preview.png"},
+                {
+                    "nodeId": "200",
+                    "outputType": "mp4",
+                    "url": "https://x/final.mp4",
+                },
+            ]
+        }
+    )
+    assert output is not None
+    assert output.url == "https://x/final.mp4"
+    assert seedvr2_upscale_workflow.select_output(
+        {"results": [{"outputType": "png", "url": "https://x/preview.png"}]}
+    ) is None
+    assert seedvr2_upscale_workflow.select_output(
+        {
+            "results": [
+                {"outputType": "mp4", "url": "https://x/a.mp4"},
+                {"outputType": "mov", "url": "https://x/b.mov"},
+            ]
+        }
+    ) is None
 
 
 def test_digital_human_adapter_maps_dual_person_audio_and_selected_modes():

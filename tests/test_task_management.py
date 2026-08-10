@@ -5,7 +5,12 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import GenerationTask, TaskStatus
+from app.models import (
+    EnhancementStatus,
+    GenerationTask,
+    GenerationTaskEnhancement,
+    TaskStatus,
+)
 from app.services.storage import task_output_dir, task_upload_dir
 from app.services.runninghub import RunningHubError
 from scripts import cleanup_files
@@ -261,6 +266,45 @@ def test_remote_cancel_failure_preserves_running_state(client, monkeypatch):
         task = db.get(GenerationTask, task_id)
         assert task.status == TaskStatus.RUNNING.value
         assert task.runninghub_task_id == "remote-still-running"
+
+
+def test_running_seedvr2_stage_cancels_only_enhancement_remote_task(
+    client, monkeypatch
+):
+    task_id = _create_digital_task(client, monkeypatch, "cancel-seedvr2-user")
+    settings = get_settings()
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, task_id)
+        source = task_output_dir(settings, task.user_id, task.id) / "source" / "digital.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"digital-source")
+        task.status = TaskStatus.RUNNING.value
+        task.runninghub_task_id = "completed-digital-human-id"
+        task.enhancement = GenerationTaskEnhancement(
+            id="cancel-seedvr2-enhancement",
+            generation_task_id=task.id,
+            status=EnhancementStatus.RUNNING.value,
+            source_result_path=source.relative_to(settings.data_dir).as_posix(),
+            remote_task_id="active-seedvr2-id",
+        )
+        db.commit()
+
+    calls = []
+    monkeypatch.setattr(
+        "app.services.task_cancellation.RunningHubClient.cancel_task",
+        lambda _self, remote_id: calls.append(remote_id),
+    )
+    response = client.post(
+        f"/tasks/{task_id}/cancel",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert calls == ["active-seedvr2-id"]
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.CANCELLED.value
+        assert task.runninghub_task_id == "completed-digital-human-id"
+        assert task.enhancement.status == EnhancementStatus.CANCELLED.value
 
 
 def test_task_history_filters_by_beijing_date(client, monkeypatch):
