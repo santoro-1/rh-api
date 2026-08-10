@@ -31,7 +31,9 @@ SCRIPT = "那么通过八十四天"
 
 
 def _valid_payload() -> dict[str, Any]:
-    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["title"] = {"line_1": "减脂真相", "line_2": "坚持才是关键"}
+    return payload
 
 
 def _provider_payload(
@@ -46,6 +48,7 @@ def _provider_payload(
             "allow_after": allow_after or [],
         },
         "visual_plan": [],
+        "title": {"line_1": "减脂真相", "line_2": "坚持才是关键"},
     }
 
 
@@ -171,8 +174,9 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
         "music_intent",
         "subtitle_breaks",
         "visual_plan",
+        "title",
     ]
-    assert "一次完成 music_intent、subtitle_breaks、visual_plan 三项任务" in system_prompt
+    assert "一次完成 music_intent、subtitle_breaks、visual_plan、title 四项任务" in system_prompt
     assert "每项仅含 anchor_id、concept_id、priority" in system_prompt
     assert "anchor.usage=enrichment" in system_prompt
     assert "绝不能为了丰富性强行填充" in system_prompt
@@ -219,6 +223,25 @@ def test_subtitle_failure_does_not_discard_valid_music() -> None:
     assert result["subtitle_units"] is None
     assert result["errors"]["subtitle"]["code"] == "SUBTITLE_TEXT_MISMATCH"
     assert result["cacheable"] is True
+
+
+def test_title_failure_is_isolated_from_music_subtitle_and_visual_results() -> None:
+    user_id = _configured_user("partial-title")
+    payload = _provider_payload()
+    payload["title"] = {"line_1": "一二三四五六", "line_2": "坚持才是关键"}
+    fake = FakeArkClient([_ark_response(payload)])
+
+    result = _analyze(user_id, fake)
+
+    assert result["overall_status"] == "PARTIAL"
+    assert result["music_analysis_status"] == "SUCCESS"
+    assert result["subtitle_analysis_status"] == "SUCCESS"
+    assert result["visual_analysis_status"] == "SUCCESS"
+    assert result["title_analysis_status"] == "FAILED"
+    assert result["title"] is None
+    assert result["errors"]["title"]["code"] == "TITLE_SCHEMA_INVALID"
+    assert result["cacheable"] is True
+    assert len(fake.calls) == 1
 
 
 def test_subtitle_mismatch_debug_snapshot_is_explicitly_opt_in(
@@ -350,7 +373,7 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
     system_prompt = messages[0]["content"]
 
     assert len(messages) == 2
-    assert "一次完成 music_intent、subtitle_breaks、visual_plan 三项任务" in system_prompt
+    assert "一次完成 music_intent、subtitle_breaks、visual_plan、title 四项任务" in system_prompt
     assert "长脚本也不能" in system_prompt
     assert "不得超过 13 个全角中文字符等效宽度" in system_prompt
     assert "13 是上限，不是固定长度" in system_prompt
@@ -376,7 +399,7 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
         "prefer_after": [6],
         "allow_after": [],
     }
-    _, example_units, visual_plan = parse_content_analysis_provider_payload(
+    _, example_units, visual_plan, title = parse_content_analysis_provider_payload(
         example_payload,
         original_script="百分之八十四是由呼吸离开身体的",
     )
@@ -385,6 +408,8 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
         "是由呼吸离开身体的",
     ]
     assert visual_plan == []
+    assert title.line_1 == "减脂真相"
+    assert title.line_2 == "坚持才是关键"
 
 
 def test_one_call_visual_plan_uses_only_offered_local_candidates() -> None:

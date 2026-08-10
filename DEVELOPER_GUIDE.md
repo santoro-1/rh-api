@@ -304,9 +304,10 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0029_seedvr2_video_enhancement`。统一内容分析缓存从
-`0022_content_analysis_cache` 开始，`0028` 扩展统一视觉计划字段和缓存键；`0029` 只新增
-数字人清晰化与尝试表，不重建 `generation_tasks`，历史已完成任务不自动补跑。
+当前迁移头为 `0030_content_analysis_title`。统一内容分析缓存从
+`0022_content_analysis_cache` 开始，`0028` 扩展统一视觉计划字段和缓存键，`0029` 新增
+数字人清晰化与尝试表；`0030` 只在内容分析缓存增加独立标题状态、结果和错误字段。
+历史已完成数字人任务仍不自动补跑 SeedVR2。
 SQLite 启用 WAL、外键和 busy timeout，设计目标
 是一个 Web 加三个本地 Worker 的单服务器部署，不是多主集群。
 
@@ -462,10 +463,10 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 
 - 权威代码位于 `app/services/content_analysis/`，契约版本为
   `jyd.content-analysis.v1`。
-- 对工作台公开的响应包含 `music_intent`、`subtitle_units` 和 `visual_plan`；内部 Ark 响应
-  使用紧凑的 `jyd.content-analysis.provider.v3`，只返回音乐意图、字幕断点编号与选中的
-  `anchor_id`/`concept_id`/`priority`。服务端按原脚本本地切片，并校验视觉项只能引用请求中
-  提供的候选。模型不返回视觉时间、素材身份或呈现参数。
+- 对工作台公开的响应包含 `music_intent`、`subtitle_units`、`visual_plan` 和唯一两行 `title`；
+  内部 Ark 响应使用紧凑的 `jyd.content-analysis.provider.v4`，一次返回音乐意图、字幕断点编号、
+  选中的 `anchor_id`/`concept_id`/`priority` 与标题。服务端按原脚本本地切片，并校验视觉项只能
+  引用请求中提供的候选。模型不返回视觉时间、素材身份或呈现参数。
 - `subtitle_units` 使用 Python Unicode code point 的左闭右开字符位置，必须首尾相接、
   完整覆盖原始脚本，且每段满足 `original_script[start:end] == text`。
 - 模型不得返回字幕时间戳或本地音乐文件身份。MiniMax 时间轴映射、真实字体测宽和本地
@@ -498,13 +499,16 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - `POST /api/workbench/content-analysis` 使用现有工作台短期令牌，接收精确原始脚本、可选
   `force_refresh` 和可选 `visual_context`；后者只含 catalog 版本、概念说明、原文字符锚点、
   短语上下文及 `explicit/enrichment` 用途，禁止素材路径、时间戳及剪映轨道信息。浏览器和
-  工作台不会获得 Ark Key。Prompt v8 要求 enrichment 仅在与上下文高度相关时以 priority 2
-  返回，唯一可选或勉强相关都必须跳过；provider 输出仍只有三字段。
+  工作台不会获得 Ark Key。Prompt v9 要求 enrichment 仅在与上下文高度相关时以 priority 2
+  返回，唯一可选或勉强相关都必须跳过；同一次调用增加 `title` 第四字段，第一行最多 5 字、
+  第二行最多 14 字，禁止空白、重复、空洞标题党和脚本外事实。
 - `app/services/content_analysis/analysis.py` 负责固定 Prompt、Ark JSON Schema、响应提取、
-  音乐、字幕与视觉分支独立校验、确定性字符索引修复、成功分支保护和脱敏状态日志。
+  音乐、字幕、视觉与标题分支独立校验、确定性字符索引修复、成功分支保护和脱敏状态日志。
 - 迁移 `0028_unified_content_visual_plan` 在原缓存上增加视觉状态与结果，并把 catalog 版本和
   visual context SHA-256 纳入缓存键。缓存不保存豆包原始完整响应；完整失败不形成粘性缓存，部分成功和完整
   成功可复用，强制刷新失败不得覆盖此前合法分支。
+- 迁移 `0030_content_analysis_title` 增加标题分支缓存。标题只生成一份，工作台把同一
+  `line_1/line_2` 映射到封面和视频顶部，不增加第二次 Ark 调用。
 - 迁移 `0023_batch_correlation_id` 为批次增加独立日志关联号；历史批次用批次 ID 回填，
   新工作台传入的关联号会被语音、媒体和视频 Worker 持续继承。不得用 `request_key`
   替代 `correlation_id`。

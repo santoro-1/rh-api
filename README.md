@@ -102,11 +102,12 @@
 
 后续智能内容分析模块 1～8 已完成本地 mock 自动化闭环。本项目的
 `POST /api/workbench/content-analysis` 每次只接收一条精确脚本，并可接收不含路径和时间的
-本地视觉候选；一次 Ark 请求返回分别校验的 `music_intent`、无时间戳 `subtitle_units` 和
-三字段 `visual_plan`。工作台仍负责本地选材、MiniMax `raw_cues` 映射、时间调度、剪映写入、
-真实字体宽度排版和 46 首本地音乐唯一 Top1。跨项目测试会把本项目实际响应直接交给
+本地视觉候选；一次 Ark 请求返回分别校验的 `music_intent`、无时间戳 `subtitle_units`、
+三字段 `visual_plan` 和唯一两行 `title`。工作台仍负责本地选材、MiniMax `raw_cues` 映射、
+时间调度、剪映写入、标题到封面/顶部的同文映射、
+真实字体宽度排版和本地音乐唯一 Top1。跨项目测试会把本项目实际响应直接交给
 工作台消费。内容分析失败不得触发 MiniMax、RunningHub 或剪映，也不得使已有基础视频失效。
-完整 mock 回归为本项目 `216 passed`、工作台 `260 passed`；真实服务与生产发布仍需另行授权。
+真实服务与生产发布仍需另行授权。
 
 需要停止时双击 `停止系统.cmd`。管理员登录后可从“运行状态”页面查看四个服务的
 心跳、CPU、内存、磁盘、FFmpeg、语音/媒体/视频队列数量和最近日志。日志位于
@@ -329,7 +330,7 @@ RunningHub 已明确返回 `FAILED` 的视频任务默认自动重试 3 次，�
 - minimax_configs：一对一的 MiniMax 加密 API Key、稳定官方账号绑定、凭证指纹与调用节流配置；
   完全相同凭据的不同网站账号通过指纹共享自定义音色
 - ark_configs：一对一的豆包 Ark 加密 API Key、模型、启用状态、超时与有限重试配置
-- content_analysis_caches：按用户、脚本哈希、模型、契约和 Prompt 版本隔离的音乐/字幕分析缓存
+- content_analysis_caches：按用户、脚本哈希、模型、契约和 Prompt 版本隔离的音乐/字幕/视觉/标题分析缓存
 - minimax_voice_assets：该网站账号的临时声音样本和本地音色副本；同 Key 用户的自定义副本
   指向同一个 MiniMax provider voice ID，删除操作彼此隔离
 - audio_generation_tasks：完整脚本、已保存音色、异步 MiniMax 任务编号、句级时间轴、

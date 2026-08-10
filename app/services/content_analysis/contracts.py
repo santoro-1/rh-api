@@ -41,9 +41,9 @@ CONTENT_ANALYSIS_SCHEMA_VERSION = "jyd.content-analysis.v1"
 CONTENT_ANALYSIS_SCHEMA_ID = (
     "https://video.lanyingjk01.com/schemas/jyd.content-analysis.v1.json"
 )
-CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION = "jyd.content-analysis.provider.v3"
+CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION = "jyd.content-analysis.provider.v4"
 CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID = (
-    "https://video.lanyingjk01.com/schemas/jyd.content-analysis.provider.v3.json"
+    "https://video.lanyingjk01.com/schemas/jyd.content-analysis.provider.v4.json"
 )
 
 _LOCAL_PREFERRED_BREAK_CHARACTERS = frozenset("，。！？；：、,.!?;:\n\r")
@@ -239,12 +239,33 @@ class VisualPlanItem(ContractModel):
     priority: StrictInt = Field(ge=0, le=2)
 
 
+class ShortVideoTitle(ContractModel):
+    """One canonical two-line title shared by the cover and fixed video title."""
+
+    line_1: StrictStr = Field(min_length=1, max_length=5)
+    line_2: StrictStr = Field(min_length=1, max_length=14)
+
+    @field_validator("line_1", "line_2")
+    @classmethod
+    def reject_whitespace(cls, value: str) -> str:
+        if value != value.strip() or any(character.isspace() for character in value):
+            raise ValueError("title lines cannot contain whitespace")
+        return value
+
+    @model_validator(mode="after")
+    def reject_duplicate_lines(self) -> "ShortVideoTitle":
+        if self.line_1 == self.line_2:
+            raise ValueError("title lines must carry different information")
+        return self
+
+
 class ContentAnalysisProviderResult(ContractModel):
     """Compact one-call Ark response; infrastructure metadata stays server-side."""
 
     music_intent: MusicIntent
     subtitle_breaks: SubtitleBreakPlan
     visual_plan: list[VisualPlanItem] = Field(max_length=100)
+    title: ShortVideoTitle
 
 
 class ContentAnalysisContractError(ValueError):
@@ -532,7 +553,7 @@ def parse_content_analysis_provider_payload(
     *,
     original_script: str,
     visual_context: ContentVisualContext | None = None,
-) -> tuple[MusicIntent, list[SubtitleUnit], list[VisualPlanItem]]:
+) -> tuple[MusicIntent, list[SubtitleUnit], list[VisualPlanItem], ShortVideoTitle]:
     """Validate one complete compact provider response."""
 
     provider_result = ContentAnalysisProviderResult.model_validate(payload)
@@ -544,7 +565,13 @@ def parse_content_analysis_provider_payload(
         provider_result.visual_plan,
         visual_context=visual_context,
     )
-    return provider_result.music_intent, units, visual_plan
+    return provider_result.music_intent, units, visual_plan, provider_result.title
+
+
+def parse_short_video_title_payload(payload: Mapping[str, Any] | Any) -> ShortVideoTitle:
+    """Validate the sole two-line title returned by the provider."""
+
+    return ShortVideoTitle.model_validate(payload)
 
 
 def parse_content_visual_context(
@@ -671,7 +698,7 @@ def _inline_local_schema_refs(canonical: dict[str, Any]) -> dict[str, Any]:
 
 
 def content_analysis_provider_json_schema() -> dict[str, Any]:
-    """Return compact provider v3 schema with local refs inlined.
+    """Return compact provider v4 schema with local refs inlined.
 
     Ark selects subtitle boundaries and visual anchors but never echoes the script,
     timestamps, infrastructure metadata or local asset details.
@@ -679,5 +706,5 @@ def content_analysis_provider_json_schema() -> dict[str, Any]:
 
     schema = ContentAnalysisProviderResult.model_json_schema(mode="validation")
     schema["$id"] = CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID
-    schema["title"] = "JYD Content Analysis Provider v3"
+    schema["title"] = "JYD Content Analysis Provider v4"
     return _inline_local_schema_refs(schema)

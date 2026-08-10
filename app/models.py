@@ -280,9 +280,11 @@ class ContentAnalysisCache(Base):
     music_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
     subtitle_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
     visual_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    title_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False)
     music_intent_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     subtitle_units_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     visual_plan_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    title_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     music_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     music_error_summary: Mapped[Optional[str]] = mapped_column(
         String(500), nullable=True
@@ -295,6 +297,10 @@ class ContentAnalysisCache(Base):
     )
     visual_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     visual_error_summary: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    title_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    title_error_summary: Mapped[Optional[str]] = mapped_column(
         String(500), nullable=True
     )
     provider_request_id: Mapped[Optional[str]] = mapped_column(

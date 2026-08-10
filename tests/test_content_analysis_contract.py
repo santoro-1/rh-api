@@ -250,12 +250,13 @@ def test_schema_is_versioned_strict_and_provider_neutral() -> None:
 def test_provider_schema_returns_only_compact_three_branch_decisions() -> None:
     schema = content_analysis_provider_json_schema()
 
-    assert schema["$id"].endswith("jyd.content-analysis.provider.v3.json")
+    assert schema["$id"].endswith("jyd.content-analysis.provider.v4.json")
     assert schema["additionalProperties"] is False
     assert schema["required"] == [
         "music_intent",
         "subtitle_breaks",
         "visual_plan",
+        "title",
     ]
     serialized = json.dumps(schema, ensure_ascii=False)
     assert "schema_version" not in schema["properties"]

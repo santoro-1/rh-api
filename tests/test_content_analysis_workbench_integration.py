@@ -61,7 +61,9 @@ class _FakeArkClient:
 
 
 def _fixture_payload() -> dict[str, Any]:
-    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["title"] = {"line_1": "减脂真相", "line_2": "坚持才是关键"}
+    return payload
 
 
 def _provider_payload(*, prefer_after: list[int]) -> dict[str, Any]:
@@ -72,6 +74,7 @@ def _provider_payload(*, prefer_after: list[int]) -> dict[str, Any]:
             "allow_after": [],
         },
         "visual_plan": [],
+        "title": {"line_1": "减脂真相", "line_2": "坚持才是关键"},
     }
 
 
