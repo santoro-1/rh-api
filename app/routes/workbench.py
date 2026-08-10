@@ -348,14 +348,24 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
     elif item.merged_video_status == MERGE_FAILED:
         status = "COMPOSITION_FAILED"
     elif any(
-        task.status in {TaskStatus.FAILED.value, TaskStatus.DOWNLOAD_FAILED.value}
+        task.status
+        in {
+            TaskStatus.FAILED.value,
+            TaskStatus.DOWNLOAD_FAILED.value,
+            TaskStatus.CANCELLED.value,
+        }
         for task in tasks
     ):
         status = "COMPOSITION_FAILED"
         failed = next(
             task
             for task in tasks
-            if task.status in {TaskStatus.FAILED.value, TaskStatus.DOWNLOAD_FAILED.value}
+            if task.status
+            in {
+                TaskStatus.FAILED.value,
+                TaskStatus.DOWNLOAD_FAILED.value,
+                TaskStatus.CANCELLED.value,
+            }
         )
         error_message = failed.error_message or failed.runninghub_failed_reason
     elif any(

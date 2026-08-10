@@ -307,6 +307,33 @@ def test_workbench_composition_reports_video_enhancing_stage(client):
     assert response.json()["composition"]["enhancement_status"] == "RUNNING"
 
 
+def test_workbench_composition_reports_remote_cancel_as_retryable_failure(client):
+    _batch_id, item_id = _text_item(segment_count=3)
+    with SessionLocal() as db:
+        tasks = db.scalars(select(GenerationTask).order_by(GenerationTask.id)).all()
+        for task in tasks:
+            task.status = TaskStatus.CANCELLED.value
+            task.result_path = None
+            task.error_code = "REMOTE_TASK_NOT_FOUND"
+            task.error_message = "RunningHub 任务已被手动取消"
+        db.commit()
+
+    login_response = client.post(
+        "/api/auth/center/login",
+        json={"username": "postproduction-text-3", "password": "password123"},
+    )
+    response = client.post(
+        f"/api/workbench/tasks/{item_id}",
+        json={"access_token": login_response.json()["access_token"]},
+    )
+
+    assert response.status_code == 200
+    composition = response.json()["composition"]
+    assert composition["status"] == "COMPOSITION_FAILED"
+    assert composition["processing_stage"] == "COMPOSITION_FAILED"
+    assert composition["error_message"] == "RunningHub 任务已被手动取消"
+
+
 def test_workbench_backfills_seedvr2_from_saved_digital_human_results(client):
     _batch_id, item_id = _text_item(segment_count=2)
     settings = get_settings()
