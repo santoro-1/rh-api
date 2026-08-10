@@ -471,8 +471,10 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 ## 18. 统一内容分析接口与缓存（2026-08-06）
 
 - `POST /api/workbench/content-analysis` 使用现有工作台短期令牌，接收精确原始脚本、可选
-  `force_refresh` 和可选 `visual_context`；后者只含 catalog 版本、概念说明和原文字符锚点，
-  禁止素材路径、时间戳及剪映轨道信息。浏览器和工作台不会获得 Ark Key。
+  `force_refresh` 和可选 `visual_context`；后者只含 catalog 版本、概念说明、原文字符锚点、
+  短语上下文及 `explicit/enrichment` 用途，禁止素材路径、时间戳及剪映轨道信息。浏览器和
+  工作台不会获得 Ark Key。Prompt v8 要求 enrichment 仅在与上下文高度相关时以 priority 2
+  返回，唯一可选或勉强相关都必须跳过；provider 输出仍只有三字段。
 - `app/services/content_analysis/analysis.py` 负责固定 Prompt、Ark JSON Schema、响应提取、
   音乐、字幕与视觉分支独立校验、确定性字符索引修复、成功分支保护和脱敏状态日志。
 - 迁移 `0028_unified_content_visual_plan` 在原缓存上增加视觉状态与结果，并把 catalog 版本和

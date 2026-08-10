@@ -195,6 +195,8 @@ class VisualAnchor(ContractModel):
     char_start: StrictInt = Field(ge=0)
     char_end: StrictInt = Field(gt=0)
     text: StrictStr = Field(min_length=1)
+    context: StrictStr = Field(default="", max_length=120)
+    usage: Literal["explicit", "enrichment"] = "explicit"
     allowed_concepts: list[StrictStr] = Field(min_length=1, max_length=8)
 
     @model_validator(mode="after")
@@ -206,6 +208,8 @@ class VisualAnchor(ContractModel):
             raise ValueError("visual anchor id must match its character start")
         if len(self.allowed_concepts) != len(set(self.allowed_concepts)):
             raise ValueError("visual anchor concepts must be unique")
+        if self.context and self.text not in self.context:
+            raise ValueError("visual anchor context must contain its text")
         return self
 
 

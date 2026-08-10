@@ -174,6 +174,8 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     ]
     assert "一次完成 music_intent、subtitle_breaks、visual_plan 三项任务" in system_prompt
     assert "每项仅含 anchor_id、concept_id、priority" in system_prompt
+    assert "anchor.usage=enrichment" in system_prompt
+    assert "绝不能为了丰富性强行填充" in system_prompt
     assert "不返回时间戳" in system_prompt
 
 
@@ -399,6 +401,8 @@ def test_one_call_visual_plan_uses_only_offered_local_candidates() -> None:
                 "char_start": 2,
                 "char_end": 4,
                 "text": "通过",
+                "context": "通过步行改善状态",
+                "usage": "explicit",
                 "allowed_concepts": ["exercise.walk"],
             }
         ],

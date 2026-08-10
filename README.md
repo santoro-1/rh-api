@@ -355,4 +355,6 @@ Prompt 和契约版本独立缓存。接口不会接收本地素材路径或音�
 
 新统一链路通过 `/api/workbench/content-analysis` 的可选 `visual_context` 在同一次 Ark 调用中
 产生 `visual_plan`；工作台项目主流程已经完成阶段 2 切换，原视觉按钮也复用统一协调器。
-独立视觉接口暂不删除，仅作为迁移期兼容入口。
+visual context 输入锚点包含短语上下文和 `explicit/enrichment` 用途，但模型输出仍严格只有
+`anchor_id/concept_id/priority`；enrichment 仅允许高度相关的 priority 2 自动采用。独立视觉
+接口暂不删除，仅作为迁移期兼容入口。

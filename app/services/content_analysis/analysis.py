@@ -46,7 +46,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v7"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v8"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -159,6 +159,11 @@ def _system_prompt() -> str:
 
         visual_plan：
         - 只返回明确值得考虑的画面；未返回即跳过，允许返回空数组。
+        - anchor.usage=explicit 表示原文直接命中，context 用于识别复合词和否定语境；必须按完整
+          context 判断，不能把“鸡蛋糕”当成“鸡蛋”，也不能把宽泛词替换成错误的具体素材。
+        - anchor.usage=enrichment 只是可选空窗候选，并不表示 allowed_concepts 已与当前语义匹配。
+          只有 concept 与 context 高度相关时才可返回且必须 priority=2；只普通相关、勉强相关或
+          唯一可选时都不要返回。没有合格画面就保持空数组，绝不能为了丰富性强行填充。
         - 每项仅含 anchor_id、concept_id、priority。anchor 和 concept 必须来自 visual_context，且
           concept 必须属于该 anchor 的 allowed_concepts。
         - priority 只能为 0、1、2：2 为关键画面，1 为普通画面，0 为仅供人工审核。
