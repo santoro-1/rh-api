@@ -182,6 +182,23 @@ def test_submit_identifies_remote_capacity_limit():
     with pytest.raises(RunningHubError) as error:
         client.submit_task({"nodeInfoList": []})
     assert error.value.is_capacity_limited is True
+    assert error.value.submission_outcome_unknown is False
+
+
+def test_submit_network_failure_is_marked_as_outcome_unknown():
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "app-1",
+        FakeSession([requests.ReadTimeout("response lost after submit")]),
+    )
+
+    with pytest.raises(RunningHubError) as error:
+        client.submit_task({"nodeInfoList": []})
+
+    assert error.value.retry_safe is False
+    assert error.value.submission_outcome_unknown is True
+    assert error.value.log_details()["runninghub_operation"] == "task_submit"
 
 
 def test_query_identifies_remote_task_not_found():

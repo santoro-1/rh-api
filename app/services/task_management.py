@@ -9,6 +9,11 @@ from app.services.storage import (
     safe_relative_path,
     task_output_dir,
 )
+from app.services.runninghub_attempts import (
+    enhancement_has_uncertain_submission,
+    task_has_uncertain_submission,
+)
+from app.services.runninghub_dispatch import task_uses_execution_pool
 from app.workflows import get_workflow
 from app.workflows.base import resolve_asset_path
 
@@ -41,9 +46,17 @@ def prepare_task_retry(
 
     if task.status not in RETRYABLE_TASK_STATUSES:
         raise TaskManagementError("只有失败或已取消任务可以重新生成")
+    if task_has_uncertain_submission(task):
+        raise TaskManagementError(
+            "RunningHub 提交结果无法确认，禁止盲目重提；请管理员先在 RunningHub 核对远程任务"
+        )
     retry_time = now or datetime.now(timezone.utc)
     enhancement = task.enhancement
     if task.workflow_type == "digital_human" and enhancement is not None:
+        if enhancement_has_uncertain_submission(enhancement):
+            raise TaskManagementError(
+                "SeedVR2 提交结果无法确认，禁止重新提交；请管理员先核对原执行账号"
+            )
         try:
             source_path = safe_relative_path(
                 enhancement.source_result_path, settings.data_dir
@@ -107,6 +120,9 @@ def prepare_task_retry(
         task.result_path = None
         task.output_metadata = None
         task.status = TaskStatus.PENDING.value
+        if task_uses_execution_pool(task):
+            task.execution_account_id = None
+            task.execution_account = None
         # Retried work returns at the end of the shared per-user FIFO.
         task.created_at = retry_time
 
@@ -151,6 +167,9 @@ def prepare_successful_segment_regeneration(
     retry_time = now or datetime.now(timezone.utc)
     remove_directory(task_output_dir(settings, task.user_id, task.id))
     task.enhancement = None
+    if task_uses_execution_pool(task):
+        task.execution_account_id = None
+        task.execution_account = None
     task.runninghub_task_id = None
     task.runninghub_submitted_at = None
     task.runninghub_failed_reason = None

@@ -84,7 +84,10 @@ class FakeRunningHub:
 
     def submit_task(self, payload):
         if self.submit_network_error:
-            raise RunningHubError("提交 RunningHub 任务时网络请求失败")
+            raise RunningHubError(
+                "提交 RunningHub 任务时网络请求失败",
+                submission_outcome_unknown=True,
+            )
         if self.capacity_error:
             raise RunningHubError(
                 "提交任务失败：api queue limit reached, please retry later",
@@ -96,7 +99,11 @@ class FakeRunningHub:
         assert payload["instanceType"] in {"default", "plus"}
         assert payload["usePersonalQueue"] is False
         assert "retainSeconds" not in payload
-        return "submitted-remote-id"
+        return (
+            "submitted-remote-id"
+            if self.submissions == 1
+            else f"submitted-remote-id-{self.submissions}"
+        )
 
     def query_task(self, task_id):
         self.query_calls += 1

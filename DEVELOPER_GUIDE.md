@@ -161,6 +161,24 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 - 4B 字幕、BGM 和最终 `composition_video` 完全由工作台现有本地剪映队列负责。本项目
   不增加 4B 接口或队列；工作台 4B 失败重试不得重新放行本项目已成功的 RunningHub 任务。
 
+### 3.5.1 新版工作台管理员 RunningHub 资源池
+
+- 资源池只在 `is_admin=true`、`source_channel=new_workbench`、`digital_human` 且请求保存了
+  非空内部账号 ID 快照时启用。普通用户、旧网页、历史 `legacy_web` 任务和 LTX 不得进入。
+- `GenerationTask.user_id` 只表示业务所有者；`execution_account_id` 与逐次
+  `GenerationTaskAttempt` 表示真实付费执行账号。任务、文件、结果和权限查询始终按所有者，
+  RunningHub 客户端、容量、查询、取消、下载和恢复始终按尝试账号。
+- 相同 API Key 通过不可逆指纹唯一判重并合并容量；每个真实凭据最多 5 条完整流水线。槽位
+  从数字人提交前预留持续到该分段的 SeedVR2 结果下载、明确失败或安全取消，不在两阶段之间
+  释放。账号中途停用只禁止领取新流水线，不迁移已开始任务。
+- 数字人明确失败可以结束旧尝试、释放绑定，并从本批次不可变选择范围创建新的付费尝试；
+  新账号一旦数字人成功，对应 SeedVR2 必须继承该账号。SeedVR2 失败只在原账号复用数字人
+  源片段重试；下载失败只重下原远端结果。
+- 网络响应丢失、5xx 或成功响应不可解析属于 `SUBMIT_OUTCOME_UNKNOWN`。必须保留原账号和
+  保守容量，禁止自动/人工换号盲目提交；管理员核对 RunningHub 前不得清除此保护。
+- 管理接口可以写入/轮换 Key，但列表、工作台摘要、日志和诊断均不得返回 Key、指纹、
+  Base URL 或 AI App ID。自动化测试必须 mock RunningHub/MiniMax。
+
 ### 3.6 取消与删除
 
 - 尚未提交 RunningHub 的任务可以在本地直接取消。
@@ -507,8 +525,9 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - 迁移 `0028_unified_content_visual_plan` 在原缓存上增加视觉状态与结果，并把 catalog 版本和
   visual context SHA-256 纳入缓存键。缓存不保存豆包原始完整响应；完整失败不形成粘性缓存，部分成功和完整
   成功可复用，强制刷新失败不得覆盖此前合法分支。
-- 迁移 `0030_content_analysis_title` 增加标题分支缓存。标题只生成一份，工作台把同一
-  `line_1/line_2` 映射到封面和视频顶部，不增加第二次 Ark 调用。
+- 迁移 `0030_content_analysis_title` 增加标题分支缓存。标题只生成一份，工作台把
+  `line_1/line_2` 映射到封面，不增加第二次 Ark 调用；正文视频顶部由工作台固定为单行
+  “世界冠军带你资料”（字号 19），不消费模型标题。
 - 迁移 `0023_batch_correlation_id` 为批次增加独立日志关联号；历史批次用批次 ID 回填，
   新工作台传入的关联号会被语音、媒体和视频 Worker 持续继承。不得用 `request_key`
   替代 `correlation_id`。

@@ -72,11 +72,13 @@ class RunningHubError(RuntimeError):
         *,
         error_code: str | None = None,
         retry_safe: bool = False,
+        submission_outcome_unknown: bool = False,
         diagnostics: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.retry_safe = retry_safe
+        self.submission_outcome_unknown = submission_outcome_unknown
         self.diagnostics = dict(diagnostics or {})
 
     @classmethod
@@ -89,6 +91,7 @@ class RunningHubError(RuntimeError):
         exc: requests.RequestException,
         started_at: float,
         retry_safe: bool = False,
+        submission_outcome_unknown: bool = False,
         **details: object,
     ) -> "RunningHubError":
         cause = exc.__cause__ or exc.__context__
@@ -115,6 +118,7 @@ class RunningHubError(RuntimeError):
         return cls(
             message,
             retry_safe=retry_safe,
+            submission_outcome_unknown=submission_outcome_unknown,
             diagnostics={
                 key: value
                 for key, value in diagnostics.items()
@@ -329,10 +333,24 @@ class RunningHubClient:
                 endpoint=endpoint,
                 exc=exc,
                 started_at=started_at,
+                submission_outcome_unknown=True,
             ) from exc
-        result = self._parse_json(response, "提交任务")
+        try:
+            result = self._parse_json(response, "提交任务")
+        except RunningHubError as exc:
+            # A gateway/server response or an unreadable success response can
+            # arrive after RunningHub accepted and billed the task.
+            if response.status_code >= 500 or response.status_code == 200:
+                exc.submission_outcome_unknown = True
+            raise
         task_id = result.get("taskId")
         if not task_id:
+            code, message = self._error_details(result)
+            if not code and not message:
+                raise RunningHubError(
+                    "提交任务响应中缺少 taskId，远程结果无法确认",
+                    submission_outcome_unknown=True,
+                )
             self._raise_business_error(
                 result,
                 "提交任务",

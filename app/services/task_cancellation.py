@@ -5,8 +5,19 @@ from datetime import datetime, timezone
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from app.models import EnhancementStatus, GenerationTask, TaskStatus
+from app.models import (
+    EnhancementStatus,
+    GenerationTask,
+    RunningHubExecutionAccount,
+    TaskStatus,
+)
 from app.services.runninghub import RunningHubClient
+from app.services.runninghub_attempts import (
+    enhancement_attempt_for_remote_id,
+    enhancement_execution_account_for_remote,
+    finish_task_attempt,
+    task_execution_account_for_remote,
+)
 from app.services.security import decrypt_secret
 from app.services.workflow_configs import get_user_workflow_config
 from app.workflows import get_workflow
@@ -27,6 +38,19 @@ def _mark_cancelled(task: GenerationTask) -> None:
         task.enhancement.status = EnhancementStatus.CANCELLED.value
         task.enhancement.auto_retry_after = None
         task.enhancement.finished_at = task.completed_at
+        attempt = enhancement_attempt_for_remote_id(task.enhancement)
+        if attempt is not None:
+            attempt.status = "CANCELLED"
+            attempt.error_code = "CANCELLED_BY_USER"
+            attempt.error_message = task.error_message
+            attempt.finished_at = task.completed_at
+    else:
+        finish_task_attempt(
+            task,
+            status="CANCELLED",
+            error_code="CANCELLED_BY_USER",
+            error_message=task.error_message,
+        )
 
 
 def cancel_generation_task(db: Session, task: GenerationTask) -> None:
@@ -53,7 +77,10 @@ def cancel_generation_task(db: Session, task: GenerationTask) -> None:
                 raise TaskCancellationError("清晰化源视频正在上传，请稍后再取消")
             _mark_cancelled(task)
             return
-        account = task.execution_account or task.user.runninghub_config
+        account = (
+            enhancement_execution_account_for_remote(task, enhancement)
+            or task.user.runninghub_config
+        )
         if account is None or not account.api_key_encrypted:
             raise TaskCancellationError("账号缺少 RunningHub API Key，无法远程取消")
         client = RunningHubClient(
@@ -83,6 +110,12 @@ def cancel_generation_task(db: Session, task: GenerationTask) -> None:
             )
         )
         if result.rowcount == 1:
+            finish_task_attempt(
+                task,
+                status="CANCELLED",
+                error_code="CANCELLED_BY_USER",
+                error_message="任务已由用户取消",
+            )
             db.expire(task)
             return
         db.refresh(task)
@@ -92,15 +125,15 @@ def cancel_generation_task(db: Session, task: GenerationTask) -> None:
     if not task.runninghub_task_id:
         raise TaskCancellationError("任务状态正在变化，请刷新后重试")
 
-    account = task.execution_account or task.user.runninghub_config
+    account = task_execution_account_for_remote(task) or task.user.runninghub_config
     if account is None or not account.api_key_encrypted:
         raise TaskCancellationError("账号缺少 RunningHub API Key，无法远程取消")
     try:
         workflow_config = get_user_workflow_config(task.user, task.workflow_type)
         adapter = get_workflow(task.workflow_type)
         ai_app_id = (
-            task.execution_account.digital_human_ai_app_id
-            if task.execution_account is not None
+            account.digital_human_ai_app_id
+            if isinstance(account, RunningHubExecutionAccount)
             else workflow_config.ai_app_id
         )
         client = RunningHubClient(

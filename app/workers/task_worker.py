@@ -20,6 +20,7 @@ from app.models import (
     GenerationBatchItem,
     GenerationSegment,
     GenerationTask,
+    GenerationTaskAttempt,
     GenerationTaskEnhancement,
     GenerationTaskEnhancementAttempt,
     RunningHubConfig,
@@ -41,6 +42,16 @@ from app.services.runninghub_dispatch import (
     reserve_legacy_task,
     reserve_pool_task,
     task_uses_execution_pool,
+)
+from app.services.runninghub_attempts import (
+    SUBMIT_OUTCOME_UNKNOWN,
+    enhancement_execution_account_for_remote,
+    ensure_reserved_task_attempt,
+    finish_task_attempt,
+    latest_enhancement_attempt,
+    latest_task_attempt,
+    task_attempt_for_remote_id,
+    task_execution_account_for_remote,
 )
 from app.services.logging_config import (
     configure_logging,
@@ -119,6 +130,26 @@ def _allow_immediate_capacity_check(user_id: int) -> None:
 def _video_log_context(task: GenerationTask) -> dict[str, object]:
     item = task.batch_item or (task.segment.batch_item if task.segment else None)
     batch = item.batch if item else None
+    enhancement_attempt = (
+        latest_enhancement_attempt(task.enhancement)
+        if task.enhancement is not None
+        else None
+    )
+    digital_attempt = latest_task_attempt(task)
+    remote_stage = (
+        "seedvr2"
+        if task.enhancement is not None
+        else "digital_human"
+    )
+    remote_attempt_number = (
+        enhancement_attempt.attempt_number
+        if remote_stage == "seedvr2" and enhancement_attempt is not None
+        else (
+            digital_attempt.attempt_number
+            if digital_attempt is not None
+            else None
+        )
+    )
     return {
         "user_id": task.user_id,
         "username": task.user.username if task.user else None,
@@ -127,6 +158,8 @@ def _video_log_context(task: GenerationTask) -> dict[str, object]:
         "batch_item_id": item.id if item else None,
         "source_channel": batch.source_channel if batch else None,
         "correlation_id": (batch.correlation_id or batch.id) if batch else None,
+        "remote_stage": remote_stage,
+        "remote_attempt_number": remote_attempt_number,
         "execution_account_id": task.execution_account_id,
         "execution_account_label": (
             task.execution_account.label if task.execution_account else None
@@ -237,6 +270,7 @@ def _schedule_runninghub_auto_retry(
     task: GenerationTask,
     *,
     message: str,
+    release_pool_account: bool = False,
 ) -> tuple[str, int] | None:
     settings = get_settings()
     limit = settings.runninghub_auto_retry_limit
@@ -265,6 +299,9 @@ def _schedule_runninghub_auto_retry(
     task.result_path = None
     task.output_metadata = None
     task.completed_at = None
+    if release_pool_account:
+        task.execution_account_id = None
+        task.execution_account = None
     return previous_remote_id, delay_seconds
 
 
@@ -350,6 +387,12 @@ def _mark_remote_cancelled(task: GenerationTask, message: str) -> None:
     task.error_code = "REMOTE_TASK_NOT_FOUND"
     task.error_message = message
     task.completed_at = _now()
+    finish_task_attempt(
+        task,
+        status="CANCELLED",
+        error_code="REMOTE_TASK_NOT_FOUND",
+        error_message=message,
+    )
     log_event(
         logger,
         "video.cancelled",
@@ -418,11 +461,35 @@ def _cancel_expired_remote_task(
         ),
         diagnostics={"watchdog_seconds": watchdog_seconds},
     )
+    finish_task_attempt(
+        task,
+        status="WATCHDOG_CANCELLED",
+        error_code="REMOTE_WATCHDOG_TIMEOUT",
+        error_message=task.error_message,
+    )
     db.commit()
 
 
 def recover_interrupted_tasks(db: Session) -> int:
     """Reset only tasks that could not yet have been billed remotely."""
+
+    interrupted = list(
+        db.scalars(
+            select(GenerationTask)
+            .options(selectinload(GenerationTask.runninghub_attempts))
+            .where(
+                GenerationTask.status == TaskStatus.UPLOADING.value,
+                GenerationTask.runninghub_task_id.is_(None),
+            )
+        ).all()
+    )
+    for task in interrupted:
+        finish_task_attempt(
+            task,
+            status="INTERRUPTED_BEFORE_SUBMIT",
+            error_code="WORKER_RESTARTED",
+            error_message="Worker 在远程提交前重启，已安全释放本地预留",
+        )
 
     result = db.execute(
         update(GenerationTask)
@@ -500,6 +567,9 @@ def claim_next_pending_task(db: Session) -> str | None:
         if reservation is None:
             continue
         task = _load_task(db, reservation.task_id)
+        if task is not None:
+            ensure_reserved_task_attempt(task)
+            db.commit()
         log_event(
             logger,
             "video.pool_reserved" if reservation.uses_pool else "video.claimed",
@@ -527,6 +597,9 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
             selectinload(GenerationTask.user).selectinload(User.runninghub_config),
             selectinload(GenerationTask.user).selectinload(User.workflow_configs),
             selectinload(GenerationTask.execution_account),
+            selectinload(GenerationTask.runninghub_attempts).selectinload(
+                GenerationTaskAttempt.execution_account
+            ),
             selectinload(GenerationTask.enhancement).selectinload(
                 GenerationTaskEnhancement.attempts
             ),
@@ -621,6 +694,9 @@ def _handle_remote_status(
         task.status = (
             TaskStatus.RUNNING.value if status == "RUNNING" else TaskStatus.SUBMITTED.value
         )
+        attempt = task_attempt_for_remote_id(task)
+        if attempt is not None:
+            attempt.status = status
         db.commit()
         if task.status != previous_status:
             log_event(
@@ -644,9 +720,17 @@ def _handle_remote_status(
             result,
             message=failure_message,
         )
+        finish_task_attempt(
+            task,
+            status="FAILED",
+            error_code=task.error_code,
+            error_message=failure_message,
+            failed_reason=failed_reason,
+        )
         scheduled = _schedule_runninghub_auto_retry(
             task,
             message=failure_message,
+            release_pool_account=task.execution_account_id is not None,
         )
         if scheduled is not None:
             previous_remote_id, delay_seconds = scheduled
@@ -679,12 +763,24 @@ def _handle_remote_status(
         return
     if status != "SUCCESS":
         _mark_failed(task, "UNKNOWN_STATUS", f"RunningHub 返回未知任务状态：{status or '空'}")
+        finish_task_attempt(
+            task,
+            status="UNKNOWN_STATUS",
+            error_code="UNKNOWN_STATUS",
+            error_message=task.error_message,
+        )
         db.commit()
         return
 
     output = workflow.select_output(task, result)
     if output is None:
         _mark_failed(task, "EMPTY_RESULT", "工作流成功但没有可下载的结果")
+        finish_task_attempt(
+            task,
+            status="INVALID_OUTPUT",
+            error_code="EMPTY_RESULT",
+            error_message=task.error_message,
+        )
         db.commit()
         return
     destination = (
@@ -710,6 +806,12 @@ def _handle_remote_status(
         task.error_code = "DOWNLOAD_FAILED"
         task.error_message = str(exc)
         task.completed_at = _now()
+        finish_task_attempt(
+            task,
+            status="DOWNLOAD_FAILED",
+            error_code="DOWNLOAD_FAILED",
+            error_message=str(exc),
+        )
         db.commit()
         log_event(
             logger,
@@ -747,6 +849,7 @@ def _handle_remote_status(
         task.runninghub_failed_reason = None
         task.runninghub_auto_retry_after = None
         task.completed_at = None
+        finish_task_attempt(task, status="SUCCESS")
         db.commit()
         log_event(
             logger,
@@ -766,6 +869,7 @@ def _handle_remote_status(
     task.runninghub_failed_reason = None
     task.runninghub_auto_retry_after = None
     task.completed_at = _now()
+    finish_task_attempt(task, status="SUCCESS")
     db.commit()
     log_event(
         logger,
@@ -1029,6 +1133,12 @@ def _handle_enhancement_remote_status(
         task.error_code = "VIDEO_ENHANCEMENT_DOWNLOAD_FAILED"
         task.error_message = str(exc)
         task.completed_at = _now()
+        _finish_enhancement_attempt(
+            enhancement,
+            status="DOWNLOAD_FAILED",
+            error_code="VIDEO_ENHANCEMENT_DOWNLOAD_FAILED",
+            error_message=str(exc),
+        )
         db.commit()
         return
 
@@ -1125,7 +1235,6 @@ def _process_enhancement(
         return
 
     enhancement.status = EnhancementStatus.UPLOADING.value
-    enhancement.execution_account_id = task.execution_account_id
     enhancement.error_message = None
     task.status = TaskStatus.RUNNING.value
     task.error_code = None
@@ -1147,7 +1256,15 @@ def _process_enhancement(
     except RunningHubError as exc:
         _finish_enhancement_attempt(
             enhancement,
-            status="PRE_SUBMISSION_FAILED" if exc.retry_safe else "SUBMIT_UNKNOWN",
+            status=(
+                "PRE_SUBMISSION_FAILED"
+                if exc.retry_safe
+                else (
+                    "SUBMIT_UNKNOWN"
+                    if exc.submission_outcome_unknown
+                    else "SUBMISSION_REJECTED"
+                )
+            ),
             error_code=str(exc.error_code or "") or None,
             error_message=str(exc),
         )
@@ -1172,15 +1289,26 @@ def _process_enhancement(
                     code="VIDEO_ENHANCEMENT_UPLOAD_FAILED",
                     message=str(exc),
                 )
-        else:
+        elif exc.submission_outcome_unknown:
             _enhancement_failure(
                 task,
                 enhancement,
-                code="VIDEO_ENHANCEMENT_SUBMIT_UNKNOWN",
+                code=SUBMIT_OUTCOME_UNKNOWN,
                 message=(
                     f"{exc}\nSeedVR2 提交结果无法确认，未自动重复付费提交。"
                 ),
             )
+        else:
+            scheduled = _schedule_enhancement_retry(
+                task, enhancement, message=str(exc)
+            )
+            if scheduled is None:
+                _enhancement_failure(
+                    task,
+                    enhancement,
+                    code="VIDEO_ENHANCEMENT_SUBMISSION_REJECTED",
+                    message=str(exc),
+                )
         db.commit()
         return
     except (OSError, ValueError) as exc:
@@ -1343,7 +1471,18 @@ def process_task(db: Session, task_id: str) -> None:
         return
     uses_pool = task_uses_execution_pool(task)
     if uses_pool:
-        if task.execution_account is None:
+        bound_pool_account = (
+            enhancement_execution_account_for_remote(
+                task, task.enhancement
+            )
+            if task.enhancement is not None
+            else (
+                task_execution_account_for_remote(task)
+                if task.runninghub_task_id
+                else task.execution_account
+            )
+        )
+        if bound_pool_account is None:
             _mark_failed(
                 task,
                 "POOL_ACCOUNT_BINDING_MISSING",
@@ -1352,7 +1491,7 @@ def process_task(db: Session, task_id: str) -> None:
             db.commit()
             return
         execution_config: RunningHubConfig | RunningHubExecutionAccount = (
-            task.execution_account
+            bound_pool_account
         )
     else:
         if task.user.runninghub_config is None:
@@ -1374,8 +1513,9 @@ def process_task(db: Session, task_id: str) -> None:
     try:
         client = _make_client(execution_config)
         effective_ai_app_id = (
-            task.execution_account.digital_human_ai_app_id
-            if uses_pool and task.execution_account
+            execution_config.digital_human_ai_app_id
+            if uses_pool
+            and isinstance(execution_config, RunningHubExecutionAccount)
             else workflow_config.ai_app_id
         )
         # RunningHubClient is generic.  The workflow config determines only
@@ -1388,6 +1528,20 @@ def process_task(db: Session, task_id: str) -> None:
         return
 
     if task.workflow_type == "digital_human" and task.enhancement is not None:
+        if (
+            task.enhancement.execution_account_id
+            != task.execution_account_id
+        ):
+            _enhancement_failure(
+                task,
+                task.enhancement,
+                code="VIDEO_ENHANCEMENT_ACCOUNT_MISMATCH",
+                message=(
+                    "数字人和 SeedVR2 执行账号绑定不一致，已停止处理以避免跨账号付费"
+                ),
+            )
+            db.commit()
+            return
         client.ai_app_id = SEEDVR2_AI_APP_ID
         client.submission_type = seedvr2_upscale_workflow.submission_type
         _process_enhancement(
@@ -1400,6 +1554,12 @@ def process_task(db: Session, task_id: str) -> None:
         return
 
     if task.runninghub_task_id:
+        if task_attempt_for_remote_id(task) is None:
+            attempt = ensure_reserved_task_attempt(task)
+            attempt.remote_task_id = task.runninghub_task_id
+            attempt.status = task.status
+            attempt.submitted_at = task.runninghub_submitted_at
+            db.commit()
         # RunningHub owns queueing, execution and its normal timeout. Always
         # consume the newest remote state before applying our much larger
         # stuck-task watchdog, otherwise a just-finished task can be misclosed.
@@ -1423,6 +1583,9 @@ def process_task(db: Session, task_id: str) -> None:
 
     try:
         settings = get_settings()
+        attempt = ensure_reserved_task_attempt(task)
+        attempt.status = "UPLOADING"
+        db.commit()
         log_event(
             logger,
             "video.upload_started",
@@ -1475,6 +1638,9 @@ def process_task(db: Session, task_id: str) -> None:
         task.runninghub_failed_reason = None
         task.runninghub_usage = None
         task.runninghub_auto_retry_after = None
+        attempt.remote_task_id = remote_task_id
+        attempt.status = "SUBMITTED"
+        attempt.submitted_at = task.runninghub_submitted_at
         if task.execution_account:
             mark_execution_account_healthy(task.execution_account)
             _remote_account_task_counts[task.execution_account.id] = (
@@ -1495,6 +1661,12 @@ def process_task(db: Session, task_id: str) -> None:
             _defer_capacity_check(task.user_id, get_settings().poll_interval_seconds)
     except RunningHubError as exc:
         if exc.is_capacity_limited:
+            finish_task_attempt(
+                task,
+                status="CAPACITY_WAIT",
+                error_code=str(exc.error_code or "CAPACITY_FULL"),
+                error_message=str(exc),
+            )
             if task.execution_account:
                 cool_execution_account(
                     task.execution_account,
@@ -1518,6 +1690,12 @@ def process_task(db: Session, task_id: str) -> None:
                 unhealthy=True,
             )
         if exc.retry_safe and task.runninghub_task_id is None:
+            finish_task_attempt(
+                task,
+                status="PRE_SUBMISSION_FAILED",
+                error_code=str(exc.error_code or "SUBMIT_FAILED"),
+                error_message=str(exc),
+            )
             _handle_safe_pre_submission_failure(
                 db,
                 task,
@@ -1527,6 +1705,31 @@ def process_task(db: Session, task_id: str) -> None:
                 release_pool_account=task.execution_account is not None,
             )
             return
+        if exc.submission_outcome_unknown and task.runninghub_task_id is None:
+            finish_task_attempt(
+                task,
+                status="SUBMIT_UNKNOWN",
+                error_code=SUBMIT_OUTCOME_UNKNOWN,
+                error_message=str(exc),
+                finished=False,
+            )
+            _mark_failed(
+                task,
+                SUBMIT_OUTCOME_UNKNOWN,
+                (
+                    f"{exc}\nRunningHub 提交结果无法确认，系统已保留原执行账号和容量，"
+                    "禁止自动或人工盲目重提；请管理员先在 RunningHub 核对。"
+                ),
+                diagnostics=exc.log_details(),
+            )
+            db.commit()
+            return
+        finish_task_attempt(
+            task,
+            status="SUBMISSION_REJECTED",
+            error_code=str(exc.error_code or "SUBMIT_FAILED"),
+            error_message=str(exc),
+        )
         _mark_failed(
             task,
             "SUBMIT_FAILED",
@@ -1535,6 +1738,12 @@ def process_task(db: Session, task_id: str) -> None:
         )
         db.commit()
     except (OSError, ValueError) as exc:
+        finish_task_attempt(
+            task,
+            status="PRE_SUBMISSION_FAILED",
+            error_code="SUBMIT_FAILED",
+            error_message=str(exc),
+        )
         _mark_failed(task, "SUBMIT_FAILED", str(exc))
         db.commit()
 

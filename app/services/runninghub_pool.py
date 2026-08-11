@@ -66,7 +66,12 @@ def credential_activity_filter(task_alias, fingerprint: str):
         RunningHubConfig.credential_fingerprint == fingerprint
     )
     return and_(
-        task_alias.status.in_(ACTIVE_POOL_TASK_STATUSES),
+        or_(
+            task_alias.status.in_(ACTIVE_POOL_TASK_STATUSES),
+            task_alias.error_code.in_(
+                {"SUBMIT_OUTCOME_UNKNOWN", "VIDEO_ENHANCEMENT_SUBMIT_UNKNOWN"}
+            ),
+        ),
         or_(
             task_alias.execution_account_id.in_(pool_account_ids),
             and_(

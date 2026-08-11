@@ -13,6 +13,7 @@ from app.models import (
     GenerationBatch,
     GenerationBatchItem,
     GenerationTask,
+    GenerationTaskAttempt,
     RunningHubConfig,
     RunningHubExecutionAccount,
     TaskStatus,
@@ -20,8 +21,10 @@ from app.models import (
 from app.services.runninghub import RunningHubError
 from app.services.runninghub_dispatch import reserve_pool_task
 from app.services.runninghub_pool import create_execution_account
+from app.services.runninghub_pool import credential_active_task_count
 from app.services.security import encrypt_secret, secret_fingerprint
 from app.services.storage import to_relative_data_path
+from app.services.task_management import TaskManagementError, prepare_task_retry
 from app.workers import task_worker
 from app.workflows import get_workflow
 from app.workflows.base import WorkflowAsset
@@ -195,6 +198,174 @@ def test_pool_dispatches_fifo_subtasks_across_independent_account_slots():
         third = db.get(GenerationTask, "pool-task-3")
         assert third.user_id == admin.id
         assert third.execution_account_id in account_ids
+
+
+def test_pool_keeps_digital_human_and_seedvr2_on_one_pipeline_account(monkeypatch):
+    admin = create_user("pool-pipeline-admin", is_admin=True, with_config=False)
+    with SessionLocal() as db:
+        account = _create_account(
+            db,
+            admin.id,
+            label="流水线账号",
+            api_key="pool-pipeline-key",
+            max_concurrent_tasks=1,
+        )
+        db.commit()
+        account_id = account.id
+    _create_pool_tasks(admin.id, [account_id], ["pool-pipeline-task"])
+    _prepare_real_pool_task_files("pool-pipeline-task")
+    fake = FakeRunningHub(
+        query_results={
+            "submitted-remote-id": {
+                "taskId": "submitted-remote-id",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "nodeId": "digital-output",
+                        "outputType": "mp4",
+                        "url": "https://x/digital.mp4",
+                    }
+                ],
+            },
+            "submitted-remote-id-2": {
+                "taskId": "submitted-remote-id-2",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "nodeId": "seed-output",
+                        "outputType": "mp4",
+                        "url": "https://x/seed.mp4",
+                    }
+                ],
+            },
+        }
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+
+    with SessionLocal() as db:
+        assert task_worker.claim_next_pending_task(db) == "pool-pipeline-task"
+        task_worker.process_task(db, "pool-pipeline-task")
+        task_worker.process_task(db, "pool-pipeline-task")
+        task = db.get(GenerationTask, "pool-pipeline-task")
+        assert task.enhancement is not None
+        assert task.enhancement.execution_account_id == account_id
+
+        # Disabling the account stops new pipelines only. This already-paid
+        # pipeline must still finish SeedVR2 on its original account.
+        db.get(RunningHubExecutionAccount, account_id).is_enabled = False
+        db.commit()
+        task_worker.process_task(db, "pool-pipeline-task")
+        task_worker.process_task(db, "pool-pipeline-task")
+        db.expire_all()
+        task = db.get(GenerationTask, "pool-pipeline-task")
+        assert task.status == TaskStatus.SUCCESS.value
+        assert len(task.runninghub_attempts) == 1
+        assert task.runninghub_attempts[0].execution_account_id == account_id
+        assert task.runninghub_attempts[0].status == "SUCCESS"
+        assert len(task.enhancement.attempts) == 1
+        assert task.enhancement.attempts[0].execution_account_id == account_id
+        assert task.enhancement.attempts[0].status == "SUCCESS"
+
+
+def test_explicit_digital_failure_can_reselect_then_locks_seedvr2_account(monkeypatch):
+    admin = create_user("pool-reselect-admin", is_admin=True, with_config=False)
+    with SessionLocal() as db:
+        first = _create_account(
+            db, admin.id, label="B", api_key="pool-reselect-b", max_concurrent_tasks=1
+        )
+        second = _create_account(
+            db, admin.id, label="C", api_key="pool-reselect-c", max_concurrent_tasks=1
+        )
+        db.commit()
+        account_ids = [first.id, second.id]
+    _create_pool_tasks(admin.id, account_ids, ["pool-reselect-task"])
+    _prepare_real_pool_task_files("pool-reselect-task")
+    fake = FakeRunningHub(
+        query_results={
+            "submitted-remote-id": {
+                "taskId": "submitted-remote-id",
+                "status": "FAILED",
+                "errorCode": "805",
+                "errorMessage": "明确失败",
+            },
+            "submitted-remote-id-2": {
+                "taskId": "submitted-remote-id-2",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "nodeId": "digital-output",
+                        "outputType": "mp4",
+                        "url": "https://x/digital-2.mp4",
+                    }
+                ],
+            },
+        }
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+
+    with SessionLocal() as db:
+        assert task_worker.claim_next_pending_task(db) == "pool-reselect-task"
+        task_worker.process_task(db, "pool-reselect-task")
+        first_account_id = db.get(GenerationTask, "pool-reselect-task").execution_account_id
+        task_worker.process_task(db, "pool-reselect-task")
+        task = db.get(GenerationTask, "pool-reselect-task")
+        assert task.status == TaskStatus.PENDING.value
+        assert task.execution_account_id is None
+        task.runninghub_auto_retry_after = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+
+        assert task_worker.claim_next_pending_task(db) == "pool-reselect-task"
+        task = db.get(GenerationTask, "pool-reselect-task")
+        assert task.execution_account_id in account_ids
+        assert task.execution_account_id != first_account_id
+        second_account_id = task.execution_account_id
+        task_worker.process_task(db, "pool-reselect-task")
+        task_worker.process_task(db, "pool-reselect-task")
+        db.expire_all()
+        task = db.get(GenerationTask, "pool-reselect-task")
+        assert [attempt.execution_account_id for attempt in task.runninghub_attempts] == [
+            first_account_id,
+            second_account_id,
+        ]
+        assert task.runninghub_attempts[0].status == "FAILED"
+        assert task.enhancement.execution_account_id == second_account_id
+
+
+def test_ambiguous_pool_submit_keeps_account_capacity_and_blocks_retry(monkeypatch):
+    admin = create_user("pool-ambiguous-admin", is_admin=True, with_config=False)
+    with SessionLocal() as db:
+        account = _create_account(
+            db,
+            admin.id,
+            label="模糊提交账号",
+            api_key="pool-ambiguous-key",
+            max_concurrent_tasks=1,
+        )
+        db.commit()
+        account_id = account.id
+        fingerprint = account.credential_fingerprint
+    _create_pool_tasks(admin.id, [account_id], ["pool-ambiguous-task"])
+    _prepare_real_pool_task_files("pool-ambiguous-task")
+    fake = FakeRunningHub(submit_network_error=True)
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+
+    with SessionLocal() as db:
+        assert task_worker.claim_next_pending_task(db) == "pool-ambiguous-task"
+        task_worker.process_task(db, "pool-ambiguous-task")
+        task = db.get(GenerationTask, "pool-ambiguous-task")
+        assert task.status == TaskStatus.FAILED.value
+        assert task.error_code == "SUBMIT_OUTCOME_UNKNOWN"
+        assert task.execution_account_id == account_id
+        attempt = db.scalar(
+            select(GenerationTaskAttempt).where(
+                GenerationTaskAttempt.generation_task_id == task.id
+            )
+        )
+        assert attempt.status == "SUBMIT_UNKNOWN"
+        assert attempt.remote_task_id is None
+        assert credential_active_task_count(db, fingerprint) == 1
+        with pytest.raises(TaskManagementError, match="禁止盲目重提"):
+            prepare_task_retry(task, get_settings())
 
 
 def test_pool_reservation_uses_conditional_capacity_check_with_stale_sessions():
