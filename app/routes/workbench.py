@@ -1235,15 +1235,25 @@ def retry_workbench_composition(
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    """Retry only the failed RunningHub/download/merge stage for one row."""
+    """Create a new command for the failed/cancelled active stage of one row."""
 
     user = _token_user(str(payload.get("access_token", "")), db)
     if payload.get("cost_confirmed") is not True:
         raise HTTPException(
             status_code=409,
-            detail="请确认失败的 RunningHub 任务重试可能再次产生费用",
+            detail="请确认失败或已取消的 RunningHub 阶段重新生成可能再次产生费用",
         )
     item = _item_for_user(item_id, user, db)
+    requested_resolution = str(payload.get("resolution") or "").strip()
+    if requested_resolution:
+        try:
+            if int(requested_resolution) <= 0:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="数字人最长边分辨率必须是正整数",
+            ) from exc
     tasks = [
         segment.generation_task
         for segment in sorted(item.segments, key=lambda value: value.segment_index)
@@ -1254,11 +1264,40 @@ def retry_workbench_composition(
     retryable = [
         task
         for task in tasks
-        if task.status in {TaskStatus.FAILED.value, TaskStatus.DOWNLOAD_FAILED.value}
+        if task.status
+        in {
+            TaskStatus.FAILED.value,
+            TaskStatus.DOWNLOAD_FAILED.value,
+            TaskStatus.CANCELLED.value,
+        }
     ]
     try:
         if retryable:
             for task in retryable:
+                # A provider-side cancel closes that paid command.  Reusing its
+                # RunningHub task id is impossible, so a digital-human cancel
+                # becomes a fresh submission from the saved image/audio and
+                # uses the workbench's current resolution.  SeedVR2 cancels
+                # already have an enhancement/source and only restart that
+                # enhancement stage below.
+                if (
+                    requested_resolution
+                    and task.status == TaskStatus.CANCELLED.value
+                    and task.enhancement is None
+                ):
+                    try:
+                        task_input = json.loads(task.input_payload)
+                    except (TypeError, json.JSONDecodeError) as exc:
+                        raise TaskManagementError(
+                            "已取消数字人任务的输入快照不合法，无法重新生成"
+                        ) from exc
+                    parameters = task_input.get("parameters")
+                    if not isinstance(parameters, dict):
+                        raise TaskManagementError(
+                            "已取消数字人任务的参数快照不合法，无法重新生成"
+                        )
+                    parameters["resolution"] = requested_resolution
+                    task.input_payload = json.dumps(task_input, ensure_ascii=False)
                 prepare_task_retry(task, get_settings())
             invalidate_merged_video(item, get_settings())
         elif item.merged_video_status == MERGE_FAILED:

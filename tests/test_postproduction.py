@@ -309,6 +309,9 @@ def test_workbench_composition_reports_video_enhancing_stage(client):
 
 def test_workbench_composition_reports_remote_cancel_as_retryable_failure(client):
     _batch_id, item_id = _text_item(segment_count=3)
+    settings = get_settings()
+    (settings.data_dir / "image.png").write_bytes(b"image")
+    (settings.data_dir / "audio.mp3").write_bytes(b"audio")
     with SessionLocal() as db:
         tasks = db.scalars(select(GenerationTask).order_by(GenerationTask.id)).all()
         for task in tasks:
@@ -316,6 +319,31 @@ def test_workbench_composition_reports_remote_cancel_as_retryable_failure(client
             task.result_path = None
             task.error_code = "REMOTE_TASK_NOT_FOUND"
             task.error_message = "RunningHub 任务已被手动取消"
+            task.input_payload = json.dumps(
+                {
+                    "assets": {
+                        "image": {
+                            "kind": "image",
+                            "path": "image.png",
+                            "original_name": "image.png",
+                        },
+                        "audio": {
+                            "kind": "audio",
+                            "path": "audio.mp3",
+                            "original_name": "audio.mp3",
+                        },
+                    },
+                    "parameters": {
+                        "prompt": "自然说话",
+                        "start_time": "0:00",
+                        "end_time": "0:03",
+                        "resolution": "1920",
+                        "person_mode": "1",
+                        "instance_type": "plus",
+                    },
+                },
+                ensure_ascii=False,
+            )
         db.commit()
 
     login_response = client.post(
@@ -332,6 +360,66 @@ def test_workbench_composition_reports_remote_cancel_as_retryable_failure(client
     assert composition["status"] == "COMPOSITION_FAILED"
     assert composition["processing_stage"] == "COMPOSITION_FAILED"
     assert composition["error_message"] == "RunningHub 任务已被手动取消"
+
+    retried = client.post(
+        f"/api/workbench/tasks/{item_id}/composition/retry",
+        json={
+            "access_token": login_response.json()["access_token"],
+            "cost_confirmed": True,
+            "resolution": "1024",
+        },
+    )
+    assert retried.status_code == 200, retried.text
+    with SessionLocal() as db:
+        tasks = db.scalars(select(GenerationTask).order_by(GenerationTask.id)).all()
+        assert all(task.status == TaskStatus.PENDING.value for task in tasks)
+        assert all(task.runninghub_task_id is None for task in tasks)
+        assert all(
+            json.loads(task.input_payload)["parameters"]["resolution"] == "1024"
+            for task in tasks
+        )
+
+
+def test_workbench_retry_after_seedvr2_cancel_reuses_digital_human_source(client):
+    _batch_id, item_id = _text_item(segment_count=1)
+    settings = get_settings()
+    with SessionLocal() as db:
+        task = db.scalar(select(GenerationTask))
+        source = settings.data_dir / str(task.result_path)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"saved-digital-human-source")
+        task.runninghub_task_id = "successful-digital-human-id"
+        task.status = TaskStatus.CANCELLED.value
+        task.error_code = "VIDEO_ENHANCEMENT_REMOTE_MISSING"
+        task.error_message = "SeedVR2 已在 RunningHub 手动取消"
+        task.enhancement = GenerationTaskEnhancement(
+            id="postproduction-cancelled-seedvr2",
+            generation_task_id=task.id,
+            status=EnhancementStatus.CANCELLED.value,
+            source_result_path=source.relative_to(settings.data_dir).as_posix(),
+            remote_task_id="cancelled-seedvr2-id",
+        )
+        db.commit()
+
+    login_response = client.post(
+        "/api/auth/center/login",
+        json={"username": "postproduction-text-1", "password": "password123"},
+    )
+    retried = client.post(
+        f"/api/workbench/tasks/{item_id}/composition/retry",
+        json={
+            "access_token": login_response.json()["access_token"],
+            "cost_confirmed": True,
+        },
+    )
+
+    assert retried.status_code == 200, retried.text
+    with SessionLocal() as db:
+        task = db.scalar(select(GenerationTask))
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.runninghub_task_id == "successful-digital-human-id"
+        assert task.enhancement.status == EnhancementStatus.PENDING.value
+        assert task.enhancement.remote_task_id is None
 
 
 def test_workbench_backfills_seedvr2_from_saved_digital_human_results(client):

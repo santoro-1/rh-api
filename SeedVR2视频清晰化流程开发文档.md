@@ -434,3 +434,18 @@ GET /api/workbench/tasks/{item_id}/videos/{video_index}/source
 - SeedVR2 固定 48G、1920 参数，每段一对一处理。
 - 不对 LTX 增加放大。
 - 不部署生产、不做真实付费联调，除非用户另行明确授权。
+
+## 14. RunningHub 手动取消后的重新生成契约（2026-08-11）
+
+RunningHub 的手动取消表示当前外部命令已经终止。再次点击“生成视频”必须创建新的外部任务，
+不得继续轮询或复用被取消的远端任务 ID；本地 `GenerationTask` 可以保留原有业务身份和审计历史。
+
+- 数字人阶段取消：任务没有可复用的增强源，重试时清除原 `runninghub_task_id`，使用已保存的
+  图片、音频和工作台当前提交的 `resolution` 重新进入数字人 `PENDING`，Worker 随后创建新的
+  RunningHub 数字人任务。`1024`、`1280`、`1920` 等值没有特殊恢复语义，只代表当前输入值。
+- SeedVR2 阶段取消：数字人 MP4 已成功落盘，保留原数字人 `runninghub_task_id` 和
+  `source_result_path`，只清除增强记录的 `remote_task_id` 并把增强阶段改为 `PENDING`，Worker
+  随后创建新的 SeedVR2 48G 任务。此路径不重复数字人生成，也不使用当前分辨率重建数字人。
+- 多分段任务逐段判断实际取消阶段；已经成功的付费阶段保持不变，只重建被取消的当前阶段。
+- 工作台云端重试接口接受可选 `resolution`。该值只允许正整数，且只在数字人阶段取消时写回
+  该分段的输入快照；普通 SeedVR2 失败/取消和下载失败继续遵守原有分阶段费用保护。

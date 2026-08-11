@@ -20,6 +20,7 @@ class TaskManagementError(ValueError):
 RETRYABLE_TASK_STATUSES = {
     TaskStatus.FAILED.value,
     TaskStatus.DOWNLOAD_FAILED.value,
+    TaskStatus.CANCELLED.value,
 }
 
 TERMINAL_TASK_STATUSES = {
@@ -36,10 +37,10 @@ def prepare_task_retry(
     *,
     now: datetime | None = None,
 ) -> None:
-    """Reset a failed row without repeating a paid successful generation."""
+    """Reset a failed or cancelled stage without repeating paid success."""
 
     if task.status not in RETRYABLE_TASK_STATUSES:
-        raise TaskManagementError("只有失败任务可以重试")
+        raise TaskManagementError("只有失败或已取消任务可以重新生成")
     retry_time = now or datetime.now(timezone.utc)
     enhancement = task.enhancement
     if task.workflow_type == "digital_human" and enhancement is not None:
