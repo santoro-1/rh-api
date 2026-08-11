@@ -114,6 +114,19 @@ def test_silence_plan_avoids_tiny_tail_and_never_needs_transcript():
     assert plans[-1].end_seconds == 91.0
 
 
+def test_digital_human_silence_plan_hard_limits_segments_to_35_seconds():
+    plans = plan_silence_segments(
+        70.0,
+        silence_midpoints=[29.8, 59.9],
+        max_segment_seconds=35.0,
+    )
+
+    assert len(plans) == 3
+    assert all(plan.duration_seconds <= 35.0 for plan in plans)
+    assert plans[0].end_seconds == 29.8
+    assert plans[-1].end_seconds == 70.0
+
+
 def test_minimax_account_binding_survives_key_rotation_but_not_account_switch():
     create_user("minimax-binding-user")
     with SessionLocal() as db:

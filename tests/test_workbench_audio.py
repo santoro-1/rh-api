@@ -13,6 +13,7 @@ from app.models import (
     GenerationBatch,
     GenerationSegment,
     GenerationTask,
+    TaskStatus,
     MiniMaxConfig,
     MiniMaxVoiceAsset,
     User,
@@ -173,6 +174,74 @@ def test_official_voice_preview_requires_confirmation_and_is_cached(client, monk
     )
     assert cached.status_code == 200
     assert len(calls) == 1
+
+
+def test_workbench_audio_retry_uses_requested_speed(client, monkeypatch):
+    _account("workbench-speed-retry-user")
+    monkeypatch.setattr(
+        "app.services.speech.workbench_voices.MiniMaxClient.list_voices",
+        lambda self, voice_type="system": OFFICIAL_ITEMS,
+    )
+    token = _token(client, "workbench-speed-retry-user")
+    voices = client.post("/api/workbench/voices", json={"access_token": token})
+    voice_id = voices.json()["voices"][0]["voice_asset_id"]
+    created = client.post(
+        "/api/workbench/audio-batches",
+        json={
+            "access_token": token,
+            "name": "语速重试测试",
+            "request_key": "workbench-speed-retry-1",
+            "rows": [{"row_id": "1", "speech_script": "语速重试测试。"}],
+            "speech_options": {
+                "voiceAssetId": voice_id,
+                "model": "speech-2.8-hd",
+                "speed": 1,
+                "volume": 1,
+                "pitch": 0,
+                "languageBoost": "Chinese",
+                "outputFormat": "mp3",
+                "costConfirmed": True,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    batch_id = created.json()["batch_id"]
+    item_id = created.json()["items"][0]["item_id"]
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).one()
+        output = get_settings().outputs_dir / "workbench-speed-retry.mp3"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"ID3speed-retry")
+        task.output_path = to_relative_data_path(output, get_settings())
+        db.add(
+            AudioGenerationAttempt(
+                id=str(uuid.uuid4()),
+                audio_task_id=task.id,
+                version=task.generation_version,
+                output_path=task.output_path,
+                status="READY",
+            )
+        )
+        task.status = AudioTaskStatus.AWAITING_REVIEW.value
+        task.batch_item.audio_status = "AWAITING_REVIEW"
+        task.batch_item.status = "AWAITING_AUDIO_REVIEW"
+        db.commit()
+
+    invalid = client.post(
+        f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/retry",
+        json={"access_token": token, "cost_confirmed": True, "speed": 0.1},
+    )
+    assert invalid.status_code == 422
+    retried = client.post(
+        f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/retry",
+        json={"access_token": token, "cost_confirmed": True, "speed": 0.9},
+    )
+    assert retried.status_code == 200, retried.text
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).one()
+        assert task.speed == 0.9
+        assert task.status == AudioTaskStatus.PENDING.value
+        assert task.generation_version == 2
 
 
 def test_workbench_voice_clone_reuses_existing_voice_queue(client, monkeypatch):
@@ -518,7 +587,9 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
                 start_seconds=0.0,
                 end_seconds=1.2,
                 prompt="测试提示词",
-                status="SUCCESS",
+                status=TaskStatus.CANCELLED.value,
+                error_code="REMOTE_TASK_NOT_FOUND",
+                error_message="RunningHub 任务已被手动取消",
             )
         )
         task.status = AudioTaskStatus.SUCCESS.value
@@ -542,6 +613,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
             "image_asset_id": replacement_staged.json()["asset_id"],
             "image_sha256": replacement_sha256,
             "correlation_id": "workbench-correlation-001",
+            "resolution": "1024",
         },
     )
     assert replaced.status_code == 200, replaced.text
@@ -552,6 +624,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         assert task.primary_original_name == "replacement.png"
         assert task.primary_sha256 == replacement_sha256
         assert task.status == AudioTaskStatus.PENDING.value
+        assert json.loads(task.video_parameters_json)["resolution"] == "1024"
         assert task.output_path
         assert task.subtitle_path
         assert task.batch_item.merged_video_path is None

@@ -228,3 +228,25 @@ def test_timestamp_planner_uses_sentence_boundaries_and_45_second_limit():
         plan.alignment_method == "minimax_sentence_timestamp"
         for plan in plans
     )
+
+
+def test_digital_human_timestamp_plan_splits_before_seedvr2_risk_window():
+    cues = [
+        SubtitleCue("第一句。", 0.0, 9.8),
+        SubtitleCue("第二句。", 10.0, 19.6),
+        SubtitleCue("第三句。", 19.8, 29.5),
+        SubtitleCue("第四句。", 29.7, 39.5),
+    ]
+
+    digital_plans = plan_timestamped_segments(
+        cues,
+        39.75,
+        max_segment_seconds=35.0,
+    )
+    ltx_plans = plan_timestamped_segments(cues, 39.75)
+
+    assert len(digital_plans) == 2
+    assert all(plan.duration_seconds <= 35.0 for plan in digital_plans)
+    assert digital_plans[0].start_seconds == 0.0
+    assert digital_plans[-1].end_seconds == 39.75
+    assert len(ltx_plans) == 1

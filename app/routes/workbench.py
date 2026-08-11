@@ -20,6 +20,7 @@ from app.models import (
     EnhancementStatus,
     GenerationBatch,
     GenerationBatchItem,
+    GenerationTask,
     MiniMaxVoiceAsset,
     TaskStatus,
     User,
@@ -189,6 +190,35 @@ def _reset_video_handoff_for_new_image(
     item.status = "AUDIO_APPROVED"
     item.error_code = None
     item.error_message = None
+
+
+def _video_handoff_tasks(item: GenerationBatchItem) -> list[GenerationTask]:
+    """Return every paid video-stage task currently attached to one row."""
+
+    tasks = [
+        segment.generation_task
+        for segment in item.segments
+        if segment.generation_task is not None
+    ]
+    if item.generation_task is not None:
+        tasks.append(item.generation_task)
+    return tasks
+
+
+def _has_cancelled_digital_human_handoff(item: GenerationBatchItem) -> bool:
+    """Whether a provider-cancelled 4A command may be rebuilt from saved audio.
+
+    A SeedVR2 cancellation already owns a successful digital-human source and
+    must stay on the enhancement-only retry path.  Mixed terminal segment rows
+    are accepted when at least one digital-human command was cancelled: changing
+    the image or resolution intentionally rebuilds the whole video stage so all
+    segments use one input snapshot.
+    """
+
+    tasks = _video_handoff_tasks(item)
+    return bool(tasks) and any(
+        task.status == TaskStatus.CANCELLED.value for task in tasks
+    ) and all(task.enhancement is None for task in tasks)
 
 
 router = APIRouter(tags=["workbench"])
@@ -1024,9 +1054,17 @@ def retry_workbench_audio(
     if item is None or item.audio_task is None:
         raise HTTPException(status_code=404, detail="声音任务不存在")
     try:
+        requested_speed = float(payload.get("speed", item.audio_task.speed))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="语速必须是数字") from exc
+    if not 0.5 <= requested_speed <= 2.0:
+        raise HTTPException(status_code=422, detail="语速必须在 0.5–2.0 之间")
+    try:
         if item.audio_task.status == AudioTaskStatus.AWAITING_REVIEW.value:
+            item.audio_task.speed = requested_speed
             regenerate_item_audio(batch, item_id)
         elif item.audio_task.status == AudioTaskStatus.FAILED.value:
+            item.audio_task.speed = requested_speed
             item.audio_task.status = AudioTaskStatus.PENDING.value
             item.audio_task.error_code = None
             item.audio_task.error_message = None
@@ -1116,9 +1154,7 @@ def start_workbench_composition(
             or item.segments
             or item.generation_task
         )
-        if handoff_started and requested_resolution != current_resolution:
-            raise AudioReviewError("当前画面生成任务的分辨率已经锁定，不能修改")
-        video_parameters["resolution"] = requested_resolution
+        resolution_changed = requested_resolution != current_resolution
         # The new workbench hands MiniMax timestamped audio to 4A.  Preserve
         # the existing whole-second ceiling (24.4 -> 25), but do not apply the
         # legacy 0.5-second silent tail used by upload-audio batch workflows.
@@ -1140,9 +1176,6 @@ def start_workbench_composition(
             ).strip()
             if configured_prompt:
                 video_parameters["prompt"] = configured_prompt
-        task.video_parameters_json = json.dumps(
-            video_parameters, ensure_ascii=False
-        )
         current_image_sha256 = str(task.primary_sha256 or "").strip().lower()
         if task.primary_path and not current_image_sha256:
             try:
@@ -1160,6 +1193,16 @@ def start_workbench_composition(
             task.primary_path
             and requested_image_sha256
             and requested_image_sha256 != current_image_sha256
+        )
+        video_handoff_reset = False
+        if handoff_started and resolution_changed:
+            if not _has_cancelled_digital_human_handoff(item):
+                raise AudioReviewError("当前画面生成任务的分辨率已经锁定，不能修改")
+            _reset_video_handoff_for_new_image(db, item)
+            video_handoff_reset = True
+        video_parameters["resolution"] = requested_resolution
+        task.video_parameters_json = json.dumps(
+            video_parameters, ensure_ascii=False
         )
         if not task.primary_path or image_changed:
             image_asset_id = str(payload.get("image_asset_id") or "").strip()
@@ -1180,7 +1223,7 @@ def start_workbench_composition(
                 and uploaded_image_sha256 != requested_image_sha256
             ):
                 raise AudioReviewError("上传图片与当前项目图片版本不一致")
-            if task.primary_path:
+            if task.primary_path and not video_handoff_reset:
                 _reset_video_handoff_for_new_image(db, item)
             materialized_image = materialize_staged_asset(
                 source,

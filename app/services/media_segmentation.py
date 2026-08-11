@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 TARGET_SEGMENT_SECONDS = 30.0
 MAX_SEGMENT_SECONDS = 45.0
+DIGITAL_HUMAN_MAX_SEGMENT_SECONDS = 35.0
 _MIN_USEFUL_SEGMENT_SECONDS = 12.0
 _STRONG_BREAK_RE = re.compile(r".+?(?:[。！？!?；;]+|\n+)|.+$", re.DOTALL)
 _WEAK_BREAK_RE = re.compile(r".+?(?:[，,、：:]+)|.+$", re.DOTALL)
@@ -86,7 +87,12 @@ def _speech_weight(text: str) -> int:
     return max(spoken + round(punctuation * 0.35), 1)
 
 
-def _split_text_units(script: str, duration_seconds: float) -> list[str]:
+def _split_text_units(
+    script: str,
+    duration_seconds: float,
+    *,
+    max_segment_seconds: float,
+) -> list[str]:
     strong_units = [
         match.group(0)
         for match in _STRONG_BREAK_RE.finditer(script.strip())
@@ -101,7 +107,7 @@ def _split_text_units(script: str, duration_seconds: float) -> list[str]:
     seconds_per_weight = duration_seconds / max(total_weight, 1)
     result: list[str] = []
     for unit in strong_units:
-        if _speech_weight(unit) * seconds_per_weight <= MAX_SEGMENT_SECONDS:
+        if _speech_weight(unit) * seconds_per_weight <= max_segment_seconds:
             result.append(unit)
             continue
         weak_units = [
@@ -112,7 +118,7 @@ def _split_text_units(script: str, duration_seconds: float) -> list[str]:
         if len(weak_units) > 1:
             result.extend(weak_units)
             continue
-        maximum_chars = max(int(MAX_SEGMENT_SECONDS / seconds_per_weight), 1)
+        maximum_chars = max(int(max_segment_seconds / seconds_per_weight), 1)
         result.extend(
             unit[index : index + maximum_chars]
             for index in range(0, len(unit), maximum_chars)
@@ -167,15 +173,20 @@ def plan_audio_segments(
     script: str,
     duration_seconds: float,
     silence_midpoints: list[float] | None = None,
+    *,
+    target_segment_seconds: float = TARGET_SEGMENT_SECONDS,
+    max_segment_seconds: float = MAX_SEGMENT_SECONDS,
 ) -> list[SegmentPlan]:
-    """Map original script units onto <=45-second audio intervals."""
+    """Map original script units onto workflow-specific audio intervals."""
 
     if duration_seconds <= 0:
         raise MediaSegmentationError("生成音频时长必须大于 0")
+    if not 0 < target_segment_seconds <= max_segment_seconds:
+        raise MediaSegmentationError("分段目标时长必须大于 0 且不能超过硬上限")
     clean_script = script.strip()
     if not clean_script:
         raise MediaSegmentationError("口播脚本不能为空")
-    if duration_seconds <= MAX_SEGMENT_SECONDS + 0.01:
+    if duration_seconds <= max_segment_seconds + 0.01:
         return [
             SegmentPlan(
                 index=1,
@@ -186,7 +197,11 @@ def plan_audio_segments(
             )
         ]
 
-    units = _split_text_units(clean_script, duration_seconds)
+    units = _split_text_units(
+        clean_script,
+        duration_seconds,
+        max_segment_seconds=max_segment_seconds,
+    )
     weights = [_speech_weight(unit) for unit in units]
     total_weight = sum(weights)
     cumulative_weights: list[int] = []
@@ -201,7 +216,7 @@ def plan_audio_segments(
     time_start = 0.0
     while unit_start < len(units):
         remaining = duration_seconds - time_start
-        if remaining <= MAX_SEGMENT_SECONDS + 0.01:
+        if remaining <= max_segment_seconds + 0.01:
             plans.append(
                 SegmentPlan(
                     index=len(plans) + 1,
@@ -223,14 +238,14 @@ def plan_audio_segments(
             relative = estimated_end - time_start
             if relative < _MIN_USEFUL_SEGMENT_SECONDS:
                 continue
-            if relative > MAX_SEGMENT_SECONDS:
+            if relative > max_segment_seconds:
                 break
             nearby = [
                 point
                 for point in silences
                 if time_start + _MIN_USEFUL_SEGMENT_SECONDS
                 <= point
-                <= time_start + MAX_SEGMENT_SECONDS
+                <= time_start + max_segment_seconds
                 and abs(point - estimated_end) <= 3.0
             ]
             actual_end = min(
@@ -239,8 +254,16 @@ def plan_audio_segments(
                 default=estimated_end,
             )
             used_silence = bool(nearby)
-            score = abs((actual_end - time_start) - TARGET_SEGMENT_SECONDS)
-            if not 25 <= actual_end - time_start <= 35:
+            score = abs((actual_end - time_start) - target_segment_seconds)
+            preferred_lower = max(
+                _MIN_USEFUL_SEGMENT_SECONDS,
+                target_segment_seconds - 5,
+            )
+            preferred_upper = min(
+                max_segment_seconds,
+                target_segment_seconds + 5,
+            )
+            if not preferred_lower <= actual_end - time_start <= preferred_upper:
                 score += 4
             if not used_silence:
                 score += 2
@@ -250,9 +273,12 @@ def plan_audio_segments(
             _score, unit_end, time_end, used_silence = min(candidates)
         else:
             unit_end = unit_start
-            time_end = min(time_start + MAX_SEGMENT_SECONDS, duration_seconds)
+            time_end = min(time_start + max_segment_seconds, duration_seconds)
             used_silence = False
-        time_end = min(max(time_end, time_start + 0.1), time_start + MAX_SEGMENT_SECONDS)
+        time_end = min(
+            max(time_end, time_start + 0.1),
+            time_start + max_segment_seconds,
+        )
         plans.append(
             SegmentPlan(
                 index=len(plans) + 1,
@@ -272,11 +298,16 @@ def plan_audio_segments(
 def plan_silence_segments(
     duration_seconds: float,
     silence_midpoints: list[float] | None = None,
+    *,
+    target_segment_seconds: float = TARGET_SEGMENT_SECONDS,
+    max_segment_seconds: float = MAX_SEGMENT_SECONDS,
 ) -> list[SegmentPlan]:
     """Split narration at natural pauses without transcript alignment."""
 
     if duration_seconds <= 0:
         raise MediaSegmentationError("音频时长必须大于 0")
+    if not 0 < target_segment_seconds <= max_segment_seconds:
+        raise MediaSegmentationError("分段目标时长必须大于 0 且不能超过硬上限")
     candidates = sorted(
         {
             round(float(value), 3)
@@ -286,10 +317,10 @@ def plan_silence_segments(
     )
     plans: list[SegmentPlan] = []
     start = 0.0
-    while duration_seconds - start > MAX_SEGMENT_SECONDS + 0.01:
+    while duration_seconds - start > max_segment_seconds + 0.01:
         lower = start + _MIN_USEFUL_SEGMENT_SECONDS
-        upper = min(start + MAX_SEGMENT_SECONDS, duration_seconds)
-        target = min(start + TARGET_SEGMENT_SECONDS, upper)
+        upper = min(start + max_segment_seconds, duration_seconds)
+        target = min(start + target_segment_seconds, upper)
         available = [
             value
             for value in candidates
@@ -347,11 +378,16 @@ def _join_cue_text(cues: list[SubtitleCue]) -> str:
 def plan_timestamped_segments(
     cues: list[SubtitleCue],
     duration_seconds: float,
+    *,
+    target_segment_seconds: float = TARGET_SEGMENT_SECONDS,
+    max_segment_seconds: float = MAX_SEGMENT_SECONDS,
 ) -> list[SegmentPlan]:
     """Group official sentence timestamps into roughly 30-second segments."""
 
     if duration_seconds <= 0:
         raise MediaSegmentationError("生成音频时长必须大于 0")
+    if not 0 < target_segment_seconds <= max_segment_seconds:
+        raise MediaSegmentationError("分段目标时长必须大于 0 且不能超过硬上限")
     if not cues:
         raise MediaSegmentationError("MiniMax 没有返回可用的句级时间戳")
     ordered = sorted(cues, key=lambda cue: (cue.start_seconds, cue.end_seconds))
@@ -388,7 +424,7 @@ def plan_timestamped_segments(
     for end_index in range(1, cue_count + 1):
         for start_index in range(end_index - 1, -1, -1):
             segment_duration = boundaries[end_index] - boundaries[start_index]
-            if segment_duration > MAX_SEGMENT_SECONDS + 0.01:
+            if segment_duration > max_segment_seconds + 0.01:
                 continue
             if segment_duration <= 0:
                 continue
@@ -400,7 +436,7 @@ def plan_timestamped_segments(
             )
             score = (
                 costs[start_index]
-                + (segment_duration - TARGET_SEGMENT_SECONDS) ** 2
+                + (segment_duration - target_segment_seconds) ** 2
                 + short_penalty
             )
             if score < costs[end_index]:
@@ -412,7 +448,7 @@ def plan_timestamped_segments(
             cue.end_seconds - cue.start_seconds for cue in ordered
         )
         raise MediaSegmentationError(
-            "句级时间戳中存在无法控制在 45 秒内的长句"
+            f"句级时间戳中存在无法控制在 {max_segment_seconds:g} 秒内的长句"
             f"（最长约 {longest:.1f} 秒），请在脚本中补充句号后重试"
         )
 
@@ -438,7 +474,13 @@ def plan_timestamped_segments(
     ]
 
 
-def build_segment_plan(audio_path: Path, script: str) -> list[SegmentPlan]:
+def build_segment_plan(
+    audio_path: Path,
+    script: str,
+    *,
+    target_segment_seconds: float = TARGET_SEGMENT_SECONDS,
+    max_segment_seconds: float = MAX_SEGMENT_SECONDS,
+) -> list[SegmentPlan]:
     try:
         duration = inspect_audio_duration(audio_path)
     except AudioInspectionError as exc:
@@ -447,6 +489,8 @@ def build_segment_plan(audio_path: Path, script: str) -> list[SegmentPlan]:
         script,
         duration,
         detect_silence_midpoints(audio_path),
+        target_segment_seconds=target_segment_seconds,
+        max_segment_seconds=max_segment_seconds,
     )
 
 

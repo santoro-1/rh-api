@@ -84,7 +84,7 @@ def test_direct_audio_inspection_rejects_more_than_45_seconds(
         },
     )
     assert response.status_code == 400
-    assert "不能超过 45 秒" in response.json()["detail"]
+    assert "不能超过 35 秒" in response.json()["detail"]
 
 
 def test_task_creation_returns_immediately_without_calling_runninghub(client, monkeypatch):

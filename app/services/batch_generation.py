@@ -35,6 +35,7 @@ from app.services.batch_manifests import (
 )
 from app.services.long_audio import MAX_LONG_AUDIO_SECONDS
 from app.services.media_segmentation import (
+    DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     MAX_SEGMENT_SECONDS,
     inspect_media_duration,
 )
@@ -623,10 +624,11 @@ def validate_batch(
                         )
                         if (
                             inspect_audio_duration(auxiliary_path)
-                            > MAX_SEGMENT_SECONDS + 0.01
+                            > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01
                         ):
                             raise ValueError(
-                                f"{label}不能超过 45 秒，请先拆成多行任务"
+                                f"{label}不能超过 "
+                                f"{DIGITAL_HUMAN_MAX_SEGMENT_SECONDS:g} 秒，请先拆成多行任务"
                             )
                 if audio_mode == "upload":
                     audio_path = safe_relative_path(
@@ -656,7 +658,7 @@ def validate_batch(
                     "audio_duration_seconds": duration,
                     "requires_segmentation": (
                         audio_mode == "upload"
-                        and duration > MAX_SEGMENT_SECONDS + 0.01
+                        and duration > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01
                     ),
                 }
             else:

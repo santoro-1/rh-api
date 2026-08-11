@@ -24,6 +24,7 @@ from app.models import (
 from app.services.alignment import get_alignment_provider
 from app.services.audio import format_duration_timecode, inspect_audio_duration
 from app.services.media_segmentation import (
+    DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     MAX_SEGMENT_SECONDS,
     SegmentPlan,
     cut_audio_segment,
@@ -57,6 +58,14 @@ MAX_LONG_AUDIO_SECONDS = 60 * 60
 
 class LongAudioError(ValueError):
     """A long-audio project cannot advance to the requested state."""
+
+
+def _max_segment_seconds(workflow_type: str) -> float:
+    return (
+        DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
+        if workflow_type == DIGITAL_HUMAN_WORKFLOW
+        else MAX_SEGMENT_SECONDS
+    )
 
 
 def _now() -> datetime:
@@ -206,8 +215,11 @@ def create_long_audio_project(
             source_video, directory, visual_kind, settings
         )
         duration = inspect_audio_duration(audio_path)
-        if duration <= MAX_SEGMENT_SECONDS + 0.01:
-            raise LongAudioError("音频不超过 45 秒，请直接使用普通上传入口")
+        max_segment_seconds = _max_segment_seconds(workflow_type)
+        if duration <= max_segment_seconds + 0.01:
+            raise LongAudioError(
+                f"音频不超过 {max_segment_seconds:g} 秒，请直接使用普通上传入口"
+            )
         if duration > MAX_LONG_AUDIO_SECONDS:
             raise LongAudioError("第一版长音频最多支持 60 分钟")
         if workflow_type == LTX_WORKFLOW:
@@ -272,6 +284,7 @@ def analyze_long_audio_project(
         plans = plan_silence_segments(
             project.duration_seconds,
             detect_silence_midpoints(audio_path),
+            max_segment_seconds=DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
         )
         apply_alignment_plans(project, settings, plans, provider="vad_silence")
     else:
@@ -301,6 +314,7 @@ def apply_alignment_plans(
             f"自动分段数量超过当前上限 {settings.max_batch_items}"
         )
     previous_end = 0.0
+    max_segment_seconds = _max_segment_seconds(project.workflow_type)
     for position, plan in enumerate(plans, start=1):
         if plan.index != position:
             raise LongAudioError("对齐服务返回的分段序号不连续")
@@ -308,9 +322,11 @@ def apply_alignment_plans(
             raise LongAudioError("对齐服务返回的时间轴不连续")
         if (
             plan.end_seconds <= plan.start_seconds
-            or plan.duration_seconds > MAX_SEGMENT_SECONDS + 0.01
+            or plan.duration_seconds > max_segment_seconds + 0.01
         ):
-            raise LongAudioError("对齐服务返回了无效或超过45秒的分段")
+            raise LongAudioError(
+                f"对齐服务返回了无效或超过{max_segment_seconds:g}秒的分段"
+            )
         previous_end = plan.end_seconds
     if abs(previous_end - project.duration_seconds) > 0.1:
         raise LongAudioError("对齐服务没有覆盖完整音频")
@@ -350,6 +366,7 @@ def validate_reviewed_plan(
 
     plans: list[SegmentPlan] = []
     previous_end = 0.0
+    max_segment_seconds = _max_segment_seconds(project.workflow_type)
     for position, raw in enumerate(raw_segments, start=1):
         if not isinstance(raw, dict):
             raise LongAudioError(f"第 {position} 段格式错误")
@@ -367,8 +384,10 @@ def validate_reviewed_plan(
         start = expected_start
         if end <= start:
             raise LongAudioError(f"第 {position} 段结束时间必须大于开始时间")
-        if end - start > MAX_SEGMENT_SECONDS + 0.01:
-            raise LongAudioError(f"第 {position} 段不能超过 45 秒")
+        if end - start > max_segment_seconds + 0.01:
+            raise LongAudioError(
+                f"第 {position} 段不能超过 {max_segment_seconds:g} 秒"
+            )
         plans.append(
             SegmentPlan(
                 index=position,
@@ -568,7 +587,8 @@ def materialize_long_audio_project(
                 if workflow_type == LTX_WORKFLOW:
                     shutil.copyfile(source_video, segment_visual)
             segment_duration = inspect_audio_duration(segment_audio)
-            if segment_duration <= 0 or segment_duration > MAX_SEGMENT_SECONDS + 0.2:
+            max_segment_seconds = _max_segment_seconds(workflow_type)
+            if segment_duration <= 0 or segment_duration > max_segment_seconds + 0.2:
                 raise LongAudioError(
                     f"第 {plan.index} 段远程音频时长无效"
                 )

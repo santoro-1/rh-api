@@ -26,7 +26,10 @@ from app.services.audio import (
     inspect_audio_duration,
     validate_time_range,
 )
-from app.services.media_segmentation import MAX_SEGMENT_SECONDS
+from app.services.media_segmentation import (
+    DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
+    MAX_SEGMENT_SECONDS,
+)
 from app.services.csrf import require_csrf
 from app.services.storage import (
     UploadValidationError,
@@ -267,9 +270,9 @@ def inspect_audio(
         end_text = format_duration_timecode(duration)
         if duration < 1:
             raise AudioInspectionError("音频时长不足 1 秒，无法生成视频")
-        if duration > MAX_SEGMENT_SECONDS + 0.01:
+        if duration > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01:
             raise AudioInspectionError(
-                "音频不能超过 45 秒；请先拆分音频，或使用脚本完整流程自动切分"
+                "数字人音频不能超过 35 秒；请先拆分音频，或使用脚本完整流程自动切分"
             )
         return {
             "durationSeconds": round(duration, 3),
@@ -315,17 +318,20 @@ def create_task(
         image_path, image_original_name = save_upload(image, upload_dir, "image", settings)
         audio_path, audio_original_name = save_upload(audio, upload_dir, "audio", settings)
         duration = inspect_audio_duration(audio_path)
-        if duration > MAX_SEGMENT_SECONDS + 0.01:
+        if duration > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01:
             raise ValueError(
-                "音频不能超过 45 秒；请先拆分音频，或使用脚本完整流程自动切分"
+                "数字人音频不能超过 35 秒；请先拆分音频，或使用脚本完整流程自动切分"
             )
         selected_start, selected_end = validate_time_range(
             startTime,
             endTime,
             duration,
         )
-        if selected_end - selected_start > MAX_SEGMENT_SECONDS + 0.01:
-            raise ValueError("单次生成使用的音频区间不能超过 45 秒")
+        if (
+            selected_end - selected_start
+            > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01
+        ):
+            raise ValueError("单次数字人生成使用的音频区间不能超过 35 秒")
         parameters = {
             "prompt": prompt,
             "start_time": startTime,
@@ -354,9 +360,12 @@ def create_task(
             for name, upload in (("left_audio", leftAudio), ("right_audio", rightAudio)):
                 path, original_name = save_upload(upload, upload_dir, "audio", settings)
                 auxiliary_duration = inspect_audio_duration(path)
-                if auxiliary_duration > MAX_SEGMENT_SECONDS + 0.01:
+                if (
+                    auxiliary_duration
+                    > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01
+                ):
                     label = "左人物音频" if name == "left_audio" else "右人物音频"
-                    raise ValueError(f"{label}不能超过 45 秒，请先拆分音频")
+                    raise ValueError(f"{label}不能超过 35 秒，请先拆分音频")
                 assets.append(
                     WorkflowAsset(
                         name=name,

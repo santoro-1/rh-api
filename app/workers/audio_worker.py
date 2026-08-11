@@ -31,6 +31,7 @@ from app.services.logging_config import (
     write_heartbeat,
 )
 from app.services.media_segmentation import (
+    DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     MediaSegmentationError,
     build_segment_plan,
     cut_audio_segment,
@@ -468,6 +469,11 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
     workflow_type = task.batch_item.batch.workflow_type
     parameters = json.loads(task.video_parameters_json)
     full_duration = inspect_audio_duration(audio_path)
+    segment_max_seconds = (
+        DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
+        if workflow_type == "digital_human"
+        else None
+    )
     if task.subtitle_path:
         subtitle_path = safe_relative_path(
             task.subtitle_path, get_settings().data_dir
@@ -477,12 +483,28 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
         cues = load_subtitle_cues(
             subtitle_path.read_text(encoding="utf-8")
         )
-        plans = plan_timestamped_segments(cues, full_duration)
+        plans = (
+            plan_timestamped_segments(
+                cues,
+                full_duration,
+                max_segment_seconds=segment_max_seconds,
+            )
+            if segment_max_seconds is not None
+            else plan_timestamped_segments(cues, full_duration)
+        )
     elif task.provider_task_id:
         raise ValueError("MiniMax 异步结果缺少句级时间轴，尚未创建视频任务")
     else:
         # Compatibility for audio rows created before async TTS was introduced.
-        plans = build_segment_plan(audio_path, task.speech_script)
+        plans = (
+            build_segment_plan(
+                audio_path,
+                task.speech_script,
+                max_segment_seconds=segment_max_seconds,
+            )
+            if segment_max_seconds is not None
+            else build_segment_plan(audio_path, task.speech_script)
+        )
     task.alignment_method = ",".join(
         sorted({plan.alignment_method for plan in plans})
     )

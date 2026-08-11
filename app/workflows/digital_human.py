@@ -9,10 +9,11 @@ from app.services.audio import (
     format_timecode,
     validate_time_range,
 )
+from app.services.media_segmentation import DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
 from app.workflows.base import WorkflowAsset, WorkflowOutput
 
 
-DIGITAL_HUMAN_MAX_SECONDS = 45.0
+DIGITAL_HUMAN_MAX_SECONDS = DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
 DIGITAL_HUMAN_TAIL_PADDING_SECONDS = 0.5
 DIGITAL_HUMAN_INSTANCE_TYPE = "plus"
 EXACT_TIMESTAMP_TIMING_MODE = "exact_timestamps"
