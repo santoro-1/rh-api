@@ -539,16 +539,20 @@ def test_punctuation_breaks_are_added_locally_without_model_output() -> None:
     ]
 
 
-def test_unoffered_break_position_fails_only_subtitle_branch() -> None:
+def test_unoffered_break_position_is_dropped_without_failing_subtitle_branch() -> None:
     user_id = _configured_user("invalid-provider-break")
-    fake = FakeArkClient([_ark_response(_provider_payload(prefer_after=[99]))])
+    fake = FakeArkClient([_ark_response(_provider_payload(prefer_after=[4, 99]))])
 
     result = _analyze(user_id, fake)
 
-    assert result["overall_status"] == "PARTIAL"
+    assert result["overall_status"] == "SUCCESS"
     assert result["music_analysis_status"] == "SUCCESS"
-    assert result["subtitle_analysis_status"] == "FAILED"
-    assert result["errors"]["subtitle"]["code"] == "SUBTITLE_BREAK_INVALID"
+    assert result["subtitle_analysis_status"] == "SUCCESS"
+    assert result["errors"]["subtitle"] is None
+    assert [unit["text"] for unit in result["subtitle_units"]] == [
+        "那么通过",
+        "八十四天",
+    ]
     assert len(fake.calls) == 1
 
 

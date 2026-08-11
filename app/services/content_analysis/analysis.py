@@ -40,6 +40,7 @@ from app.services.content_analysis.contracts import (
     parse_subtitle_break_plan_payload,
     parse_subtitle_units_payload,
     parse_visual_plan_payload,
+    subtitle_break_candidate_positions,
     visual_context_sha256,
 )
 from app.services.logging_config import log_event
@@ -47,7 +48,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v10"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v11"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -537,6 +538,46 @@ def _parse_break_plan_branch(
             )
         )
     except ContentAnalysisContractError as exc:
+        if exc.code == "subtitle_break_invalid":
+            raw_breaks = payload.get("subtitle_breaks")
+            if isinstance(raw_breaks, Mapping):
+                candidates = set(subtitle_break_candidate_positions(original_script))
+                repaired: dict[str, list[int]] = {}
+                dropped_positions: list[int] = []
+                repairable = True
+                for field_name in ("prefer_after", "allow_after"):
+                    raw_positions = raw_breaks.get(field_name)
+                    if not isinstance(raw_positions, list) or any(
+                        type(position) is not int for position in raw_positions
+                    ):
+                        repairable = False
+                        break
+                    repaired[field_name] = [
+                        position for position in raw_positions if position in candidates
+                    ]
+                    dropped_positions.extend(
+                        position for position in raw_positions if position not in candidates
+                    )
+                if repairable and dropped_positions:
+                    try:
+                        repaired_units = parse_subtitle_break_plan_payload(
+                            repaired,
+                            original_script=original_script,
+                        )
+                    except (ContentAnalysisContractError, ValidationError, TypeError, ValueError):
+                        pass
+                    else:
+                        log_event(
+                            logger,
+                            "content_analysis.subtitle_breaks_repaired",
+                            "已丢弃豆包返回的未提供字幕断点",
+                            level=logging.WARNING,
+                            dropped_count=len(dropped_positions),
+                            dropped_positions=sorted(dropped_positions),
+                            retained_count=sum(len(values) for values in repaired.values()),
+                            script_length=len(original_script),
+                        )
+                        return BranchResult.success(repaired_units)
         subtitle_code = exc.code.upper()
         if not subtitle_code.startswith("SUBTITLE_"):
             subtitle_code = f"SUBTITLE_{subtitle_code}"
