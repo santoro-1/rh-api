@@ -244,6 +244,24 @@ def test_title_failure_is_isolated_from_music_subtitle_and_visual_results() -> N
     assert len(fake.calls) == 1
 
 
+def test_title_second_line_overflow_is_isolated_from_other_results() -> None:
+    user_id = _configured_user("partial-title-line-2")
+    payload = _provider_payload()
+    payload["title"] = {"line_1": "健康真相", "line_2": "一二三四五六七八九"}
+    fake = FakeArkClient([_ark_response(payload)])
+
+    result = _analyze(user_id, fake)
+
+    assert result["overall_status"] == "PARTIAL"
+    assert result["music_analysis_status"] == "SUCCESS"
+    assert result["subtitle_analysis_status"] == "SUCCESS"
+    assert result["visual_analysis_status"] == "SUCCESS"
+    assert result["title_analysis_status"] == "FAILED"
+    assert result["title"] is None
+    assert result["errors"]["title"]["code"] == "TITLE_SCHEMA_INVALID"
+    assert len(fake.calls) == 1
+
+
 def test_subtitle_mismatch_debug_snapshot_is_explicitly_opt_in(
     monkeypatch,
     tmp_path,

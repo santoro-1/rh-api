@@ -47,7 +47,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v9"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v10"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -175,7 +175,7 @@ def _system_prompt() -> str:
 
         title：
         - 这是封面和视频顶部共同使用的唯一两行标题，不生成两套文案。
-        - line_1 为 2～5 个汉字的主题钩子，绝对不能超过 5 个字符；line_2 为 4～14 个字符的
+        - line_1 为 2～5 个汉字的主题钩子，绝对不能超过 5 个字符；line_2 为 4～8 个字符的
           信息主句。两行都不能包含空格、换行，不能重复。
         - 一眼能看懂脚本真正要表达的重点；优先使用具体对象、反常识、关键方法、明确后果或收益，
           做到吸睛且有信息量。
@@ -591,7 +591,7 @@ def _parse_title_branch(payload: Mapping[str, Any]) -> BranchResult:
     except (ValidationError, TypeError, ValueError):
         return BranchResult.failed(
             "TITLE_SCHEMA_INVALID",
-            "两行标题不符合第一行 5 字、第二行 14 字的统一契约",
+            "两行标题不符合第一行 5 字、第二行 8 字的统一契约",
         )
 
 
