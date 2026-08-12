@@ -50,10 +50,16 @@
         </select>
       </label>
     </div>
-    <label id="long-audio-digital-options" class="hidden">数字人动作提示
-      <textarea name="digitalPrompt" rows="4" maxlength="2000">人物自然地说话，他的身体和手部随着说话的节奏做着自然且随意的动作，镜头保持稳定。</textarea>
-      <span class="field-help">数字人按每段音频说话。</span>
-    </label>
+    <div id="long-audio-digital-options" class="stack-form hidden">
+      <label>数字人动作提示
+        <textarea name="digitalPrompt" rows="4" maxlength="2000">人物自然地说话，他的身体和手部随着说话的节奏做着自然且随意的动作，镜头保持稳定。</textarea>
+        <span class="field-help">数字人按每段音频说话。</span>
+      </label>
+      <label class="inline-check batch-confirm">
+        <input id="long-audio-seedvr2-enabled" type="checkbox" checked>
+        <span>每个数字人片段完成后使用 SeedVR2 48G 放大（会产生额外 RunningHub 费用）</span>
+      </label>
+    </div>
     <label class="inline-check batch-confirm long-audio-review-toggle">
       <input name="reviewRequired" type="checkbox" value="true">
       <span>分段后暂停，先人工试听确认</span>

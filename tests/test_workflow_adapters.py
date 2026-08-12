@@ -72,7 +72,7 @@ def test_digital_human_adapter_is_registered_and_owns_payload_mapping():
     assert "752" not in expected_nodes
 
 
-def test_digital_human_adapter_upgrades_legacy_default_recipe_to_plus():
+def test_digital_human_adapter_preserves_frozen_24g_recipe():
     workflow = get_workflow("digital_human")
     parameters = workflow.validate_parameters(
         {"prompt": "历史任务", "start_time": "0:00", "end_time": "0:10"},
@@ -107,7 +107,25 @@ def test_digital_human_adapter_upgrades_legacy_default_recipe_to_plus():
         settings={},
     )
 
-    assert payload["instanceType"] == "plus"
+    assert payload["instanceType"] == "default"
+
+
+def test_digital_human_adapter_normalizes_seedvr2_switch():
+    workflow = get_workflow("digital_human")
+
+    parameters = workflow.validate_parameters(
+        {
+            "prompt": "不开启放大",
+            "start_time": "0:00",
+            "end_time": "0:10",
+            "instance_type": "default",
+            "seedvr2_enabled": "false",
+        },
+        {"audio_duration_seconds": 10.0},
+    )
+
+    assert parameters["instance_type"] == "default"
+    assert parameters["seedvr2_enabled"] is False
 
 
 def test_seedvr2_adapter_is_fixed_to_48g_and_maps_video_nodes():

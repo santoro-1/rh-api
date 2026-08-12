@@ -17,11 +17,16 @@
     <label>Base URL<input name="base_url" value="{{ config.base_url }}" required></label>
     <label>AI App ID<input name="ai_app_id" value="{{ config.ai_app_id }}" required></label>
   </div>
-  <input name="instance_type" type="hidden" value="plus">
   <div class="two-columns">
+    <label>数字人运行实例
+      <select name="instance_type">
+        <option value="default" {% if config.instance_type == 'default' %}selected{% endif %}>default（24G）</option>
+        <option value="plus" {% if config.instance_type == 'plus' %}selected{% endif %}>plus（48G）</option>
+      </select>
+    </label>
     <label>最大同时任务数<input name="max_concurrent_tasks" type="number" min="1" max="20" value="{{ config.max_concurrent_tasks }}" required></label>
   </div>
-  <p class="field-help">数字人固定使用 Plus 运行（48G）；视频对口型仍在其独立配置中选择。</p>
+  <p class="field-help">只影响保存后新创建的数字人任务；任务启动时会冻结该配置。SeedVR2 放大仍固定使用 Plus 48G。</p>
   <label>默认提示词<textarea name="default_prompt" rows="4">{{ config.default_prompt }}</textarea></label>
   </div>
   </details>

@@ -47,6 +47,7 @@ from app.services.task_creation import (
     ensure_user_can_create_workflow,
     validate_task_input,
 )
+from app.services.workflow_configs import get_user_workflow_config
 from app.workflows.base import WorkflowAsset
 
 
@@ -167,6 +168,7 @@ def create_long_audio_project(
     source_video: UploadFile,
     prompt_prefix: str,
     instance_type: str,
+    seedvr2_enabled: bool = True,
     alignment_provider: str = "funasr_http",
     workflow_type: str = LTX_WORKFLOW,
     review_required: bool = False,
@@ -233,6 +235,11 @@ def create_long_audio_project(
         remove_directory(directory)
         raise
 
+    digital_instance_type = (
+        get_user_workflow_config(user, DIGITAL_HUMAN_WORKFLOW).instance_type
+        if workflow_type == DIGITAL_HUMAN_WORKFLOW
+        else instance_type
+    )
     project = LongAudioProject(
         id=project_id,
         user_id=user.id,
@@ -248,8 +255,11 @@ def create_long_audio_project(
         parameters_json=json.dumps(
             {
                 "prompt_prefix": clean_prefix,
-                "instance_type": (
-                    instance_type if workflow_type == LTX_WORKFLOW else "plus"
+                "instance_type": digital_instance_type,
+                "seedvr2_enabled": (
+                    bool(seedvr2_enabled)
+                    if workflow_type == DIGITAL_HUMAN_WORKFLOW
+                    else True
                 ),
                 "digital_prompt": (
                     clean_digital_prompt
@@ -677,7 +687,10 @@ def materialize_long_audio_project(
                         "resolution": str(
                             parameters.get("resolution") or "1024"
                         ),
-                        "instance_type": "plus",
+                        "instance_type": instance_type,
+                        "seedvr2_enabled": parameters.get(
+                            "seedvr2_enabled", True
+                        ),
                     }
                 )
             validated = validate_task_input(

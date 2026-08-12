@@ -298,6 +298,7 @@ def test_digital_human_long_audio_auto_splits_without_asr(client, monkeypatch):
             "name": "数字人长音频",
             "workflowType": "digital_human",
             "digitalPrompt": "人物自然说话并轻微挥手。",
+            "seedvr2Enabled": "false",
         },
         files={
             "customAudio": ("long.mp3", b"ID3long-audio", "audio/mpeg"),
@@ -338,6 +339,8 @@ def test_digital_human_long_audio_auto_splits_without_asr(client, monkeypatch):
         payloads = [json.loads(task.input_payload) for task in tasks]
         assert all("image" in payload["assets"] for payload in payloads)
         assert all(payload["parameters"]["instance_type"] == "plus" for payload in payloads)
+        assert all(payload["parameters"]["seedvr2_enabled"] is False for payload in payloads)
+        assert all(task.seedvr2_enabled is False for task in tasks)
 
 
 def test_long_audio_ltx_defaults_to_plus_instance(client, monkeypatch):

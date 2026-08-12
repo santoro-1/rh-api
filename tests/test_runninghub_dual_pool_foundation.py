@@ -23,9 +23,12 @@ from app.services.runninghub_dual_pool import (
     RunningHubExecutionModeConflictError,
     batch_execution_mode,
     bind_batch_execution_mode,
+    dual_pool_runtime_enabled,
     resolve_execution_mode,
+    set_dual_pool_runtime_enabled,
     set_dual_pool_grant,
 )
+from app.services.runninghub_dispatch import task_uses_execution_pool
 from app.services.runninghub_pool import (
     DuplicateRunningHubCredentialError,
     create_execution_account,
@@ -127,6 +130,25 @@ def test_execution_mode_requires_server_switch_entitlement_and_supported_scope()
             workflow_type="ltx_lip_sync",
             dual_pool_enabled=True,
         ) == BATCH_EXECUTION_MODE_SAME_ACCOUNT_V1
+
+
+def test_web_runtime_switch_overrides_environment_and_is_persistent(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.runninghub_dual_pool.get_settings",
+        lambda: SimpleNamespace(runninghub_dual_pool_enabled=False),
+    )
+    with SessionLocal() as db:
+        admin = _user(db, "runtime-control-admin", is_admin=True)
+        assert dual_pool_runtime_enabled(db) is False
+        set_dual_pool_runtime_enabled(db, enabled=True, updated_by_user_id=admin.id)
+        db.commit()
+
+    monkeypatch.setattr(
+        "app.services.runninghub_dual_pool.get_settings",
+        lambda: SimpleNamespace(runninghub_dual_pool_enabled=False),
+    )
+    with SessionLocal() as db:
+        assert dual_pool_runtime_enabled(db) is True
 
 
 def test_batch_execution_mode_is_atomic_and_historical_null_remains_same_account():
@@ -246,6 +268,74 @@ def test_controlled_user_receives_only_safe_dual_pool_summaries(client, monkeypa
         "seedvr2_ai_app_id",
     ):
         assert forbidden not in serialized
+
+
+def test_controlled_user_keeps_same_account_pool_when_dual_switch_is_off(
+    client, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.runninghub_dual_pool.get_settings",
+        lambda: SimpleNamespace(runninghub_dual_pool_enabled=False),
+    )
+    with SessionLocal() as db:
+        user = _user(db, "Cx_ceshi_same_pool", is_admin=False)
+        set_dual_pool_grant(
+            db, user=user, is_enabled=True, allow_non_admin=True, note="白天测试"
+        )
+        account = create_execution_account(
+            db,
+            label="一控多账号",
+            api_key="same-pool-controlled-key",
+            base_url="https://same.example",
+            digital_human_ai_app_id="same-app",
+            max_concurrent_tasks=5,
+            is_enabled=True,
+            admin_user_ids=[user.id],
+        )
+        batch = _batch(db, user, "controlled-same-dispatch")
+        batch.execution_mode = BATCH_EXECUTION_MODE_SAME_ACCOUNT_V1
+        batch.runninghub_execution_account_ids_json = f"[{account.id}]"
+        item = GenerationBatchItem(
+            id="controlled-same-item",
+            batch=batch,
+            row_number=1,
+            row_key="1",
+            manifest_json="{}",
+        )
+        task = GenerationTask(
+            id="controlled-same-task",
+            user_id=user.id,
+            batch_item=item,
+            workflow_type="digital_human",
+            status=TaskStatus.PENDING.value,
+            prompt="test",
+            image_path="uploads/image.png",
+            audio_path="uploads/audio.mp3",
+            image_original_name="image.png",
+            audio_original_name="audio.mp3",
+            audio_duration_seconds=1,
+            start_seconds=0,
+            end_seconds=1,
+        )
+        db.add_all([item, task])
+        db.commit()
+        account_id = account.id
+        assert task_uses_execution_pool(task) is True
+
+    login_response = client.post(
+        "/api/auth/center/login",
+        json={"username": "Cx_ceshi_same_pool", "password": "password123"},
+    )
+    response = client.post(
+        "/api/workbench/runninghub-dual-pool-accounts",
+        json={"access_token": login_response.json()["access_token"]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["execution_mode"] == BATCH_EXECUTION_MODE_SAME_ACCOUNT_V1
+    assert payload["pool_access"] is True
+    assert payload["default_selected_account_ids"] == [account_id]
+    assert "seedvr2" not in payload
 
 
 def test_same_real_key_is_rejected_across_digital_human_and_seedvr2_pools():

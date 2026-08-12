@@ -80,6 +80,10 @@
     <label>提示词
       <textarea name="prompt" rows="4" maxlength="5000" required {% if not has_api_key %}disabled{% endif %}>{{ config.default_prompt if config else "" }}</textarea>
     </label>
+    <label class="inline-check batch-confirm">
+      <input id="task-seedvr2-enabled" type="checkbox" checked {% if not has_api_key %}disabled{% endif %}>
+      <span>数字人完成后使用 SeedVR2 48G 放大（会产生额外 RunningHub 费用）</span>
+    </label>
     <p id="form-error" class="error hidden"></p>
     <button id="submit-button" type="submit" {% if not has_api_key %}disabled{% endif %}>开始生成</button>
   </form>
@@ -125,11 +129,12 @@
 const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 const initialWorkflow = {{ initial_workflow|tojson }};
 const ltxDefaultInstance = "plus";
+const digitalDefaultInstance = {{ config.instance_type|tojson }};
 const instanceSelect = document.getElementById("task-instance-type");
 const workflowTabs = document.querySelectorAll(".workflow-tab");
 const workflowPanels = document.querySelectorAll(".workflow-panel");
 const instanceSelections = {
-  digital_human: "plus",
+  digital_human: ["default", "plus"].includes(digitalDefaultInstance) ? digitalDefaultInstance : "plus",
   ltx_lip_sync: ["default", "plus"].includes(ltxDefaultInstance) ? ltxDefaultInstance : "plus",
 };
 let activeWorkflow = null;
@@ -137,7 +142,7 @@ function activateWorkflow(workflow) {
   if (activeWorkflow) instanceSelections[activeWorkflow] = instanceSelect.value;
   activeWorkflow = workflow;
   if (workflow === "digital_human") {
-    instanceSelect.value = "default";
+    instanceSelect.value = instanceSelections.digital_human;
     instanceSelect.disabled = true;
   } else {
     instanceSelect.disabled = false;
@@ -212,6 +217,10 @@ form?.addEventListener("submit", async (event) => {
   try {
     const formData = new FormData(form);
     formData.set("instanceType", instanceSelect.value);
+    formData.set(
+      "seedvr2Enabled",
+      document.getElementById("task-seedvr2-enabled").checked ? "true" : "false",
+    );
     const response = await fetch("/api/tasks", {
       method: "POST",
       headers: {"X-CSRF-Token": csrfToken},

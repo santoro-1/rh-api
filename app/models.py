@@ -580,6 +580,28 @@ class RunningHubDualPoolGrant(Base):
     user: Mapped[User] = relationship(back_populates="runninghub_dual_pool_grant")
 
 
+class RunningHubPoolRuntimeControl(Base):
+    """Singleton web-managed switch for new-workbench pool dispatch mode."""
+
+    __tablename__ = "runninghub_pool_runtime_controls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dual_pool_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    updated_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_runninghub_pool_runtime_singleton"),
+    )
+
+
 class SeedVR2ExecutionAccount(Base):
     """One real RunningHub credential dedicated to SeedVR2 in dual-pool mode."""
 
@@ -686,6 +708,9 @@ class GenerationTask(Base):
     )
     workflow_type: Mapped[str] = mapped_column(
         String(100), nullable=False, default="digital_human", index=True
+    )
+    seedvr2_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
     )
     # Canonical workflow input.  Legacy dedicated columns below are kept so
     # existing local tasks and the current digital-human pages stay compatible.

@@ -182,6 +182,8 @@ def test_batch_page_and_templates_support_excel_and_csv(client):
     script = client.get("/static/batch_generate.js")
     assert script.status_code == 200
     assert "batchParameters" in script.text
+    assert 'id="batch-seedvr2-enabled"' in page.text
+    assert 'seedvr2_enabled' in script.text
     assert "moveAsset" in script.text
     assert "reuseAsset" in script.text
     assert "syncAutoBatchName" in script.text
@@ -503,6 +505,7 @@ def test_digital_batch_reuses_one_image_for_multiple_audio_rows(
         "batchParameters": {
             "person_mode": "单人",
             "resolution": "1024",
+            "seedvr2_enabled": "false",
         },
         "rows": [
             {
@@ -544,6 +547,12 @@ def test_digital_batch_reuses_one_image_for_multiple_audio_rows(
         ]
         assert tasks[0].image_path != tasks[1].image_path
         assert tasks[0].audio_path != tasks[1].audio_path
+        assert all(task.seedvr2_enabled is False for task in tasks)
+        assert all(
+            json.loads(task.input_payload)["parameters"]["seedvr2_enabled"]
+            is False
+            for task in tasks
+        )
 
 
 def test_ltx_batch_reuses_one_video_for_multiple_audio_rows(

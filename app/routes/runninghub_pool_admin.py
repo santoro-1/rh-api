@@ -22,6 +22,11 @@ from app.services.runninghub_pool import (
     execution_accounts_for_admin_page,
     update_execution_account,
 )
+from app.services.runninghub_dual_pool import (
+    dual_pool_runtime_control,
+    dual_pool_runtime_enabled,
+    set_dual_pool_runtime_enabled,
+)
 from app.services.seedvr2_pool import (
     DuplicateSeedVR2CredentialError,
     SeedVR2PoolValidationError,
@@ -56,6 +61,7 @@ def runninghub_pool_page(
         )
         .order_by(User.id)
     ).all()
+    runtime_control = dual_pool_runtime_control(db)
     return templates.TemplateResponse(
         request,
         "admin_runninghub_pool.html",
@@ -64,8 +70,33 @@ def runninghub_pool_page(
             "administrators": administrators,
             "current_user": current_user,
             "default_base_url": get_settings().runninghub_base_url,
+            "dual_pool_enabled": dual_pool_runtime_enabled(db),
+            "dual_pool_control_saved": runtime_control is not None,
         },
     )
+
+
+@router.post("/runtime-mode")
+def update_runninghub_pool_runtime_mode(
+    dual_pool_enabled: bool = Form(False),
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    before = dual_pool_runtime_enabled(db)
+    set_dual_pool_runtime_enabled(
+        db, enabled=dual_pool_enabled, updated_by_user_id=current_user.id
+    )
+    db.commit()
+    log_event(
+        logger,
+        "runninghub_pool.runtime_mode_updated",
+        "管理员更新新版工作台 RunningHub 资源池运行模式",
+        operator_user_id=current_user.id,
+        before_dual_pool_enabled=before,
+        after_dual_pool_enabled=dual_pool_enabled,
+    )
+    return RedirectResponse("/admin/runninghub-pool?mode_updated=1", status_code=303)
 
 
 def _pool_error(exc: Exception) -> HTTPException:

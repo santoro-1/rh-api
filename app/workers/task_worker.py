@@ -861,6 +861,34 @@ def _handle_remote_status(
             **_video_log_context(task),
         )
         return
+    if task.workflow_type == "digital_human" and not task.seedvr2_enabled:
+        task.result_path = to_relative_data_path(destination, get_settings())
+        task.output_metadata = json.dumps(
+            {
+                "quality_variant": "digital_human_source",
+                "seedvr2_enabled": False,
+                "source": output.metadata,
+            },
+            ensure_ascii=False,
+        )
+        task.status = TaskStatus.SUCCESS.value
+        task.error_code = None
+        task.error_message = None
+        task.runninghub_failed_reason = None
+        task.runninghub_auto_retry_after = None
+        task.completed_at = _now()
+        finish_task_attempt(task, status="SUCCESS")
+        db.commit()
+        log_event(
+            logger,
+            "video.completed_without_enhancement",
+            "数字人源片段已下载，任务配置为不执行 SeedVR2 放大",
+            runninghub_task_id=task.runninghub_task_id,
+            result_path=task.result_path,
+            seedvr2_enabled=False,
+            **_video_log_context(task),
+        )
+        return
     if task.workflow_type == "digital_human":
         enhancement = task.enhancement
         if enhancement is None:

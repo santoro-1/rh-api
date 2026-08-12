@@ -15,8 +15,21 @@ from app.workflows.base import WorkflowAsset, WorkflowOutput
 
 DIGITAL_HUMAN_MAX_SECONDS = DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
 DIGITAL_HUMAN_TAIL_PADDING_SECONDS = 0.5
-DIGITAL_HUMAN_INSTANCE_TYPE = "plus"
+DIGITAL_HUMAN_DEFAULT_INSTANCE_TYPE = "plus"
 EXACT_TIMESTAMP_TIMING_MODE = "exact_timestamps"
+
+
+def _boolean_parameter(value: Any, *, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("SeedVR2 放大开关不合法")
 
 
 def _uses_exact_timestamp_timing(task: GenerationTask) -> bool:
@@ -103,7 +116,8 @@ class DigitalHumanWorkflow:
         except ValueError as exc:
             raise ValueError("最长分辨率必须是正整数") from exc
         requested_instance_type = str(
-            parameters.get("instance_type") or DIGITAL_HUMAN_INSTANCE_TYPE
+            parameters.get("instance_type")
+            or DIGITAL_HUMAN_DEFAULT_INSTANCE_TYPE
         ).strip()
         if requested_instance_type not in {"default", "plus"}:
             raise ValueError("实例类型不合法")
@@ -115,8 +129,10 @@ class DigitalHumanWorkflow:
             "end_time": format_timecode(end_seconds),
             "person_mode": person_mode,
             "resolution": resolution,
-            # Accept legacy 24G recipes above, but persist the current policy.
-            "instance_type": DIGITAL_HUMAN_INSTANCE_TYPE,
+            "instance_type": requested_instance_type,
+            "seedvr2_enabled": _boolean_parameter(
+                parameters.get("seedvr2_enabled"), default=True
+            ),
             "timing_mode": (
                 EXACT_TIMESTAMP_TIMING_MODE
                 if parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
@@ -216,7 +232,8 @@ class DigitalHumanWorkflow:
         if not isinstance(values, dict):
             raise ValueError("数字人任务参数不合法")
         selected_instance_type = str(
-            values.get("instance_type") or DIGITAL_HUMAN_INSTANCE_TYPE
+            values.get("instance_type")
+            or DIGITAL_HUMAN_DEFAULT_INSTANCE_TYPE
         ).strip()
         if selected_instance_type not in {"default", "plus"}:
             raise ValueError("实例类型不合法")
@@ -258,8 +275,8 @@ class DigitalHumanWorkflow:
             )
         return {
             "nodeInfoList": nodes,
-            # Upgrade queued legacy recipes to Plus when they reach RunningHub.
-            "instanceType": DIGITAL_HUMAN_INSTANCE_TYPE,
+            # The serialized task input is the immutable per-task snapshot.
+            "instanceType": selected_instance_type,
             "usePersonalQueue": False,
         }
 

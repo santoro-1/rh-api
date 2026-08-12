@@ -23,6 +23,7 @@ def test_generate_page_uses_fixed_stable_mode_v2(client):
     assert 'id="task-instance-type"' in response.text
     assert "Stand 运行（24G）" in response.text
     assert "Plus 运行（48G）" in response.text
+    assert 'id="task-seedvr2-enabled"' in response.text
     assert "数字人 API 文档支持" not in response.text
     assert "LTX 2.3 对口型" not in response.text
     assert "视频对口型" in response.text
@@ -114,9 +115,57 @@ def test_task_creation_returns_immediately_without_calling_runninghub(client, mo
         assert payload["parameters"]["resolution"] == "1024"
         assert payload["parameters"]["person_mode"] == "1"
         assert payload["parameters"]["instance_type"] == "plus"
+        assert payload["parameters"]["seedvr2_enabled"] is True
+        assert task.seedvr2_enabled is True
         assert "overall_mode" not in payload["parameters"]
         assert "left_audio" not in payload["assets"]
         assert "right_audio" not in payload["assets"]
+
+
+def test_digital_human_task_freezes_admin_instance_and_seedvr2_choice(
+    client, monkeypatch
+):
+    create_user("digital-config-snapshot-user")
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(
+            username="digital-config-snapshot-user"
+        ).one()
+        config = save_workflow_config(
+            user,
+            "digital_human",
+            ai_app_id="digital-app",
+            instance_type="default",
+            default_prompt="默认提示词",
+            is_enabled=True,
+        )
+        db.add(config)
+        db.commit()
+    login(client, "digital-config-snapshot-user")
+    monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda path: 15.5)
+
+    response = client.post(
+        "/api/tasks",
+        data={
+            "startTime": "0:00",
+            "endTime": "0:15",
+            "prompt": "24G 且不放大",
+            # A forged browser value cannot override the administrator setting.
+            "instanceType": "plus",
+            "seedvr2Enabled": "false",
+        },
+        files={
+            "image": ("person.png", b"\x89PNG\r\n\x1a\npayload", "image/png"),
+            "audio": ("voice.mp3", b"ID3audio-payload", "audio/mpeg"),
+        },
+    )
+
+    assert response.status_code == 201
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, response.json()["taskId"])
+        payload = json.loads(task.input_payload)
+        assert payload["parameters"]["instance_type"] == "default"
+        assert payload["parameters"]["seedvr2_enabled"] is False
+        assert task.seedvr2_enabled is False
 
 
 def test_digital_human_task_uses_plus_instance(client, monkeypatch):

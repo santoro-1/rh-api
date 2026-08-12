@@ -368,6 +368,10 @@ def test_admin_encrypts_preserves_and_clears_ltx_access_password(client):
     assert edit_page.status_code == 200
     assert "已加密保存，留空不修改" in edit_page.text
     assert "private-workflow-password" not in edit_page.text
+    assert "数字人运行实例" in edit_page.text
+    assert "default（24G）" in edit_page.text
+    assert "plus（48G）" in edit_page.text
+    assert 'name="instance_type" type="hidden"' not in edit_page.text
 
     common_update = {
         "username": "encrypted-workflow-user",

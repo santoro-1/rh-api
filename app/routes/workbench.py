@@ -557,10 +557,15 @@ def workbench_runninghub_execution_accounts(
         return {
             "schema": "runninghub.workbench-dual-pool.v1",
             "execution_mode": mode,
+            "pool_access": True,
             "digital_human": workbench_execution_account_summary(db, user),
             "seedvr2": seedvr2_workbench_account_summary(db, user),
         }
-    return workbench_execution_account_summary(db, user)
+    return {
+        **workbench_execution_account_summary(db, user),
+        "execution_mode": mode,
+        "pool_access": True,
+    }
 
 
 @router.post("/api/workbench/runninghub-dual-pool-accounts")
@@ -577,13 +582,25 @@ def workbench_runninghub_dual_pool_accounts(
         source_channel=BATCH_SOURCE_NEW_WORKBENCH,
         workflow_type=DIGITAL_HUMAN_WORKFLOW,
     )
+    has_entitlement = user_has_dual_pool_entitlement(db, user)
     if mode != BATCH_EXECUTION_MODE_DUAL_POOL_V1:
-        return {"schema": "runninghub.workbench-dual-pool.v1", "execution_mode": mode}
-    if not user_has_dual_pool_entitlement(db, user):
+        if not has_entitlement:
+            return {
+                "schema": "runninghub.workbench-dual-pool.v1",
+                "execution_mode": mode,
+                "pool_access": False,
+            }
+        return {
+            **workbench_execution_account_summary(db, user),
+            "execution_mode": mode,
+            "pool_access": True,
+        }
+    if not has_entitlement:
         raise HTTPException(status_code=403, detail="当前账号没有双资源池权限")
     return {
         "schema": "runninghub.workbench-dual-pool.v1",
         "execution_mode": mode,
+        "pool_access": True,
         "digital_human": workbench_execution_account_summary(db, user),
         "seedvr2": seedvr2_workbench_account_summary(db, user),
     }
@@ -1203,6 +1220,7 @@ def start_workbench_composition(
                 user,
                 selection_provided="runninghub_execution_account_ids" in payload,
                 raw_selection=payload.get("runninghub_execution_account_ids"),
+                allow_non_admin=user_has_dual_pool_entitlement(db, user),
             )
             bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
     except RunningHubPoolSelectionFormatError as exc:

@@ -160,6 +160,9 @@
       return {
         resolution: resolutionInput.value,
         person_mode: personModeSelect.value,
+        seedvr2_enabled: document.getElementById("batch-seedvr2-enabled").checked
+          ? "true"
+          : "false",
         ...(isSpeechMode()
           ? {default_prompt: config.digitalDefaultPrompt}
           : {}),
@@ -758,6 +761,7 @@
 
   function updateWorkflowUi(resetData = true) {
     const digital = workflowSelect.value === "digital_human";
+    document.getElementById("batch-seedvr2-row").classList.toggle("hidden", !digital);
     document.getElementById("digital-batch-settings").classList.toggle("hidden", !digital);
     document.getElementById("ltx-batch-settings").classList.toggle("hidden", digital);
     document.getElementById("primary-upload-title").textContent = digital ? "参考图片" : "源视频";
@@ -1200,6 +1204,10 @@
   personModeSelect.addEventListener("change", updateDualAudioUi);
   resolutionInput.addEventListener("input", resetConfirmation);
   instanceTypeSelect.addEventListener("change", resetConfirmation);
+  document.getElementById("batch-seedvr2-enabled").addEventListener(
+    "change",
+    resetConfirmation,
+  );
   batchNameInput.addEventListener("input", () => {
     batchNameWasEdited = true;
     resetConfirmation();

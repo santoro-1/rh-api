@@ -34,7 +34,10 @@ from app.services.runninghub_pool import (
     create_execution_account,
     validate_workbench_execution_account_selection,
 )
-from app.services.runninghub_dual_pool import set_dual_pool_grant
+from app.services.runninghub_dual_pool import (
+    dual_pool_runtime_enabled,
+    set_dual_pool_grant,
+)
 from app.services.seedvr2_pool import create_seedvr2_execution_account
 from app.services.security import decrypt_secret, encrypt_secret, secret_fingerprint
 from app.services.storage import to_relative_data_path
@@ -148,6 +151,35 @@ def test_admin_creates_encrypted_pool_account_and_legacy_fingerprints_are_shared
     assert "API Key 已加密保存" in page.text
     assert secret not in page.text
     assert 'value="pool-secret-key"' not in page.text
+
+
+def test_admin_page_can_switch_new_workbench_between_same_account_and_dual_pool(
+    client, caplog
+):
+    administrator = create_user("pool-mode-admin", is_admin=True)
+    login(client, administrator.username)
+    page = client.get("/admin/runninghub-pool")
+    assert page.status_code == 200
+    assert "新版工作台运行模式" in page.text
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/admin/runninghub-pool/runtime-mode",
+            data={"dual_pool_enabled": "true"},
+            follow_redirects=False,
+        )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/admin/runninghub-pool?mode_updated=1"
+    with SessionLocal() as db:
+        assert dual_pool_runtime_enabled(db) is True
+    assert "runninghub_pool.runtime_mode_updated" in caplog.text
+
+    response = client.post(
+        "/admin/runninghub-pool/runtime-mode", data={}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        assert dual_pool_runtime_enabled(db) is False
 
 
 def test_admin_creates_encrypted_seedvr2_account_for_controlled_user(

@@ -187,6 +187,7 @@ def _serialize_task(task: GenerationTask) -> dict:
             else None
         ),
         "workflowType": task.workflow_type,
+        "seedvr2Enabled": task.seedvr2_enabled,
         "sourceDownloadUrl": (
             f"/api/tasks/{task.id}/source-video"
             if task.workflow_type == DIGITAL_HUMAN_WORKFLOW and enhancement is not None
@@ -297,6 +298,7 @@ def create_task(
     resolution: str = Form("1024"),
     personMode: str = Form("1"),
     instanceType: str = Form("plus"),
+    seedvr2Enabled: bool = Form(True),
     leftAudio: UploadFile | None = File(None),
     rightAudio: UploadFile | None = File(None),
     csrf_ok: None = Depends(require_csrf),
@@ -307,6 +309,9 @@ def create_task(
     check_rate_limit(request, f"task-create:{current_user.id}", settings.task_create_rate_limit_per_minute)
     try:
         ensure_user_can_create_workflow(current_user, DIGITAL_HUMAN_WORKFLOW)
+        digital_config = get_user_workflow_config(
+            current_user, DIGITAL_HUMAN_WORKFLOW
+        )
         if str(personMode).strip() != "1":
             raise TaskCreationError("双人数字人模式暂未开放")
     except TaskCreationError as exc:
@@ -338,7 +343,9 @@ def create_task(
             "end_time": endTime,
             "resolution": resolution,
             "person_mode": personMode,
-            "instance_type": instanceType,
+            # Digital-human compute is an administrator-owned user setting.
+            "instance_type": digital_config.instance_type,
+            "seedvr2_enabled": seedvr2Enabled,
         }
         assets = [
             WorkflowAsset(

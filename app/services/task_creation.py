@@ -97,6 +97,7 @@ def create_generation_task(
         batch_item_id=batch_item_id,
         segment_id=segment_id,
         workflow_type=validated.workflow_key,
+        seedvr2_enabled=bool(parameters.get("seedvr2_enabled", True)),
         input_payload=json.dumps(validated.input_payload, ensure_ascii=False),
         # These columns predate workflow adapters and remain populated so old
         # task pages and existing SQLite data stay compatible.

@@ -146,6 +146,7 @@ def postproduction_manifest(
                     task.enhancement.status if task.enhancement is not None else None
                 ),
                 "quality_variant": task_quality_variant(task),
+                "seedvr2_enabled": task.seedvr2_enabled,
                 "script_text": segment.script_text if segment is not None else "",
                 "start_seconds": segment.start_seconds if segment is not None else 0.0,
                 "end_seconds": segment.end_seconds if segment is not None else task.audio_duration_seconds,

@@ -10,6 +10,7 @@ from app.models import (
     BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
     RunningHubDualPoolGrant,
+    RunningHubPoolRuntimeControl,
     User,
 )
 
@@ -47,6 +48,32 @@ def user_has_dual_pool_entitlement(db: Session, user: User) -> bool:
     return bool(user.is_admin or grant.allow_non_admin)
 
 
+def dual_pool_runtime_control(db: Session) -> RunningHubPoolRuntimeControl | None:
+    return db.get(RunningHubPoolRuntimeControl, 1)
+
+
+def dual_pool_runtime_enabled(db: Session) -> bool:
+    """Read the web-managed switch, falling back to env before its first save."""
+
+    control = dual_pool_runtime_control(db)
+    if control is not None:
+        return control.dual_pool_enabled
+    return get_settings().runninghub_dual_pool_enabled
+
+
+def set_dual_pool_runtime_enabled(
+    db: Session, *, enabled: bool, updated_by_user_id: int
+) -> RunningHubPoolRuntimeControl:
+    control = dual_pool_runtime_control(db)
+    if control is None:
+        control = RunningHubPoolRuntimeControl(id=1)
+        db.add(control)
+    control.dual_pool_enabled = enabled
+    control.updated_by_user_id = updated_by_user_id
+    db.flush()
+    return control
+
+
 def resolve_execution_mode(
     db: Session,
     *,
@@ -58,7 +85,7 @@ def resolve_execution_mode(
     """Resolve a new operation mode without trusting a client-side flag."""
 
     enabled = (
-        get_settings().runninghub_dual_pool_enabled
+        dual_pool_runtime_enabled(db)
         if dual_pool_enabled is None
         else dual_pool_enabled
     )

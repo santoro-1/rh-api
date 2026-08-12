@@ -43,10 +43,17 @@
       error.classList.add("hidden");
       status.textContent = "正在上传并检查音视频时长，请不要关闭页面……";
       try {
+        const formData = new FormData(createForm);
+        formData.set(
+          "seedvr2Enabled",
+          document.getElementById("long-audio-seedvr2-enabled").checked
+            ? "true"
+            : "false",
+        );
         const response = await fetch("/api/long-audio-projects", {
           method: "POST",
           headers: {"X-CSRF-Token": csrfToken},
-          body: new FormData(createForm),
+          body: formData,
         });
         const body = await responseJson(response);
         window.location.assign(body.detailUrl);

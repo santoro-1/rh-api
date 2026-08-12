@@ -584,7 +584,6 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
                 "start_time": "0:00",
                 "end_time": format_duration_timecode(segment_duration),
                 "person_mode": "1",
-                "instance_type": "default",
             }
             metadata = {"audio_duration_seconds": segment_duration}
             primary_name = "image"

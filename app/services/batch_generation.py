@@ -368,7 +368,9 @@ def validate_workbench_audio_batch(
                         "end_time": "0:01",
                         "resolution": str(resolution or "1024"),
                         "person_mode": "1",
-                        "instance_type": "plus",
+                        "instance_type": workflow_config.instance_type,
+                        # New workbench 4A always includes SeedVR2.
+                        "seedvr2_enabled": True,
                     },
                     asset_metadata={},
                 )
@@ -520,7 +522,12 @@ def validate_batch(
                 or first_row.get("resolution")
                 or "1024"
             )
-            batch_instance_type = "plus"
+            batch_instance_type = _instance_type(
+                "", workflow_config.instance_type
+            )
+            batch_seedvr2_enabled = batch_parameters.get(
+                "seedvr2_enabled", True
+            )
             if audio_mode == "minimax" and batch_person_mode != "1":
                 raise ValueError("脚本生成语音只支持数字人单人模式")
         else:
@@ -534,6 +541,7 @@ def validate_batch(
                 ),
                 workflow_config.instance_type,
             )
+            batch_seedvr2_enabled = True
     except ValueError as exc:
         raise BatchValidationError(
             [{"rowNumber": 0, "rowId": "", "message": str(exc)}]
@@ -652,7 +660,8 @@ def validate_batch(
                     "end_time": format_duration_timecode(duration),
                     "resolution": batch_resolution,
                     "person_mode": batch_person_mode,
-                    "instance_type": "plus",
+                    "instance_type": batch_instance_type,
+                    "seedvr2_enabled": batch_seedvr2_enabled,
                 }
                 metadata = {
                     "audio_duration_seconds": duration,
@@ -1015,6 +1024,9 @@ def create_batch(
                             "instance_type": str(
                                 row_plan.parameters.get("instance_type")
                                 or "plus"
+                            ),
+                            "seedvr2_enabled": row_plan.parameters.get(
+                                "seedvr2_enabled", True
                             ),
                             "digital_prompt": (
                                 str(row_plan.parameters.get("prompt") or "")

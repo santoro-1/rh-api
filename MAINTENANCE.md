@@ -42,8 +42,9 @@ scripts/local_services.py    本地一键启动、停止、子进程守护
 
 ```text
 批次 API -> GenerationBatchItem -> GenerationTask(PENDING)
-         -> 视频 Worker -> 数字人 RunningHub -> 源片段
-         -> SeedVR2 48G RunningHub -> 清晰结果
+         -> 视频 Worker -> 数字人 RunningHub（用户任务快照的 24G/48G）-> 源片段
+         -> 若任务快照开启 SeedVR2：48G RunningHub -> 清晰结果
+         -> 若关闭：源片段直接成为最终结果
 ```
 
 完整脚本流程：
@@ -58,7 +59,7 @@ scripts/local_services.py    本地一键启动、停止、子进程守护
 
 `GenerationBatch` 是用户看到的总批次；`GenerationBatchItem` 是清单中的一行；
 `GenerationSegment` 是长音频切出的可见子任务；`GenerationTask` 是一个用户可见的逻辑
-分段。数字人逻辑分段包含数字人和 SeedVR2 两笔一对一 RunningHub 调用，后者由
+分段。启用放大时，数字人逻辑分段包含数字人和 SeedVR2 两笔一对一 RunningHub 调用，后者由
 `GenerationTaskEnhancement` 及其 attempts 独立审计；LTX 仍只有一笔调用。批次进度必须
 从现有行、分段和清晰化事实聚合。
 
@@ -69,6 +70,8 @@ scripts/local_services.py    本地一键启动、停止、子进程守护
 - 保存第三方任务 ID 后，不得因查询失败重新提交同一任务，否则可能重复计费。
 - SeedVR2 固定 `plus`（48G）且不可由请求覆盖；数字人源片段成功后禁止因清晰化失败回退
   到数字人阶段，SeedVR2 下载失败只能复用同一远端 ID 重下。
+- `GenerationTask.seedvr2_enabled` 与序列化参数是创建时冻结的费用快照。关闭时不得创建
+  `GenerationTaskEnhancement`；旧网页下一次创建重新默认开启，新工作台始终开启。
 - RunningHub 正常排队和执行以第三方状态为准；本地远程看门狗只处理提交后超过 4 小时
   仍无终态的异常任务。到期必须先查询、再远程取消，只有取消成功才释放槽位；取消
   失败继续轮询和重试取消，不能直接写本地失败或自动重提。

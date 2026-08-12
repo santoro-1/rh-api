@@ -165,6 +165,7 @@ def create_project(
         "镜头保持稳定。"
     ),
     instanceType: str = Form("plus"),
+    seedvr2Enabled: bool = Form(True),
     reviewRequired: bool = Form(False),
     alignmentProvider: str = Form(""),
     csrf_ok: None = Depends(require_csrf),
@@ -200,6 +201,7 @@ def create_project(
             source_video=primary,
             prompt_prefix=promptPrefix,
             instance_type=instanceType,
+            seedvr2_enabled=seedvr2Enabled,
             alignment_provider=(
                 alignmentProvider.strip()
                 or settings.long_audio_alignment_provider

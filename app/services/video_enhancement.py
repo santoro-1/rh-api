@@ -131,6 +131,12 @@ def task_quality_variant(task: GenerationTask) -> str | None:
         and enhancement.status == EnhancementStatus.SUCCESS.value
     ):
         return "seedvr2_upscaled"
+    if (
+        task.workflow_type == "digital_human"
+        and not task.seedvr2_enabled
+        and task.status == TaskStatus.SUCCESS.value
+    ):
+        return "digital_human_source"
     return None
 
 

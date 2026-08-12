@@ -102,6 +102,12 @@ RunningHub 取消。取消成功后写入 `REMOTE_WATCHDOG_TIMEOUT` 终态；取
 数字人不需要知道台词对应关系，所以不调用 ASR。它只依据自然停顿切音频，并为所有
 子任务复用原图片和动作提示词。
 
+数字人运行实例由管理员按用户配置为 `default`（24G）或 `plus`（48G），创建任务时写入
+适配器输入快照；之后修改用户配置不会迁移已排队或已提交任务。旧网页单条、批量和长音频
+入口另有默认开启的 SeedVR2 开关，同样冻结到每个 `GenerationTask`。关闭时数字人结果下载
+成功即结束，不建立清晰化记录；下一次创建重新默认开启。新版工作台 4A 始终开启 SeedVR2，
+SeedVR2 自身仍固定 `plus`（48G）。
+
 ### 3.3 MiniMax 完整流程
 
 “完整流程”每个清单行只提交一次完整脚本，避免分段生成造成音色、语速和情绪不一致。
@@ -166,8 +172,10 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 
 ### 3.5.1 新版工作台管理员 RunningHub 资源池
 
-- `RUNNINGHUB_DUAL_POOL_ENABLED` 默认关闭。关闭时冻结为 `same_account_v1`，继续执行现有同账号
-  流水线；开启后还必须同时满足用户 ID授权、`source_channel=new_workbench` 和
+- `/admin/runninghub-pool` 的数据库持久化开关决定新 4A 操作的执行模式；
+  `RUNNINGHUB_DUAL_POOL_ENABLED` 仅在网页尚未首次保存时提供初始默认值。关闭时冻结为
+  `same_account_v1`：受控测试用户仍使用现有一控多执行账号池，每个分段的数字人与 SeedVR2
+  严格绑定同一执行账号；无授权普通用户才使用自己的单账号。开启后还必须同时满足用户 ID授权、`source_channel=new_workbench` 和
   `digital_human` 才冻结为 `dual_pool_v1`。普通用户、旧网页、历史 `legacy_web` 和 LTX 不进入。
 - 正式授权用户仍为管理员；迁移只把当时存在的 `Cx_ceshi` 用户 ID写入受控非管理员测试授权。
   运行时不得用用户名判断权限。模式一经绑定，后续开关/授权变化不得迁移已有批次。
@@ -333,7 +341,8 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0030_content_analysis_title`。统一内容分析缓存从
+当前迁移头为 `0032_runninghub_pool_runtime_control`。`0031` 新增双池基础实体、执行模式与
+阶段账号快照，`0032` 只新增网页运行模式单例控制表，不重建既有父表。统一内容分析缓存从
 `0022_content_analysis_cache` 开始，`0028` 扩展统一视觉计划字段和缓存键，`0029` 新增
 数字人清晰化与尝试表；`0030` 只在内容分析缓存增加独立标题状态、结果和错误字段。
 历史已完成数字人任务仍不自动补跑 SeedVR2。

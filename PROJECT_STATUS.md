@@ -6,6 +6,11 @@
 > 不能单独作为当前实现依据。当前架构、状态机、开发、测试和部署总说明统一见
 > [`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md)；具体行为以代码和 Alembic 迁移为准。
 
+> 2026-08-12 当前开发树新增迁移头 `0033_generation_task_seedvr2_switch`。管理员可按用户设置
+> 数字人 `default`（24G）或 `plus`（48G），新任务冻结该实例；旧网页单条、批量和长音频
+> 提供默认开启的 SeedVR2 当次开关，关闭后源片段直接完成。新版工作台仍强制 SeedVR2，
+> SeedVR2 本身仍固定 `plus`（48G）。本条覆盖下方 2026-08-09/10 的固定 48G 历史快照。
+
 > 2026-08-11 当前开发树已把数字人分段策略收紧为目标约 30 秒、硬上限 35 秒，覆盖
 > MiniMax 句级时间戳、上传长音频和旧单条/批量入口；LTX 对口型继续保持 45 秒硬上限。
 > 修改仍在本地，未取消生产任务、未部署、未推送。
@@ -156,10 +161,9 @@
 - 管理员可以按用户启用 LTX 工作流、配置 Workflow ID、实例类型和默认提示词。
 - RunningHub 客户端支持 AI App 与私有 Workflow 两种 V2 提交端点。
 - 视频上传支持 MP4、MOV、WEBM，默认大小上限由 `MAX_VIDEO_SIZE_MB=500` 控制。
-- 统一生成页支持数字人和 LTX；数字人适配器固定 `plus`（48G），并在成功后接续同为
-  `plus`（48G）的 SeedVR2。LTX 仍可独立选择 `default` 或 `plus`。
-- 管理员页面不提供数字人实例选择；历史配方即使保存 `default`，提交数字人和 SeedVR2 时
-  也会按当前策略固定为 `plus`。
+- 统一生成页支持数字人和 LTX；数字人按管理员用户配置冻结 `default`（24G）或 `plus`
+  （48G）。旧网页可按次关闭 SeedVR2，新版工作台始终接续 SeedVR2；SeedVR2 固定 48G。
+- 管理员页面提供数字人实例选择；任务配方保存的实例是提交依据，不在 Worker 阶段自动升级。
 - 用户界面将 `ltx_lip_sync` 简称为“视频对口型”，实例选项显示为“Stand 运行（24G）”与“Plus 运行（48G）”，不展示 API 文档或 Worker 实现说明。
 - 所有 POST 表单和任务 API 均使用 Session 内的 CSRF Token 校验；登录成功后保留并继续使用当前 Token。
 - 生产配置会强制校验随机 `APP_SECRET_KEY`、有效 Fernet Key、`COOKIE_SECURE=true` 和明确的 `ALLOWED_HOSTS`，拒绝通配可信域名。

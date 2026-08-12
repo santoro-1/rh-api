@@ -18,6 +18,7 @@ from app.services.runninghub import RunningHubError
 from app.services.security import encrypt_secret
 from app.services.storage import to_relative_data_path
 from app.services.task_management import prepare_task_retry
+from app.services.video_enhancement import task_quality_variant
 from app.workers import task_worker
 from app.workflows import get_workflow
 from app.workflows.base import WorkflowAsset
@@ -144,13 +145,21 @@ def clear_worker_capacity_state():
     task_worker._capacity_check_after.clear()
 
 
-def _add_task(user_id: int, task_id: str, status: str, remote_id: str | None = None):
+def _add_task(
+    user_id: int,
+    task_id: str,
+    status: str,
+    remote_id: str | None = None,
+    *,
+    seedvr2_enabled: bool = True,
+):
     with SessionLocal() as db:
         db.add(
             GenerationTask(
                 id=task_id,
                 user_id=user_id,
                 runninghub_task_id=remote_id,
+                seedvr2_enabled=seedvr2_enabled,
                 image_path="uploads/does-not-matter/image.png",
                 audio_path="uploads/does-not-matter/audio.mp3",
                 image_original_name="image.png",
@@ -808,6 +817,44 @@ def test_digital_human_success_runs_one_seedvr2_48g_stage(monkeypatch):
 
     assert fake.submissions == 1
     assert fake.download_calls == 2
+
+
+def test_digital_human_can_finish_without_seedvr2(monkeypatch):
+    user = create_user("digital-without-seedvr2-user")
+    _add_task(
+        user.id,
+        "digital-without-seedvr2-task",
+        TaskStatus.RUNNING.value,
+        "digital-without-seedvr2-remote-id",
+        seedvr2_enabled=False,
+    )
+    fake = FakeRunningHub(
+        query_results={
+            "digital-without-seedvr2-remote-id": {
+                "taskId": "digital-without-seedvr2-remote-id",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "outputType": "mp4",
+                        "url": "https://x/digital-source.mp4",
+                    }
+                ],
+            }
+        }
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+
+    with SessionLocal() as db:
+        task_worker.process_task(db, "digital-without-seedvr2-task")
+        task = db.get(GenerationTask, "digital-without-seedvr2-task")
+        assert task.status == TaskStatus.SUCCESS.value
+        assert task.enhancement is None
+        assert task.result_path
+        assert json.loads(task.output_metadata)["seedvr2_enabled"] is False
+        assert task_quality_variant(task) == "digital_human_source"
+
+    assert fake.download_calls == 1
+    assert fake.submissions == 0
 
 
 def test_seedvr2_remote_id_is_queried_without_resubmission(monkeypatch):

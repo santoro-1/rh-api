@@ -125,10 +125,11 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('generation_task_enhancement_attempts')"
             )
         }
-    assert revision == "0031_runninghub_dual_pool_foundation"
+    assert revision == "0033_generation_task_seedvr2_switch"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
+    assert "seedvr2_enabled" in task_columns
     assert "runninghub_auto_retry_after" in task_columns
     assert "execution_account_id" in task_columns
     assert "batch_item_id" in long_audio_columns
@@ -321,7 +322,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0031_runninghub_dual_pool_foundation"
+        assert version == "0033_generation_task_seedvr2_switch"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -383,7 +384,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0031_runninghub_dual_pool_foundation"
+        assert revision == "0033_generation_task_seedvr2_switch"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -556,7 +557,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0031_runninghub_dual_pool_foundation"
+        assert revision == "0033_generation_task_seedvr2_switch"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -693,7 +694,7 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
             ).fetchall()
         connection.close()
 
-        assert revision == "0031_runninghub_dual_pool_foundation"
+        assert revision == "0033_generation_task_seedvr2_switch"
         assert grant == (7, 1, 1)
         assert batch_snapshot == (None, None)
         assert foreign_key_errors == []
@@ -736,3 +737,48 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
         assert foreign_key_errors_after_downgrade == []
     finally:
         database.unlink(missing_ok=True)
+
+
+def test_seedvr2_switch_migration_preserves_task_and_enhancement(tmp_path):
+    database = tmp_path / "seedvr2-switch-parent-child.db"
+    _run_alembic(database, "0032_runninghub_pool_runtime_control")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO users "
+            "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+            "VALUES (1, 'migration-user', 'hash', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO generation_tasks "
+            "(id, user_id, workflow_type, image_path, audio_path, image_original_name, "
+            "audio_original_name, audio_duration_seconds, start_seconds, end_seconds, "
+            "prompt, status, runninghub_auto_retry_count, created_at, updated_at) "
+            "VALUES ('task-1', 1, 'digital_human', 'image.png', 'audio.mp3', "
+            "'image.png', 'audio.mp3', 10, 0, 10, 'test', 'RUNNING', 0, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO generation_task_enhancements "
+            "(id, generation_task_id, provider, workflow_kind, status, "
+            "source_result_path, auto_retry_count, created_at, updated_at) "
+            "VALUES ('enhancement-1', 'task-1', 'runninghub', 'seedvr2_upscale', "
+            "'PENDING', 'source.mp4', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.commit()
+
+    _run_alembic(database, "head")
+    with sqlite3.connect(database) as connection:
+        task = connection.execute(
+            "SELECT id, seedvr2_enabled FROM generation_tasks"
+        ).fetchone()
+        enhancement = connection.execute(
+            "SELECT id, generation_task_id FROM generation_task_enhancements"
+        ).fetchone()
+        foreign_key_errors = connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+
+    assert task == ("task-1", 1)
+    assert enhancement == ("enhancement-1", "task-1")
+    assert foreign_key_errors == []
