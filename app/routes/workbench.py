@@ -379,6 +379,57 @@ def _workbench_manifest(item: GenerationBatchItem) -> dict[str, Any]:
     return manifest
 
 
+def _safe_execution_account(account: Any) -> dict[str, Any] | None:
+    """Expose only the internal identifier and operator-facing label."""
+
+    if account is None:
+        return None
+    return {"id": int(account.id), "label": str(account.label)}
+
+
+def _execution_assignments(
+    tasks: list[GenerationTask], execution_mode: str | None
+) -> list[dict[str, Any]]:
+    """Report the actual per-segment bindings without exposing credentials."""
+
+    assignments: list[dict[str, Any]] = []
+    dual_pool = execution_mode == BATCH_EXECUTION_MODE_DUAL_POOL_V1
+    for segment_index, task in enumerate(tasks, start=1):
+        enhancement = task.enhancement
+        digital_account = _safe_execution_account(task.execution_account)
+        if enhancement is None:
+            seedvr2_account = None if dual_pool else digital_account
+            seedvr2_status = None
+        elif dual_pool:
+            seedvr2_account = _safe_execution_account(
+                enhancement.seedvr2_execution_account
+            )
+            seedvr2_status = enhancement.status
+        else:
+            # same_account_v1 permanently binds SeedVR2 to the digital-human
+            # executor. Prefer the persisted enhancement binding once present,
+            # while still showing the reserved account before enhancement starts.
+            seedvr2_account = (
+                _safe_execution_account(enhancement.execution_account)
+                or digital_account
+            )
+            seedvr2_status = enhancement.status
+        assignments.append(
+            {
+                "segment_index": segment_index,
+                "digital_human": {
+                    "status": task.status,
+                    "account": digital_account,
+                },
+                "seedvr2": {
+                    "status": seedvr2_status,
+                    "account": seedvr2_account,
+                },
+            }
+        )
+    return assignments
+
+
 def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
     tasks = [
         segment.generation_task
@@ -481,6 +532,9 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         ),
         "seedvr2_execution_account_ids": seedvr2_batch_account_snapshot(item.batch),
         "execution_mode": item.batch.execution_mode,
+        "execution_assignments": _execution_assignments(
+            tasks, item.batch.execution_mode
+        ),
     }
 
 

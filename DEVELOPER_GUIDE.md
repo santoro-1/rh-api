@@ -182,6 +182,9 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 - `GenerationTask.user_id` 只表示业务所有者；`execution_account_id` 与逐次
   `GenerationTaskAttempt` 表示真实付费执行账号。任务、文件、结果和权限查询始终按所有者，
   RunningHub 客户端、容量、查询、取消、下载和恢复始终按尝试账号。
+- 工作台清单的 `composition.execution_assignments` 按分段返回实际账号的安全摘要；一控多的
+  SeedVR2 摘要复用数字人执行账号，双池读取增强阶段独立账号。响应只含内部 ID、备注名称和
+  阶段状态，工作台将其持久化到逐行 `COMPOSITION_GENERATE.result` 以支持刷新和重启恢复。
 - `dual_pool_v1` 使用现有数字人执行池和独立 `seedvr2_execution_accounts`。两池各按真实凭据
   指纹独立计算最多 5 个槽位，相同 Key 在旧配置、数字人池或 SeedVR2 池中不得重复形成容量。
   数字人源片段持久化后释放数字人槽位；SeedVR2 再从冻结的第二组 ID中独立原子预留。
@@ -341,8 +344,9 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0032_runninghub_pool_runtime_control`。`0031` 新增双池基础实体、执行模式与
-阶段账号快照，`0032` 只新增网页运行模式单例控制表，不重建既有父表。统一内容分析缓存从
+当前迁移头为 `0033_generation_task_seedvr2_switch`。`0031` 新增双池基础实体、执行模式与
+阶段账号快照，`0032` 只新增网页运行模式单例控制表，`0033` 直接增加旧网页任务级 SeedVR2
+开关字段，均不重建既有父表。统一内容分析缓存从
 `0022_content_analysis_cache` 开始，`0028` 扩展统一视觉计划字段和缓存键，`0029` 新增
 数字人清晰化与尝试表；`0030` 只在内容分析缓存增加独立标题状态、结果和错误字段。
 历史已完成数字人任务仍不自动补跑 SeedVR2。

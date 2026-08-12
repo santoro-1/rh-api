@@ -17,6 +17,8 @@ from app.models import (
     GenerationTaskEnhancement,
     MiniMaxConfig,
     MiniMaxVoiceAsset,
+    RunningHubExecutionAccount,
+    SeedVR2ExecutionAccount,
     TaskStatus,
     User,
 )
@@ -305,6 +307,118 @@ def test_workbench_composition_reports_video_enhancing_stage(client):
     assert response.status_code == 200
     assert response.json()["composition"]["status"] == "VIDEO_ENHANCING"
     assert response.json()["composition"]["enhancement_status"] == "RUNNING"
+
+
+def test_workbench_composition_exposes_safe_same_account_assignment(client):
+    batch_id, item_id = _text_item(segment_count=1)
+    settings = get_settings()
+    with SessionLocal() as db:
+        account = RunningHubExecutionAccount(
+            label="测试一号",
+            api_key_encrypted="encrypted-key",
+            credential_fingerprint="a" * 64,
+            base_url="https://www.runninghub.cn",
+            digital_human_ai_app_id="digital-app",
+            max_concurrent_tasks=5,
+        )
+        db.add(account)
+        db.flush()
+        account_id = account.id
+        batch = db.get(GenerationBatch, batch_id)
+        batch.execution_mode = "same_account_v1"
+        task = db.get(GenerationTask, "video-task-1-1")
+        task.execution_account_id = account.id
+        task.status = TaskStatus.RUNNING.value
+        task.result_path = None
+        source = settings.outputs_dir / str(task.user_id) / task.id / "source.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"digital-source")
+        task.enhancement = GenerationTaskEnhancement(
+            id="same-account-visible-enhancement",
+            generation_task_id=task.id,
+            status=EnhancementStatus.PENDING.value,
+            source_result_path=source.relative_to(settings.data_dir).as_posix(),
+            execution_account_id=account.id,
+        )
+        db.commit()
+
+    token = client.post(
+        "/api/auth/center/login",
+        json={"username": "postproduction-text-1", "password": "password123"},
+    ).json()["access_token"]
+    response = client.post(
+        f"/api/workbench/tasks/{item_id}", json={"access_token": token}
+    )
+
+    assert response.status_code == 200
+    composition = response.json()["composition"]
+    assert composition["execution_mode"] == "same_account_v1"
+    assignment = composition["execution_assignments"][0]
+    assert assignment["digital_human"]["account"] == {
+        "id": account_id,
+        "label": "测试一号",
+    }
+    assert assignment["seedvr2"]["account"] == {
+        "id": account_id,
+        "label": "测试一号",
+    }
+
+
+def test_workbench_composition_exposes_safe_dual_pool_assignments(client):
+    batch_id, item_id = _text_item(segment_count=1)
+    settings = get_settings()
+    with SessionLocal() as db:
+        digital = RunningHubExecutionAccount(
+            label="数字人二号",
+            api_key_encrypted="encrypted-digital-key",
+            credential_fingerprint="b" * 64,
+            base_url="https://www.runninghub.cn",
+            digital_human_ai_app_id="digital-app",
+            max_concurrent_tasks=5,
+        )
+        seedvr2 = SeedVR2ExecutionAccount(
+            label="放大三号",
+            api_key_encrypted="encrypted-seed-key",
+            credential_fingerprint="c" * 64,
+            base_url="https://www.runninghub.cn",
+            seedvr2_ai_app_id="seed-app",
+            max_concurrent_tasks=5,
+        )
+        db.add_all([digital, seedvr2])
+        db.flush()
+        batch = db.get(GenerationBatch, batch_id)
+        batch.execution_mode = "dual_pool_v1"
+        task = db.get(GenerationTask, "video-task-1-1")
+        task.execution_account_id = digital.id
+        task.status = TaskStatus.RUNNING.value
+        task.result_path = None
+        source = settings.outputs_dir / str(task.user_id) / task.id / "source.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"digital-source")
+        task.enhancement = GenerationTaskEnhancement(
+            id="dual-pool-visible-enhancement",
+            generation_task_id=task.id,
+            status=EnhancementStatus.RUNNING.value,
+            source_result_path=source.relative_to(settings.data_dir).as_posix(),
+            seedvr2_execution_account_id=seedvr2.id,
+        )
+        db.commit()
+
+    token = client.post(
+        "/api/auth/center/login",
+        json={"username": "postproduction-text-1", "password": "password123"},
+    ).json()["access_token"]
+    response = client.post(
+        f"/api/workbench/tasks/{item_id}", json={"access_token": token}
+    )
+
+    assert response.status_code == 200
+    composition = response.json()["composition"]
+    assert composition["execution_mode"] == "dual_pool_v1"
+    assignment = composition["execution_assignments"][0]
+    assert assignment["digital_human"]["account"]["label"] == "数字人二号"
+    assert assignment["seedvr2"]["account"]["label"] == "放大三号"
+    assert "api_key" not in json.dumps(assignment)
 
 
 def test_workbench_composition_reports_remote_cancel_as_retryable_failure(client):

@@ -13,6 +13,7 @@ from app.models import (
     GenerationBatchItem,
     GenerationSegment,
     GenerationTask,
+    GenerationTaskEnhancement,
     TaskStatus,
 )
 from app.services.video_enhancement import task_processing_stage
@@ -187,17 +188,32 @@ def batch_query():
         ),
         selectinload(GenerationBatch.items)
         .selectinload(GenerationBatchItem.generation_task)
-        .selectinload(GenerationTask.enhancement),
+        .selectinload(GenerationTask.execution_account),
+        selectinload(GenerationBatch.items)
+        .selectinload(GenerationBatchItem.generation_task)
+        .selectinload(GenerationTask.enhancement)
+        .selectinload(GenerationTaskEnhancement.execution_account),
+        selectinload(GenerationBatch.items)
+        .selectinload(GenerationBatchItem.generation_task)
+        .selectinload(GenerationTask.enhancement)
+        .selectinload(GenerationTaskEnhancement.seedvr2_execution_account),
         selectinload(GenerationBatch.items)
         .selectinload(GenerationBatchItem.audio_task)
         .selectinload(AudioGenerationTask.attempts),
         selectinload(GenerationBatch.items)
         .selectinload(GenerationBatchItem.segments)
-        .selectinload(GenerationSegment.generation_task),
+        .selectinload(GenerationSegment.generation_task)
+        .selectinload(GenerationTask.execution_account),
         selectinload(GenerationBatch.items)
         .selectinload(GenerationBatchItem.segments)
         .selectinload(GenerationSegment.generation_task)
-        .selectinload(GenerationTask.enhancement),
+        .selectinload(GenerationTask.enhancement)
+        .selectinload(GenerationTaskEnhancement.execution_account),
+        selectinload(GenerationBatch.items)
+        .selectinload(GenerationBatchItem.segments)
+        .selectinload(GenerationSegment.generation_task)
+        .selectinload(GenerationTask.enhancement)
+        .selectinload(GenerationTaskEnhancement.seedvr2_execution_account),
         selectinload(GenerationBatch.items).selectinload(
             GenerationBatchItem.long_audio_project
         ),
