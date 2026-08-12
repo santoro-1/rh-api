@@ -307,6 +307,18 @@ def test_break_plan_is_expanded_from_exact_source_slices() -> None:
     assert [unit.break_after.value for unit in units] == ["prefer", "allow", "prefer"]
 
 
+def test_break_plan_drops_unoffered_positions_and_keeps_valid_boundaries() -> None:
+    script = "那么通过八十四天"
+
+    units = parse_subtitle_break_plan_payload(
+        {"prefer_after": [4, 99], "allow_after": []},
+        original_script=script,
+    )
+
+    assert [unit.text for unit in units] == ["那么通过", "八十四天"]
+    assert [(unit.start, unit.end) for unit in units] == [(0, 4), (4, 8)]
+
+
 def test_music_matcher_v1_weights_and_hard_filters_are_frozen() -> None:
     assert MUSIC_MATCHER_VERSION == "music-matcher.v1"
     assert sum(MUSIC_MATCHER_WEIGHTS_V1.values()) == 100

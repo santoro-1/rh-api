@@ -503,17 +503,15 @@ def parse_subtitle_break_plan_payload(
 
     break_plan = SubtitleBreakPlan.model_validate(payload)
     candidates = set(subtitle_break_candidate_positions(original_script))
-    requested = set(break_plan.prefer_after).union(break_plan.allow_after)
-    invalid_positions = sorted(requested.difference(candidates))
-    if invalid_positions:
-        raise ContentAnalysisContractError(
-            "subtitle_break_invalid",
-            "subtitle break plan contains a boundary that was not offered",
-        )
-
-    preferred = set(break_plan.prefer_after)
+    # The provider can occasionally echo a position that was intentionally
+    # withheld because it falls inside a word, number, or another unsafe
+    # lexical group.  That one bad soft preference must not discard the valid
+    # subtitle plan for the whole row.  Only consume boundaries that were
+    # actually offered; deterministic punctuation/whitespace boundaries are
+    # still added locally below.
+    preferred = set(break_plan.prefer_after).intersection(candidates)
     preferred.update(_local_preferred_break_positions(original_script))
-    allowed = set(break_plan.allow_after).difference(preferred)
+    allowed = set(break_plan.allow_after).intersection(candidates).difference(preferred)
     boundaries = sorted(preferred.union(allowed))
     boundaries.append(len(original_script))
 
