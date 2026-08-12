@@ -70,6 +70,7 @@ class Settings:
     runninghub_remote_watchdog_seconds: int
     runninghub_auto_retry_limit: int
     runninghub_auto_retry_base_delay_seconds: int
+    runninghub_dual_pool_enabled: bool
     max_image_size_mb: int
     max_audio_size_mb: int
     max_video_size_mb: int
@@ -228,6 +229,9 @@ class Settings:
             runninghub_auto_retry_limit=runninghub_auto_retry_limit,
             runninghub_auto_retry_base_delay_seconds=(
                 runninghub_auto_retry_base_delay_seconds
+            ),
+            runninghub_dual_pool_enabled=_as_bool(
+                os.getenv("RUNNINGHUB_DUAL_POOL_ENABLED"), False
             ),
             max_image_size_mb=_as_int("MAX_IMAGE_SIZE_MB", 200),
             max_audio_size_mb=_as_int("MAX_AUDIO_SIZE_MB", 100),

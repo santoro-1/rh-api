@@ -8,12 +8,18 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session, aliased, selectinload
 
 from app.models import (
+    BATCH_EXECUTION_MODE_DUAL_POOL_V1,
     GenerationBatch,
+    GenerationBatchItem,
+    GenerationSegment,
     GenerationTask,
     GenerationTaskAttempt,
+    GenerationTaskEnhancement,
     RunningHubConfig,
+    RunningHubDualPoolGrant,
     RunningHubExecutionAccount,
     RunningHubPoolMembership,
+    SeedVR2ExecutionAccount,
     TaskStatus,
     User,
 )
@@ -65,6 +71,21 @@ def credential_activity_filter(task_alias, fingerprint: str):
     legacy_user_ids = select(RunningHubConfig.user_id).where(
         RunningHubConfig.credential_fingerprint == fingerprint
     )
+    dual_item_ids = select(GenerationBatchItem.id).join(GenerationBatch).where(
+        GenerationBatch.execution_mode == BATCH_EXECUTION_MODE_DUAL_POOL_V1
+    )
+    dual_segment_ids = select(GenerationSegment.id).where(
+        GenerationSegment.batch_item_id.in_(dual_item_ids)
+    )
+    source_persisted_dual_task_ids = select(
+        GenerationTaskEnhancement.generation_task_id
+    ).where(
+        GenerationTaskEnhancement.generation_task_id == task_alias.id,
+        or_(
+            task_alias.batch_item_id.in_(dual_item_ids),
+            task_alias.segment_id.in_(dual_segment_ids),
+        ),
+    )
     return and_(
         or_(
             task_alias.status.in_(ACTIVE_POOL_TASK_STATUSES),
@@ -79,6 +100,7 @@ def credential_activity_filter(task_alias, fingerprint: str):
                 task_alias.user_id.in_(legacy_user_ids),
             ),
         ),
+        task_alias.id.not_in(source_persisted_dual_task_ids),
     )
 
 
@@ -134,17 +156,26 @@ def _clean_account_fields(
 def _validated_admin_ids(db: Session, admin_user_ids: list[int]) -> set[int]:
     requested = {int(user_id) for user_id in admin_user_ids}
     if not requested:
-        raise RunningHubPoolValidationError("至少选择一个可使用此执行账号的管理员")
+        raise RunningHubPoolValidationError("至少选择一个可使用此执行账号的用户")
     valid = set(
         db.scalars(
-            select(User.id).where(
+            select(User.id)
+            .outerjoin(RunningHubDualPoolGrant)
+            .where(
                 User.id.in_(requested),
-                User.is_admin.is_(True),
+                User.is_active.is_(True),
+                (User.is_admin.is_(True))
+                | (
+                    RunningHubDualPoolGrant.is_enabled.is_(True)
+                    & RunningHubDualPoolGrant.allow_non_admin.is_(True)
+                ),
             )
         ).all()
     )
     if valid != requested:
-        raise RunningHubPoolValidationError("资源池成员必须全部是管理员账号")
+        raise RunningHubPoolValidationError(
+            "资源池成员必须全部是管理员账号，或具有受控双池授权"
+        )
     return valid
 
 
@@ -178,6 +209,14 @@ def _ensure_unique_pool_fingerprint(
     *,
     exclude_account_id: int | None = None,
 ) -> None:
+    if db.scalar(
+        select(SeedVR2ExecutionAccount.id).where(
+            SeedVR2ExecutionAccount.credential_fingerprint == fingerprint
+        )
+    ) is not None:
+        raise DuplicateRunningHubCredentialError(
+            "该 RunningHub API Key 已存在于 SeedVR2 账号池，不能跨池重复计算容量"
+        )
     statement = select(RunningHubExecutionAccount.id).where(
         RunningHubExecutionAccount.credential_fingerprint == fingerprint
     )
@@ -391,8 +430,6 @@ def workbench_execution_account_summary(
     db: Session,
     admin_user: User,
 ) -> dict[str, object]:
-    if not admin_user.is_admin:
-        raise RunningHubPoolValidationError("只有管理员可以使用 RunningHub 执行账号资源池")
     accounts = list(
         db.scalars(
             select(RunningHubExecutionAccount)
@@ -469,10 +506,11 @@ def validate_workbench_execution_account_selection(
     *,
     selection_provided: bool,
     raw_selection: object,
+    allow_non_admin: bool = False,
 ) -> list[int] | None:
     """Validate untrusted workbench IDs without accepting account configuration."""
 
-    if not user.is_admin:
+    if not user.is_admin and not allow_non_admin:
         if selection_provided:
             raise RunningHubPoolSelectionPermissionError(
                 "普通用户不能指定 RunningHub 执行账号资源池"

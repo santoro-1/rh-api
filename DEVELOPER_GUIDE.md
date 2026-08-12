@@ -166,17 +166,20 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 
 ### 3.5.1 新版工作台管理员 RunningHub 资源池
 
-- 资源池只在 `is_admin=true`、`source_channel=new_workbench`、`digital_human` 且请求保存了
-  非空内部账号 ID 快照时启用。普通用户、旧网页、历史 `legacy_web` 任务和 LTX 不得进入。
+- `RUNNINGHUB_DUAL_POOL_ENABLED` 默认关闭。关闭时冻结为 `same_account_v1`，继续执行现有同账号
+  流水线；开启后还必须同时满足用户 ID授权、`source_channel=new_workbench` 和
+  `digital_human` 才冻结为 `dual_pool_v1`。普通用户、旧网页、历史 `legacy_web` 和 LTX 不进入。
+- 正式授权用户仍为管理员；迁移只把当时存在的 `Cx_ceshi` 用户 ID写入受控非管理员测试授权。
+  运行时不得用用户名判断权限。模式一经绑定，后续开关/授权变化不得迁移已有批次。
 - `GenerationTask.user_id` 只表示业务所有者；`execution_account_id` 与逐次
   `GenerationTaskAttempt` 表示真实付费执行账号。任务、文件、结果和权限查询始终按所有者，
   RunningHub 客户端、容量、查询、取消、下载和恢复始终按尝试账号。
-- 相同 API Key 通过不可逆指纹唯一判重并合并容量；每个真实凭据最多 5 条完整流水线。槽位
-  从数字人提交前预留持续到该分段的 SeedVR2 结果下载、明确失败或安全取消，不在两阶段之间
-  释放。账号中途停用只禁止领取新流水线，不迁移已开始任务。
-- 数字人明确失败可以结束旧尝试、释放绑定，并从本批次不可变选择范围创建新的付费尝试；
-  新账号一旦数字人成功，对应 SeedVR2 必须继承该账号。SeedVR2 失败只在原账号复用数字人
-  源片段重试；下载失败只重下原远端结果。
+- `dual_pool_v1` 使用现有数字人执行池和独立 `seedvr2_execution_accounts`。两池各按真实凭据
+  指纹独立计算最多 5 个槽位，相同 Key 在旧配置、数字人池或 SeedVR2 池中不得重复形成容量。
+  数字人源片段持久化后释放数字人槽位；SeedVR2 再从冻结的第二组 ID中独立原子预留。
+- 数字人与 SeedVR2 各有逐次尝试账号。SeedVR2 普通失败保留原绑定和源片段重试；只有明确
+  401/403、无权限、Key/App/工作流不存在等账号不可用证据时，才释放当前绑定，让下一次付费
+  尝试在本次 SeedVR2 快照内换健康账号。容量已满可在提交前换空闲账号；下载失败只重下。
 - 网络响应丢失、5xx 或成功响应不可解析属于 `SUBMIT_OUTCOME_UNKNOWN`。必须保留原账号和
   保守容量，禁止自动/人工换号盲目提交；管理员核对 RunningHub 前不得清除此保护。
 - 管理接口可以写入/轮换 Key，但列表、工作台摘要、日志和诊断均不得返回 Key、指纹、

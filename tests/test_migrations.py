@@ -101,7 +101,31 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('visual_analysis_caches')"
             )
         }
-    assert revision == "0030_content_analysis_title"
+        dual_pool_grant_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('runninghub_dual_pool_grants')"
+            )
+        }
+        seedvr2_account_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('seedvr2_execution_accounts')"
+            )
+        }
+        enhancement_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('generation_task_enhancements')"
+            )
+        }
+        enhancement_attempt_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('generation_task_enhancement_attempts')"
+            )
+        }
+    assert revision == "0031_runninghub_dual_pool_foundation"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -112,6 +136,18 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
     assert "source_channel" in batch_columns
     assert "correlation_id" in batch_columns
     assert "runninghub_execution_account_ids_json" in batch_columns
+    assert "seedvr2_execution_account_ids_json" in batch_columns
+    assert "execution_mode" in batch_columns
+    assert {"user_id", "is_enabled", "allow_non_admin", "note"} <= dual_pool_grant_columns
+    assert {
+        "api_key_encrypted",
+        "credential_fingerprint",
+        "base_url",
+        "seedvr2_ai_app_id",
+        "max_concurrent_tasks",
+    } <= seedvr2_account_columns
+    assert "seedvr2_execution_account_id" in enhancement_columns
+    assert "seedvr2_execution_account_id" in enhancement_attempt_columns
     assert {
         "merged_video_status",
         "merged_video_path",
@@ -285,7 +321,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0030_content_analysis_title"
+        assert version == "0031_runninghub_dual_pool_foundation"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -347,7 +383,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0030_content_analysis_title"
+        assert revision == "0031_runninghub_dual_pool_foundation"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -520,7 +556,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0030_content_analysis_title"
+        assert revision == "0031_runninghub_dual_pool_foundation"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -559,5 +595,144 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
         assert downgraded_revision == "0024_shared_minimax_voices"
         assert downgraded_counts == counts
         assert downgraded_foreign_key_errors == []
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant():
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-dual-pool-{uuid.uuid4().hex}.db"
+    timestamp = "2026-08-12 09:00:00"
+    try:
+        _run_alembic(database, "0030_content_analysis_title")
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(
+                "INSERT INTO users "
+                "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+                "VALUES (7, 'Cx_ceshi', 'hash', 0, 1, ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO generation_batches "
+                "(id, user_id, name, workflow_type, source_channel, audio_mode, "
+                "review_required, video_review_required, request_key, status, total_items, "
+                "created_at, updated_at) VALUES "
+                "('dual-batch', 7, 'existing', 'digital_human', 'new_workbench', 'upload', "
+                "0, 0, 'dual-request', 'ACTIVE', 1, ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO generation_tasks "
+                "(id, user_id, workflow_type, image_path, audio_path, image_original_name, "
+                "audio_original_name, audio_duration_seconds, start_seconds, end_seconds, "
+                "prompt, status, runninghub_auto_retry_count, created_at, updated_at) VALUES "
+                "('dual-task', 7, 'digital_human', 'image.png', 'audio.mp3', 'image.png', "
+                "'audio.mp3', 10, 0, 10, 'prompt', 'COMPLETED', 0, ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO generation_task_enhancements "
+                "(id, generation_task_id, provider, workflow_kind, status, source_result_path, "
+                "auto_retry_count, created_at, updated_at) VALUES "
+                "('dual-enhancement', 'dual-task', 'runninghub', 'seedvr2_upscale', "
+                "'PENDING', 'source.mp4', 0, ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO generation_task_enhancement_attempts "
+                "(id, enhancement_id, attempt_number, status, created_at, updated_at) VALUES "
+                "('dual-enhancement-attempt', 'dual-enhancement', 1, 'RESERVED', ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.commit()
+        connection.close()
+
+        _run_alembic(database, "head")
+
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            grant = connection.execute(
+                "SELECT user_id, is_enabled, allow_non_admin "
+                "FROM runninghub_dual_pool_grants"
+            ).fetchone()
+            batch_snapshot = connection.execute(
+                "SELECT execution_mode, seedvr2_execution_account_ids_json "
+                "FROM generation_batches WHERE id='dual-batch'"
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO seedvr2_execution_accounts "
+                "(id, label, api_key_encrypted, credential_fingerprint, base_url, "
+                "seedvr2_ai_app_id, max_concurrent_tasks, is_enabled, health_status, "
+                "created_at, updated_at) VALUES "
+                "(21, 'SeedVR2 一号', 'encrypted', 'seed-fingerprint', "
+                "'https://www.runninghub.cn', 'seed-app', 5, 1, 'UNKNOWN', ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO seedvr2_pool_memberships "
+                "(user_id, execution_account_id, created_at) VALUES (7, 21, ?)",
+                (timestamp,),
+            )
+            connection.execute(
+                "UPDATE generation_task_enhancements "
+                "SET seedvr2_execution_account_id=21 WHERE id='dual-enhancement'"
+            )
+            connection.execute(
+                "UPDATE generation_task_enhancement_attempts "
+                "SET seedvr2_execution_account_id=21 "
+                "WHERE id='dual-enhancement-attempt'"
+            )
+            connection.commit()
+            foreign_key_errors = connection.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
+        connection.close()
+
+        assert revision == "0031_runninghub_dual_pool_foundation"
+        assert grant == (7, 1, 1)
+        assert batch_snapshot == (None, None)
+        assert foreign_key_errors == []
+
+        _run_alembic(database, "0030_content_analysis_title", command="downgrade")
+
+        with sqlite3.connect(database) as connection:
+            revision_after_downgrade = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            preserved = connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM users WHERE id=7), "
+                "(SELECT COUNT(*) FROM generation_batches WHERE id='dual-batch'), "
+                "(SELECT COUNT(*) FROM generation_tasks WHERE id='dual-task'), "
+                "(SELECT COUNT(*) FROM generation_task_enhancements "
+                " WHERE id='dual-enhancement'), "
+                "(SELECT COUNT(*) FROM generation_task_enhancement_attempts "
+                " WHERE id='dual-enhancement-attempt')"
+            ).fetchone()
+            enhancement_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info('generation_task_enhancements')"
+                )
+            }
+            new_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='seedvr2_execution_accounts'"
+            ).fetchone()
+            foreign_key_errors_after_downgrade = connection.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
+        connection.close()
+
+        assert revision_after_downgrade == "0030_content_analysis_title"
+        assert preserved == (1, 1, 1, 1, 1)
+        assert "seedvr2_execution_account_id" not in enhancement_columns
+        assert new_table is None
+        assert foreign_key_errors_after_downgrade == []
     finally:
         database.unlink(missing_ok=True)

@@ -9,6 +9,7 @@ from app.models import (
     EnhancementStatus,
     GenerationTask,
     RunningHubExecutionAccount,
+    SeedVR2ExecutionAccount,
     TaskStatus,
 )
 from app.services.runninghub import RunningHubClient
@@ -86,7 +87,11 @@ def cancel_generation_task(db: Session, task: GenerationTask) -> None:
         client = RunningHubClient(
             api_key=decrypt_secret(account.api_key_encrypted),
             base_url=account.base_url,
-            ai_app_id=SEEDVR2_AI_APP_ID,
+            ai_app_id=(
+                account.seedvr2_ai_app_id
+                if isinstance(account, SeedVR2ExecutionAccount)
+                else SEEDVR2_AI_APP_ID
+            ),
             submission_type="ai-app",
         )
         client.cancel_task(enhancement.remote_task_id)

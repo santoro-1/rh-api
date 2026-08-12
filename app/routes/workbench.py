@@ -17,6 +17,7 @@ from app.database import get_db
 from app.models import (
     AudioTaskStatus,
     BATCH_SOURCE_NEW_WORKBENCH,
+    BATCH_EXECUTION_MODE_DUAL_POOL_V1,
     EnhancementStatus,
     GenerationBatch,
     GenerationBatchItem,
@@ -66,6 +67,23 @@ from app.services.runninghub_pool import (
     bind_batch_execution_account_snapshot,
     validate_workbench_execution_account_selection,
     workbench_execution_account_summary,
+)
+from app.services.runninghub_dual_pool import (
+    RunningHubDualPoolError,
+    batch_execution_mode,
+    bind_batch_execution_mode,
+    resolve_execution_mode,
+    user_has_dual_pool_entitlement,
+)
+from app.services.seedvr2_pool import (
+    SeedVR2PoolSelectionFormatError,
+    SeedVR2PoolSelectionPermissionError,
+    SeedVR2PoolSelectionUnavailableError,
+    SeedVR2PoolSnapshotConflictError,
+    bind_seedvr2_batch_account_snapshot,
+    seedvr2_batch_account_snapshot,
+    seedvr2_workbench_account_summary,
+    validate_seedvr2_account_selection,
 )
 from app.services.security import verify_password
 from app.services.speech.minimax import MiniMaxAPIError
@@ -336,6 +354,8 @@ def _audio_batch_payload(batch: GenerationBatch) -> dict[str, Any]:
         "name": batch.name,
         "review_required": batch.review_required,
         "runninghub_execution_account_ids": batch_execution_account_snapshot(batch),
+        "seedvr2_execution_account_ids": seedvr2_batch_account_snapshot(batch),
+        "execution_mode": batch.execution_mode,
         "items": items,
     }
 
@@ -459,6 +479,8 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         "runninghub_execution_account_ids": batch_execution_account_snapshot(
             item.batch
         ),
+        "seedvr2_execution_account_ids": seedvr2_batch_account_snapshot(item.batch),
+        "execution_mode": item.batch.execution_mode,
     }
 
 
@@ -527,7 +549,44 @@ def workbench_runninghub_execution_accounts(
             status_code=403,
             detail="只有管理员可以使用 RunningHub 执行账号资源池",
         )
+    mode = resolve_execution_mode(
+        db, user=user, source_channel=BATCH_SOURCE_NEW_WORKBENCH,
+        workflow_type=DIGITAL_HUMAN_WORKFLOW,
+    )
+    if mode == BATCH_EXECUTION_MODE_DUAL_POOL_V1:
+        return {
+            "schema": "runninghub.workbench-dual-pool.v1",
+            "execution_mode": mode,
+            "digital_human": workbench_execution_account_summary(db, user),
+            "seedvr2": seedvr2_workbench_account_summary(db, user),
+        }
     return workbench_execution_account_summary(db, user)
+
+
+@router.post("/api/workbench/runninghub-dual-pool-accounts")
+def workbench_runninghub_dual_pool_accounts(
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Return safe stage-specific metadata; never return credentials."""
+
+    user = _token_user(str(payload.get("access_token", "")), db)
+    mode = resolve_execution_mode(
+        db,
+        user=user,
+        source_channel=BATCH_SOURCE_NEW_WORKBENCH,
+        workflow_type=DIGITAL_HUMAN_WORKFLOW,
+    )
+    if mode != BATCH_EXECUTION_MODE_DUAL_POOL_V1:
+        return {"schema": "runninghub.workbench-dual-pool.v1", "execution_mode": mode}
+    if not user_has_dual_pool_entitlement(db, user):
+        raise HTTPException(status_code=403, detail="当前账号没有双资源池权限")
+    return {
+        "schema": "runninghub.workbench-dual-pool.v1",
+        "execution_mode": mode,
+        "digital_human": workbench_execution_account_summary(db, user),
+        "seedvr2": seedvr2_workbench_account_summary(db, user),
+    }
 
 
 @router.post("/api/workbench/tasks")
@@ -1108,23 +1167,62 @@ def start_workbench_composition(
         requested_image_sha256 = _payload_image_sha256(payload)
     except AudioReviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    try:
-        selected_account_ids = validate_workbench_execution_account_selection(
+    selected_seedvr2_account_ids = None
+    execution_mode = (
+        batch_execution_mode(batch)
+        if batch.execution_mode is not None
+        else resolve_execution_mode(
             db,
-            user,
-            selection_provided="runninghub_execution_account_ids" in payload,
-            raw_selection=payload.get("runninghub_execution_account_ids"),
+            user=user,
+            source_channel=batch.source_channel,
+            workflow_type=batch.workflow_type,
         )
-        bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
+    )
+    try:
+        bind_batch_execution_mode(db, batch, execution_mode)
+        if execution_mode == BATCH_EXECUTION_MODE_DUAL_POOL_V1:
+            selected_account_ids = validate_workbench_execution_account_selection(
+                db,
+                user,
+                selection_provided="runninghub_execution_account_ids" in payload,
+                raw_selection=payload.get("runninghub_execution_account_ids"),
+                allow_non_admin=True,
+            )
+            selected_seedvr2_account_ids = validate_seedvr2_account_selection(
+                db, user=user, raw_selection=payload.get("seedvr2_execution_account_ids")
+            )
+            bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
+            bind_seedvr2_batch_account_snapshot(db, batch, selected_seedvr2_account_ids)
+        else:
+            if "seedvr2_execution_account_ids" in payload:
+                raise RunningHubDualPoolError(
+                    "当前画面生成操作未进入双资源池模式，请刷新账号列表后重新确认"
+                )
+            selected_account_ids = validate_workbench_execution_account_selection(
+                db,
+                user,
+                selection_provided="runninghub_execution_account_ids" in payload,
+                raw_selection=payload.get("runninghub_execution_account_ids"),
+            )
+            bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
     except RunningHubPoolSelectionFormatError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SeedVR2PoolSelectionFormatError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RunningHubPoolSelectionPermissionError as exc:
         db.rollback()
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SeedVR2PoolSelectionPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (
         RunningHubPoolSelectionUnavailableError,
         RunningHubPoolSnapshotConflictError,
+        RunningHubDualPoolError,
+        SeedVR2PoolSelectionUnavailableError,
+        SeedVR2PoolSnapshotConflictError,
     ) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1268,6 +1366,8 @@ def start_workbench_composition(
         correlation_id=batch_correlation_id,
         image_sha256=task.primary_sha256,
         runninghub_execution_account_ids=selected_account_ids,
+        seedvr2_execution_account_ids=selected_seedvr2_account_ids,
+        execution_mode=execution_mode,
     )
     return _workbench_manifest(_item_for_user(item_id, user, db))
 

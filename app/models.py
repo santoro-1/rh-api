@@ -149,6 +149,12 @@ class User(Base):
     runninghub_pool_memberships: Mapped[list["RunningHubPoolMembership"]] = relationship(
         back_populates="admin_user", cascade="all, delete-orphan"
     )
+    runninghub_dual_pool_grant: Mapped[Optional["RunningHubDualPoolGrant"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+    seedvr2_pool_memberships: Mapped[list["SeedVR2PoolMembership"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (UniqueConstraint("username"),)
 
@@ -554,6 +560,107 @@ class RunningHubPoolMembership(Base):
     )
 
 
+class RunningHubDualPoolGrant(Base):
+    """Server-side user entitlement for the feature-gated dual-pool branch."""
+
+    __tablename__ = "runninghub_dual_pool_grants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    allow_non_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="runninghub_dual_pool_grant")
+
+
+class SeedVR2ExecutionAccount(Base):
+    """One real RunningHub credential dedicated to SeedVR2 in dual-pool mode."""
+
+    __tablename__ = "seedvr2_execution_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    seedvr2_ai_app_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    max_concurrent_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    health_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="UNKNOWN"
+    )
+    health_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    health_error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    cooldown_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    pool_memberships: Mapped[list["SeedVR2PoolMembership"]] = relationship(
+        back_populates="execution_account", cascade="all, delete-orphan"
+    )
+    enhancements: Mapped[list["GenerationTaskEnhancement"]] = relationship(
+        back_populates="seedvr2_execution_account"
+    )
+    enhancement_attempts: Mapped[list["GenerationTaskEnhancementAttempt"]] = relationship(
+        back_populates="seedvr2_execution_account"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "max_concurrent_tasks >= 1 AND max_concurrent_tasks <= 5",
+            name="ck_seedvr2_execution_account_concurrency",
+        ),
+    )
+
+
+class SeedVR2PoolMembership(Base):
+    """Grant one dual-pool user access to one SeedVR2 execution account."""
+
+    __tablename__ = "seedvr2_pool_memberships"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    execution_account_id: Mapped[int] = mapped_column(
+        ForeignKey("seedvr2_execution_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[User] = relationship(back_populates="seedvr2_pool_memberships")
+    execution_account: Mapped[SeedVR2ExecutionAccount] = relationship(
+        back_populates="pool_memberships"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "execution_account_id",
+            name="uq_seedvr2_pool_user_account",
+        ),
+    )
+
+
 class GenerationTask(Base):
     __tablename__ = "generation_tasks"
 
@@ -745,6 +852,11 @@ class GenerationTaskEnhancement(Base):
         nullable=True,
         index=True,
     )
+    seedvr2_execution_account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("seedvr2_execution_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     result_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     result_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     result_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -773,6 +885,9 @@ class GenerationTaskEnhancement(Base):
 
     task: Mapped[GenerationTask] = relationship(back_populates="enhancement")
     execution_account: Mapped[Optional[RunningHubExecutionAccount]] = relationship()
+    seedvr2_execution_account: Mapped[Optional[SeedVR2ExecutionAccount]] = relationship(
+        back_populates="enhancements"
+    )
     attempts: Mapped[list["GenerationTaskEnhancementAttempt"]] = relationship(
         back_populates="enhancement",
         cascade="all, delete-orphan",
@@ -794,6 +909,11 @@ class GenerationTaskEnhancementAttempt(Base):
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     execution_account_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("runninghub_execution_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    seedvr2_execution_account_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("seedvr2_execution_accounts.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
@@ -822,6 +942,9 @@ class GenerationTaskEnhancementAttempt(Base):
         back_populates="attempts"
     )
     execution_account: Mapped[Optional[RunningHubExecutionAccount]] = relationship()
+    seedvr2_execution_account: Mapped[Optional[SeedVR2ExecutionAccount]] = relationship(
+        back_populates="enhancement_attempts"
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -834,6 +957,8 @@ class GenerationTaskEnhancementAttempt(Base):
 
 BATCH_SOURCE_LEGACY_WEB = "legacy_web"
 BATCH_SOURCE_NEW_WORKBENCH = "new_workbench"
+BATCH_EXECUTION_MODE_SAME_ACCOUNT_V1 = "same_account_v1"
+BATCH_EXECUTION_MODE_DUAL_POOL_V1 = "dual_pool_v1"
 
 
 class GenerationBatch(Base):
@@ -849,6 +974,12 @@ class GenerationBatch(Base):
     workflow_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     runninghub_execution_account_ids_json: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True
+    )
+    seedvr2_execution_account_ids_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    execution_mode: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True, index=True
     )
     source_channel: Mapped[str] = mapped_column(
         String(30), nullable=False, default=BATCH_SOURCE_LEGACY_WEB, index=True

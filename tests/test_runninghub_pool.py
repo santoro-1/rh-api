@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from app.models import (
     MiniMaxConfig,
     MiniMaxVoiceAsset,
     RunningHubExecutionAccount,
+    SeedVR2ExecutionAccount,
     TaskStatus,
     User,
     VoiceAssetStatus,
@@ -32,6 +34,8 @@ from app.services.runninghub_pool import (
     create_execution_account,
     validate_workbench_execution_account_selection,
 )
+from app.services.runninghub_dual_pool import set_dual_pool_grant
+from app.services.seedvr2_pool import create_seedvr2_execution_account
 from app.services.security import decrypt_secret, encrypt_secret, secret_fingerprint
 from app.services.storage import to_relative_data_path
 from tests.conftest import create_user, login
@@ -52,6 +56,26 @@ def _pool_form(
         "digital_human_ai_app_id": "pool-digital-human-app",
         "max_concurrent_tasks": str(max_concurrent_tasks),
         "admin_user_ids": [str(user_id) for user_id in admin_user_ids],
+    }
+    if enabled:
+        payload["is_enabled"] = "true"
+    return payload
+
+
+def _seedvr2_pool_form(
+    user_ids: list[int],
+    *,
+    label: str = "SeedVR2 一号",
+    api_key: str = "seedvr2-secret-key",
+    enabled: bool = True,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "label": label,
+        "api_key": api_key,
+        "base_url": "https://www.runninghub.cn",
+        "seedvr2_ai_app_id": "seedvr2-app-id",
+        "max_concurrent_tasks": "5",
+        "user_ids": [str(user_id) for user_id in user_ids],
     }
     if enabled:
         payload["is_enabled"] = "true"
@@ -124,6 +148,72 @@ def test_admin_creates_encrypted_pool_account_and_legacy_fingerprints_are_shared
     assert "API Key 已加密保存" in page.text
     assert secret not in page.text
     assert 'value="pool-secret-key"' not in page.text
+
+
+def test_admin_creates_encrypted_seedvr2_account_for_controlled_user(
+    client,
+    caplog,
+):
+    administrator = create_user("seedvr2-pool-admin", is_admin=True)
+    controlled = create_user("Cx_ceshi_seedvr2_pool")
+    with SessionLocal() as db:
+        user = db.get(User, controlled.id)
+        assert user is not None
+        set_dual_pool_grant(
+            db,
+            user=user,
+            is_enabled=True,
+            allow_non_admin=True,
+            note="受控测试账号",
+        )
+        db.commit()
+    login(client, administrator.username)
+    secret = "seedvr2-admin-page-secret"
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/admin/runninghub-pool/seedvr2/accounts",
+            data=_seedvr2_pool_form([controlled.id], api_key=secret),
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == (
+        "/admin/runninghub-pool/seedvr2?created=1"
+    )
+    assert secret not in caplog.text
+    with SessionLocal() as db:
+        account = db.query(SeedVR2ExecutionAccount).one()
+        assert decrypt_secret(account.api_key_encrypted) == secret
+        assert account.credential_fingerprint == secret_fingerprint(secret)
+        assert {member.user_id for member in account.pool_memberships} == {
+            controlled.id
+        }
+
+    page = client.get("/admin/runninghub-pool/seedvr2")
+    assert page.status_code == 200
+    assert "SeedVR2 一号" in page.text
+    assert "API Key 已加密保存" in page.text
+    assert secret not in page.text
+
+
+def test_seedvr2_admin_page_rejects_controlled_non_admin(client):
+    controlled = create_user("Cx_ceshi_seedvr2_page")
+    with SessionLocal() as db:
+        user = db.get(User, controlled.id)
+        assert user is not None
+        set_dual_pool_grant(
+            db,
+            user=user,
+            is_enabled=True,
+            allow_non_admin=True,
+        )
+        db.commit()
+    login(client, controlled.username)
+
+    response = client.get("/admin/runninghub-pool/seedvr2")
+
+    assert response.status_code == 403
 
 
 def test_duplicate_pool_key_is_rejected_without_creating_fake_capacity(client):
@@ -799,3 +889,184 @@ def test_admin_composition_route_revalidates_ids_and_locks_snapshot(client):
         assert batch_execution_account_snapshot(batch) == sorted(account_ids)
         assert audio_task.reviewed_at is not None
         assert audio_task.status == AudioTaskStatus.PENDING.value
+
+
+def test_dual_pool_composition_locks_mode_and_both_stage_snapshots(
+    client, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.services.runninghub_dual_pool.get_settings",
+        lambda: SimpleNamespace(runninghub_dual_pool_enabled=True),
+    )
+    administrator = create_user("dual-composition-admin", is_admin=True)
+    minimax_key = "dual-composition-minimax-key"
+    with SessionLocal() as db:
+        user = db.get(User, administrator.id)
+        assert user is not None
+        set_dual_pool_grant(db, user=user, is_enabled=True)
+        config = MiniMaxConfig(
+            user=user,
+            api_key_encrypted=encrypt_secret(minimax_key),
+            credential_fingerprint=secret_fingerprint(minimax_key),
+            base_url="https://api.minimax.io",
+            requests_per_minute=20,
+        )
+        db.add(config)
+        db.flush()
+        voice = MiniMaxVoiceAsset(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            config_id=config.id,
+            name="双池测试声音",
+            voice_id="DualPoolVoice01",
+            account_binding_id=config.account_binding_id,
+            credential_fingerprint=config.credential_fingerprint or "",
+            status=VoiceAssetStatus.ACTIVE.value,
+            method="system",
+            category="中文普通话",
+            is_saved=True,
+        )
+        db.add(voice)
+        db.commit()
+        voice_id = voice.id
+
+    token = _workbench_token(client, administrator.username)
+    created = client.post(
+        "/api/workbench/audio-batches",
+        json={
+            "access_token": token,
+            "name": "双池快照声音批次",
+            "request_key": "dual-composition-audio",
+            "correlation_id": "dual-composition-correlation",
+            "rows": [
+                {
+                    "row_id": "1",
+                    "speech_script": "双池快照测试。",
+                    "prompt": "人物自然说话",
+                }
+            ],
+            "speech_options": {
+                "voiceAssetId": voice_id,
+                "model": "speech-2.8-hd",
+                "speed": 1,
+                "volume": 1,
+                "pitch": 0,
+                "languageBoost": "Chinese",
+                "outputFormat": "mp3",
+                "costConfirmed": True,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    batch_id = created.json()["batch_id"]
+    item_id = created.json()["items"][0]["item_id"]
+    settings = get_settings()
+    with SessionLocal() as db:
+        audio_task = db.query(AudioGenerationTask).one()
+        output = settings.outputs_dir / "dual-composition-audio.mp3"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"ID3dual-composition")
+        subtitles = settings.outputs_dir / "dual-composition-audio.json"
+        subtitles.write_text(
+            json.dumps(
+                [{"text": "测试。", "start_seconds": 0, "end_seconds": 1}],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        audio_task.output_path = to_relative_data_path(output, settings)
+        audio_task.subtitle_path = to_relative_data_path(subtitles, settings)
+        audio_task.status = AudioTaskStatus.AWAITING_REVIEW.value
+        audio_task.batch_item.audio_status = "AWAITING_REVIEW"
+        audio_task.batch_item.status = "AWAITING_AUDIO_REVIEW"
+        db.add(
+            AudioGenerationAttempt(
+                id=str(uuid.uuid4()),
+                audio_task_id=audio_task.id,
+                version=audio_task.generation_version,
+                output_path=audio_task.output_path,
+                subtitle_path=audio_task.subtitle_path,
+                status="READY",
+            )
+        )
+        digital = create_execution_account(
+            db,
+            label="双池数字人账号",
+            api_key="dual-composition-digital-key",
+            base_url="https://runninghub.example.test",
+            digital_human_ai_app_id="dual-digital-app",
+            max_concurrent_tasks=5,
+            is_enabled=True,
+            admin_user_ids=[administrator.id],
+        )
+        first_seed = create_seedvr2_execution_account(
+            db,
+            label="双池放大账号一",
+            api_key="dual-composition-seed-key-one",
+            base_url="https://runninghub.example.test",
+            seedvr2_ai_app_id="dual-seed-app-one",
+            max_concurrent_tasks=5,
+            is_enabled=True,
+            user_ids=[administrator.id],
+        )
+        second_seed = create_seedvr2_execution_account(
+            db,
+            label="双池放大账号二",
+            api_key="dual-composition-seed-key-two",
+            base_url="https://runninghub.example.test",
+            seedvr2_ai_app_id="dual-seed-app-two",
+            max_concurrent_tasks=5,
+            is_enabled=True,
+            user_ids=[administrator.id],
+        )
+        db.commit()
+        digital_ids = [digital.id]
+        seed_ids = sorted([first_seed.id, second_seed.id])
+
+    staged = client.post(
+        "/api/workbench/batch-assets",
+        data={"access_token": token, "kind": "image"},
+        files={"file": ("person.png", b"\x89PNG\r\n\x1a\npayload", "image/png")},
+    )
+    assert staged.status_code == 201, staged.text
+    endpoint = f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition"
+    base_payload = {
+        "access_token": token,
+        "idempotency_key": "dual-composition-operation",
+        "cost_confirmed": True,
+        "image_asset_id": staged.json()["asset_id"],
+        "correlation_id": "dual-composition-correlation",
+        "runninghub_execution_account_ids": digital_ids,
+    }
+    missing_seed = client.post(endpoint, json=base_payload)
+    assert missing_seed.status_code == 422
+
+    started = client.post(
+        endpoint,
+        json={**base_payload, "seedvr2_execution_account_ids": seed_ids},
+    )
+    assert started.status_code == 200, started.text
+    composition = started.json()["composition"]
+    assert composition["execution_mode"] == "dual_pool_v1"
+    assert composition["runninghub_execution_account_ids"] == digital_ids
+    assert composition["seedvr2_execution_account_ids"] == seed_ids
+
+    # Once the first row locks the batch, a later switch change cannot migrate
+    # remaining rows or retries back to the current same-account branch.
+    monkeypatch.setattr(
+        "app.services.runninghub_dual_pool.get_settings",
+        lambda: SimpleNamespace(runninghub_dual_pool_enabled=False),
+    )
+    repeated = client.post(
+        endpoint,
+        json={**base_payload, "seedvr2_execution_account_ids": seed_ids},
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["composition"]["execution_mode"] == "dual_pool_v1"
+
+    changed = client.post(
+        endpoint,
+        json={**base_payload, "seedvr2_execution_account_ids": [seed_ids[0]]},
+    )
+    assert changed.status_code == 409
+    assert "快照已锁定" in changed.text

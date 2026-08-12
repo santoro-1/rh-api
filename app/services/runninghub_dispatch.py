@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
+    BATCH_EXECUTION_MODE_DUAL_POOL_V1,
     BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
     GenerationTask,
@@ -63,7 +64,7 @@ def task_uses_execution_pool(task: GenerationTask) -> bool:
         and batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
         and task.workflow_type == "digital_human"
         and task.user
-        and task.user.is_admin
+        and (task.user.is_admin or batch.execution_mode == BATCH_EXECUTION_MODE_DUAL_POOL_V1)
         and batch.runninghub_execution_account_ids_json
     )
 

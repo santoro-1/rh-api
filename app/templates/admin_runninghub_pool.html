@@ -6,7 +6,7 @@
     <h1>RunningHub 执行账号资源池</h1>
     <p class="muted">仅供新版工作台管理员使用。API Key 只在云端加密保存，页面不会显示或下发其值。</p>
   </div>
-  <a class="button secondary" href="/admin/users">返回用户管理</a>
+  <div class="button-row"><a class="button secondary" href="/admin/runninghub-pool/seedvr2">SeedVR2 账号池</a><a class="button secondary" href="/admin/users">返回用户管理</a></div>
 </section>
 
 {% if request.query_params.get("created") == "1" %}<p class="success-notice">执行账号已新增。</p>{% endif %}
@@ -34,7 +34,7 @@
       </label>
     </div>
     <div>
-      <strong>可使用此账号的管理员</strong>
+      <strong>可使用此账号的管理员或双池授权用户</strong>
       <div class="pool-member-list">
         {% for administrator in administrators %}
           <label><input type="checkbox" name="admin_user_ids" value="{{ administrator.id }}" {% if administrator.id == current_user.id %}checked{% endif %}> {{ administrator.username }}{% if not administrator.is_active %}（已停用）{% endif %}</label>
@@ -84,7 +84,7 @@
           </label>
         </div>
         <div>
-          <strong>可使用此账号的管理员</strong>
+          <strong>可使用此账号的管理员或双池授权用户</strong>
           <div class="pool-member-list">
             {% for administrator in administrators %}
               <label><input type="checkbox" name="admin_user_ids" value="{{ administrator.id }}" {% if administrator.id in member_ids %}checked{% endif %}> {{ administrator.username }}{% if not administrator.is_active %}（已停用）{% endif %}</label>

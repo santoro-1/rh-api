@@ -25,6 +25,7 @@ from app.models import (
     GenerationTaskEnhancementAttempt,
     RunningHubConfig,
     RunningHubExecutionAccount,
+    SeedVR2ExecutionAccount,
     TaskStatus,
     User,
 )
@@ -61,6 +62,13 @@ from app.services.logging_config import (
 )
 from app.services.audio import add_silence_tail
 from app.services.security import decrypt_secret
+from app.services.seedvr2_dispatch import (
+    cool_seedvr2_account,
+    mark_seedvr2_account_healthy,
+    release_seedvr2_account_for_new_attempt,
+    reserve_seedvr2_account,
+    task_uses_dual_pool,
+)
 from app.services.storage import (
     create_download_target,
     create_enhanced_download_target,
@@ -158,6 +166,7 @@ def _video_log_context(task: GenerationTask) -> dict[str, object]:
         "batch_item_id": item.id if item else None,
         "source_channel": batch.source_channel if batch else None,
         "correlation_id": (batch.correlation_id or batch.id) if batch else None,
+        "execution_mode": batch.execution_mode if batch else None,
         "remote_stage": remote_stage,
         "remote_attempt_number": remote_attempt_number,
         "execution_account_id": task.execution_account_id,
@@ -169,17 +178,26 @@ def _video_log_context(task: GenerationTask) -> dict[str, object]:
             if task.execution_account
             else None
         ),
+        "seedvr2_execution_account_id": (
+            task.enhancement.seedvr2_execution_account_id
+            if task.enhancement is not None else None
+        ),
+        "seedvr2_execution_account_label": (
+            task.enhancement.seedvr2_execution_account.label
+            if task.enhancement is not None
+            and task.enhancement.seedvr2_execution_account is not None else None
+        ),
     }
 
 
 def _make_client(
-    config: RunningHubConfig | RunningHubExecutionAccount,
+    config: RunningHubConfig | RunningHubExecutionAccount | SeedVR2ExecutionAccount,
 ) -> RunningHubClient:
     """Build the account-level client; the selected adapter supplies the App ID."""
 
     ai_app_id = (
-        config.digital_human_ai_app_id
-        if isinstance(config, RunningHubExecutionAccount)
+        config.seedvr2_ai_app_id if isinstance(config, SeedVR2ExecutionAccount)
+        else config.digital_human_ai_app_id if isinstance(config, RunningHubExecutionAccount)
         else config.ai_app_id
     )
     return RunningHubClient(
@@ -490,6 +508,22 @@ def recover_interrupted_tasks(db: Session) -> int:
             error_code="WORKER_RESTARTED",
             error_message="Worker 在远程提交前重启，已安全释放本地预留",
         )
+    interrupted_enhancements = list(
+        db.scalars(
+            select(GenerationTaskEnhancement)
+            .options(selectinload(GenerationTaskEnhancement.attempts))
+            .where(
+                GenerationTaskEnhancement.status == EnhancementStatus.UPLOADING.value,
+                GenerationTaskEnhancement.remote_task_id.is_(None),
+            )
+        ).all()
+    )
+    for enhancement in interrupted_enhancements:
+        _finish_enhancement_attempt(
+            enhancement, status="INTERRUPTED_BEFORE_SUBMIT",
+            error_code="WORKER_RESTARTED",
+            error_message="Worker 在 SeedVR2 远程提交前重启，将在原执行账号安全重试",
+        )
 
     result = db.execute(
         update(GenerationTask)
@@ -602,6 +636,9 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
             ),
             selectinload(GenerationTask.enhancement).selectinload(
                 GenerationTaskEnhancement.attempts
+            ),
+            selectinload(GenerationTask.enhancement).selectinload(
+                GenerationTaskEnhancement.seedvr2_execution_account
             ),
             selectinload(GenerationTask.batch_item).selectinload(
                 GenerationBatchItem.batch
@@ -895,6 +932,7 @@ def _new_enhancement_attempt(
         enhancement_id=enhancement.id,
         attempt_number=len(enhancement.attempts) + 1,
         execution_account_id=enhancement.execution_account_id,
+        seedvr2_execution_account_id=enhancement.seedvr2_execution_account_id,
         status="UPLOADING",
     )
     enhancement.attempts.append(attempt)
@@ -946,6 +984,35 @@ def _schedule_enhancement_retry(
     task.error_message = enhancement.error_message
     task.completed_at = None
     return retry_number, delay_seconds
+
+
+def _seedvr2_account_is_confirmed_unusable(
+    error_code: object, message: object
+) -> bool:
+    evidence = f"{error_code or ''} {message or ''}".upper()
+    return any(marker in evidence for marker in (
+        "UNAUTHORIZED", "FORBIDDEN", "INVALID_API_KEY", "API_KEY_INVALID",
+        "PERMISSION_DENIED", "NO_PERMISSION", "APP_NOT_FOUND",
+        "WORKFLOW_NOT_FOUND", "HTTP 401", "HTTP 403",
+    ))
+
+
+def _release_unusable_seedvr2_binding(
+    enhancement: GenerationTaskEnhancement, *, evidence: str
+) -> None:
+    account = enhancement.seedvr2_execution_account
+    if account is None:
+        return
+    account.health_status = "UNHEALTHY"
+    account.health_error_code = evidence[:100]
+    account.health_checked_at = _now()
+    attempt = _enhancement_attempt(enhancement)
+    if attempt is not None:
+        attempt.error_message = (
+            f"{attempt.error_message or ''}\n账号确认不可用于新尝试；下一次仅从本次 SeedVR2 快照重新选号。"
+        ).strip()
+    if enhancement.remote_task_id is None:
+        release_seedvr2_account_for_new_attempt(enhancement)
 
 
 def _enhancement_watchdog_expired(
@@ -1006,6 +1073,13 @@ def _handle_enhancement_remote_status(
             )
             db.commit()
             return
+        if enhancement.seedvr2_execution_account is not None:
+            cool_seedvr2_account(
+                enhancement.seedvr2_execution_account,
+                error_code=str(exc.error_code or "QUERY_ERROR"),
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=True,
+            )
         enhancement.error_message = str(exc)
         task.error_code = "VIDEO_ENHANCEMENT_QUERY_ERROR"
         task.error_message = "SeedVR2 状态查询暂时失败，系统会保留远端任务继续查询"
@@ -1013,6 +1087,11 @@ def _handle_enhancement_remote_status(
         return
 
     status = str(result.get("status") or "").upper()
+    if enhancement.seedvr2_execution_account is not None:
+        mark_seedvr2_account_healthy(
+            enhancement.seedvr2_execution_account,
+            clear_cooldown=False,
+        )
     failed_reason = _runninghub_failed_reason(result)
     enhancement.failed_reason_json = (
         json.dumps(failed_reason, ensure_ascii=False)
@@ -1064,7 +1143,7 @@ def _handle_enhancement_remote_status(
             db.commit()
         return
 
-    if task.execution_account:
+    if task.execution_account and enhancement.seedvr2_execution_account is None:
         _remote_account_task_counts.pop(task.execution_account.id, None)
     if status == "FAILED":
         message = _runninghub_failure_message(result)
@@ -1078,6 +1157,12 @@ def _handle_enhancement_remote_status(
         scheduled = _schedule_enhancement_retry(
             task, enhancement, message=message
         )
+        if task_uses_dual_pool(task) and _seedvr2_account_is_confirmed_unusable(
+            result.get("errorCode"), message
+        ):
+            _release_unusable_seedvr2_binding(
+                enhancement, evidence=str(result.get("errorCode") or "ACCOUNT_UNUSABLE")
+            )
         if scheduled is None:
             _enhancement_failure(
                 task,
@@ -1184,7 +1269,7 @@ def _process_enhancement(
     task: GenerationTask,
     enhancement: GenerationTaskEnhancement,
     client: RunningHubClient,
-    execution_config: RunningHubConfig | RunningHubExecutionAccount,
+    execution_config: RunningHubConfig | RunningHubExecutionAccount | SeedVR2ExecutionAccount,
 ) -> None:
     if enhancement.status == EnhancementStatus.SUCCESS.value:
         if enhancement.result_path and not task.result_path:
@@ -1225,6 +1310,22 @@ def _process_enhancement(
     try:
         current_tasks = client.get_account_current_task_count()
     except RunningHubError as exc:
+        if isinstance(execution_config, SeedVR2ExecutionAccount):
+            confirmed_unusable = _seedvr2_account_is_confirmed_unusable(
+                exc.error_code, str(exc)
+            )
+            cool_seedvr2_account(
+                execution_config,
+                error_code=str(exc.error_code or "CAPACITY_QUERY_FAILED"),
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=confirmed_unusable,
+            )
+            if confirmed_unusable:
+                release_seedvr2_account_for_new_attempt(enhancement)
+            else:
+                enhancement.auto_retry_after = _now() + timedelta(
+                    seconds=REMOTE_CAPACITY_RECHECK_SECONDS
+                )
         enhancement.error_message = str(exc)
         task.error_code = "VIDEO_ENHANCEMENT_CAPACITY_QUERY_FAILED"
         task.error_message = "暂时无法读取 SeedVR2 执行账号容量，将继续等待"
@@ -1232,6 +1333,15 @@ def _process_enhancement(
         return
     limit = int(execution_config.max_concurrent_tasks)
     if current_tasks >= limit:
+        if isinstance(execution_config, SeedVR2ExecutionAccount):
+            cool_seedvr2_account(
+                execution_config,
+                error_code="CAPACITY_FULL",
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=False,
+            )
+            release_seedvr2_account_for_new_attempt(enhancement)
+            db.commit()
         return
 
     enhancement.status = EnhancementStatus.UPLOADING.value
@@ -1246,7 +1356,11 @@ def _process_enhancement(
         payload = seedvr2_upscale_workflow.build_payload(uploaded_video)
         attempt.payload_summary_json = json.dumps(
             {
-                "ai_app_id": SEEDVR2_AI_APP_ID,
+                "ai_app_id": (
+                    execution_config.seedvr2_ai_app_id
+                    if isinstance(execution_config, SeedVR2ExecutionAccount)
+                    else SEEDVR2_AI_APP_ID
+                ),
                 "instance_type": payload["instanceType"],
                 "node_ids": [node["nodeId"] for node in payload["nodeInfoList"]],
             },
@@ -1278,10 +1392,28 @@ def _process_enhancement(
             task.status = TaskStatus.RUNNING.value
             task.error_code = None
             task.error_message = enhancement.error_message
+            if isinstance(execution_config, SeedVR2ExecutionAccount):
+                cool_seedvr2_account(
+                    execution_config,
+                    error_code="CAPACITY_FULL",
+                    cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                    unhealthy=False,
+                )
+                release_seedvr2_account_for_new_attempt(enhancement)
         elif exc.retry_safe:
             scheduled = _schedule_enhancement_retry(
                 task, enhancement, message=str(exc)
             )
+            if (
+                task_uses_dual_pool(task)
+                and _seedvr2_account_is_confirmed_unusable(
+                    exc.error_code, str(exc)
+                )
+            ):
+                _release_unusable_seedvr2_binding(
+                    enhancement,
+                    evidence=str(exc.error_code or "ACCOUNT_UNUSABLE"),
+                )
             if scheduled is None:
                 _enhancement_failure(
                     task,
@@ -1302,6 +1434,12 @@ def _process_enhancement(
             scheduled = _schedule_enhancement_retry(
                 task, enhancement, message=str(exc)
             )
+            if task_uses_dual_pool(task) and _seedvr2_account_is_confirmed_unusable(
+                exc.error_code, str(exc)
+            ):
+                _release_unusable_seedvr2_binding(
+                    enhancement, evidence=str(exc.error_code or "ACCOUNT_UNUSABLE")
+                )
             if scheduled is None:
                 _enhancement_failure(
                     task,
@@ -1342,7 +1480,9 @@ def _process_enhancement(
     task.status = TaskStatus.RUNNING.value
     task.error_code = None
     task.error_message = None
-    if task.execution_account:
+    if isinstance(execution_config, SeedVR2ExecutionAccount):
+        mark_seedvr2_account_healthy(execution_config)
+    elif task.execution_account:
         _remote_account_task_counts[task.execution_account.id] = (
             _remote_account_task_counts.get(task.execution_account.id, 0) + 1
         )
@@ -1468,6 +1608,39 @@ def process_task(db: Session, task_id: str) -> None:
     if not task.user or not task.user.is_active:
         _mark_failed(task, "CONFIGURATION_ERROR", "账号已禁用")
         db.commit()
+        return
+    if (
+        task.workflow_type == "digital_human"
+        and task.enhancement is not None
+        and task_uses_dual_pool(task)
+    ):
+        seed_account = reserve_seedvr2_account(db, task, task.enhancement)
+        if seed_account is None:
+            return
+        try:
+            seed_client = _make_client(seed_account)
+            seed_client.ai_app_id = seed_account.seedvr2_ai_app_id
+            seed_client.submission_type = seedvr2_upscale_workflow.submission_type
+        except (ValueError, RunningHubError) as exc:
+            cool_seedvr2_account(
+                seed_account,
+                error_code="CONFIGURATION_ERROR",
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=True,
+            )
+            release_seedvr2_account_for_new_attempt(task.enhancement)
+            task.enhancement.status = EnhancementStatus.PENDING.value
+            task.enhancement.error_message = str(exc)
+            task.status = TaskStatus.RUNNING.value
+            task.error_code = "VIDEO_ENHANCEMENT_CONFIGURATION_ERROR"
+            task.error_message = (
+                "SeedVR2 执行账号配置不可用，将从本次账号快照改用其他健康账号"
+            )
+            db.commit()
+            return
+        _process_enhancement(
+            db, task, task.enhancement, seed_client, seed_account
+        )
         return
     uses_pool = task_uses_execution_pool(task)
     if uses_pool:

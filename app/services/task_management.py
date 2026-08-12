@@ -14,6 +14,10 @@ from app.services.runninghub_attempts import (
     task_has_uncertain_submission,
 )
 from app.services.runninghub_dispatch import task_uses_execution_pool
+from app.services.seedvr2_dispatch import (
+    release_seedvr2_account_for_new_attempt,
+    task_uses_dual_pool,
+)
 from app.workflows import get_workflow
 from app.workflows.base import resolve_asset_path
 
@@ -92,6 +96,13 @@ def prepare_task_retry(
             enhancement.result_size = None
             enhancement.result_sha256 = None
             enhancement.output_metadata_json = None
+            if (
+                task_uses_dual_pool(task)
+                and enhancement.seedvr2_execution_account is not None
+                and enhancement.seedvr2_execution_account.health_status
+                in {"UNHEALTHY", "ERROR"}
+            ):
+                release_seedvr2_account_for_new_attempt(enhancement)
         enhancement.error_message = None
         enhancement.failed_reason_json = None
         enhancement.usage_json = None

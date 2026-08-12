@@ -11,6 +11,7 @@ from app.models import (
     GenerationTaskEnhancement,
     GenerationTaskEnhancementAttempt,
     RunningHubExecutionAccount,
+    SeedVR2ExecutionAccount,
 )
 
 
@@ -138,10 +139,14 @@ def enhancement_has_uncertain_submission(
 def enhancement_execution_account_for_remote(
     task: GenerationTask,
     enhancement: GenerationTaskEnhancement,
-) -> RunningHubExecutionAccount | None:
+) -> RunningHubExecutionAccount | SeedVR2ExecutionAccount | None:
     attempt = enhancement_attempt_for_remote_id(enhancement)
+    if attempt is not None and attempt.seedvr2_execution_account is not None:
+        return attempt.seedvr2_execution_account
     if attempt is not None and attempt.execution_account is not None:
         return attempt.execution_account
+    if enhancement.seedvr2_execution_account is not None:
+        return enhancement.seedvr2_execution_account
     if enhancement.execution_account is not None:
         return enhancement.execution_account
     return task_execution_account_for_remote(task)
