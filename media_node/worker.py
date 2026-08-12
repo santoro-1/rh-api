@@ -19,6 +19,7 @@ import requests
 from app.services.alignment.funasr_http import FunASRHTTPProvider
 from app.services.audio import inspect_audio_duration
 from app.services.media_segmentation import (
+    DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     SegmentPlan,
     cut_audio_segment,
     cut_video_segment,
@@ -468,6 +469,9 @@ def process_job(
                         plan_silence_segments(
                             float(job.get("durationSeconds") or 0),
                             detect_silence_midpoints(audio_path),
+                            max_segment_seconds=(
+                                DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
+                            ),
                         )
                     )
                 else:

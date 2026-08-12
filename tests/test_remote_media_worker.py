@@ -15,6 +15,7 @@ from app.models import (
     User,
 )
 from app.services.workflow_configs import save_workflow_config
+from media_node.worker import process_job
 from tests.conftest import create_user, login
 
 
@@ -140,6 +141,60 @@ def _audio_only_segment_archive() -> bytes:
                 b"ID3segment",
             )
     return output.getvalue()
+
+
+def test_remote_digital_human_analysis_respects_35_second_limit(
+    tmp_path,
+    monkeypatch,
+):
+    class FakeClient:
+        completed_plans = ()
+
+        def download(self, _url, target):
+            target.write_bytes(b"ID3long-audio")
+            return target.stat().st_size
+
+        def heartbeat(self, *_args, **_kwargs):
+            return None
+
+        def complete_analysis(
+            self,
+            _job_id,
+            _lease_id,
+            _provider,
+            plans,
+            _metrics,
+        ):
+            self.completed_plans = plans
+
+        def fail(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(
+        "media_node.worker.detect_silence_midpoints",
+        lambda _path: [],
+    )
+    client = FakeClient()
+
+    process_job(
+        client,
+        {
+            "jobId": "digital-human-limit-test",
+            "leaseId": "lease-1",
+            "action": "analysis",
+            "workflowType": "digital_human",
+            "durationSeconds": 80.0,
+            "source": {
+                "audioUrl": "https://example.test/audio.mp3",
+                "audioName": "audio.mp3",
+            },
+        },
+        work_root=tmp_path,
+        heartbeat_seconds=3600,
+    )
+
+    assert client.completed_plans
+    assert max(plan.duration_seconds for plan in client.completed_plans) <= 35.0
 
 
 def test_remote_worker_claim_analysis_review_and_cut_handoff(client, monkeypatch):
