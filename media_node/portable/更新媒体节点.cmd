@@ -21,7 +21,10 @@ exit /b 1
 
 :found
 echo Applying: %UPDATE_ZIP%
-"%~dp0python\python.exe" -s -m media_node.apply_portable_update "%UPDATE_ZIP%" "%~dp0"
+rem The batch directory always ends in a backslash. Passing "%~dp0" as the
+rem final quoted argument can make Windows' argv parser consume the quote and
+rem hand Python a malformed root. We already cd'ed here, so use a stable dot.
+"%~dp0python\python.exe" -s -m media_node.apply_portable_update "%UPDATE_ZIP%" "."
 if errorlevel 1 (
   pause
   exit /b 1

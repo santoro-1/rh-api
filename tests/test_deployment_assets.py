@@ -85,6 +85,9 @@ def test_windows_media_node_has_a_self_contained_portable_builder():
     portable_start = (node / "portable" / "启动媒体节点.cmd").read_text(
         encoding="utf-8"
     )
+    portable_update = (node / "portable" / "更新媒体节点.cmd").read_text(
+        encoding="utf-8"
+    )
 
     assert 'Join-Path $sourceRuntime "Scripts\\python.exe"' in builder
     assert "sys.base_prefix" in builder
@@ -112,6 +115,8 @@ def test_windows_media_node_has_a_self_contained_portable_builder():
     assert "ffmpeg\\bin" in portable_start
     assert "portable-runtime.txt" in portable_start
     assert "runtime-required.txt" in portable_start
+    assert 'apply_portable_update "%UPDATE_ZIP%" "."' in portable_update
+    assert 'apply_portable_update "%UPDATE_ZIP%" "%~dp0"' not in portable_update
     assert 'os.getenv("MEDIA_WORKER_ID", "").strip()' in worker
     assert "MEDIA_WORKER_ID=\n" in environment
 
