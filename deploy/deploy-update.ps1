@@ -7,7 +7,8 @@ param(
     [string]$AppDir = "/opt/runninghub-video",
     [string]$BackupDir = "/var/backups/runninghub-video",
     [string]$LinuxUser = "rhvideo",
-    [string]$Domain = "video.lanyingjk01.com"
+    [string]$Domain = "video.lanyingjk01.com",
+    [ValidateRange(5, 720)][int]$DrainTimeoutMinutes = 120
 )
 
 Set-StrictMode -Version Latest
@@ -24,6 +25,8 @@ $script:Services = @($script:CoreServices) + $script:OptionalServices
 $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $script:LocalTemp = $null
 $script:RemoteTemp = $null
+$script:DrainToken = $null
+$script:DrainEnabled = $false
 
 function Write-Step {
     param([string]$Message)
@@ -117,6 +120,20 @@ function Confirm-Exact {
 }
 
 function Get-QueueCheckScript {
+    param([switch]$InFlightOnly)
+    if ($InFlightOnly) {
+        $videoStatuses = "'UPLOADING','SUBMITTED','RUNNING'"
+        $audioStatuses = "'CLONING','SYNTHESIZING','REMOTE_PENDING','ALIGNING','SEGMENTING','HANDOFF'"
+        $voiceStatuses = "'CLONING','SYNTHESIZING','SAVING'"
+        $mediaStatuses = "'ANALYZING','CUTTING'"
+        $mergeStatuses = "'MERGING'"
+    } else {
+        $videoStatuses = "'PENDING','UPLOADING','SUBMITTED','RUNNING'"
+        $audioStatuses = "'PENDING','CLONING','SYNTHESIZING','REMOTE_PENDING','ALIGNING','SEGMENTING','HANDOFF'"
+        $voiceStatuses = "'PENDING','CLONING','SYNTHESIZING','SAVE_PENDING','SAVING'"
+        $mediaStatuses = "'PENDING_ANALYSIS','ANALYZING','PENDING_CUT','CUTTING'"
+        $mergeStatuses = "'MERGE_PENDING','MERGING'"
+    }
     return @"
 set -euo pipefail
 db='$AppDir/data/app.db'
@@ -126,29 +143,114 @@ if [ ! -f "`$db" ]; then
 fi
 sqlite3 -readonly "`$db" "
 SELECT 'video', count(*) FROM generation_tasks
- WHERE status IN ('PENDING','UPLOADING','SUBMITTED','RUNNING')
+ WHERE status IN ($videoStatuses)
 UNION ALL
 SELECT 'audio', count(*) FROM audio_generation_tasks
- WHERE status IN ('PENDING','PROCESSING','REMOTE_PENDING','SAVING')
+ WHERE status IN ($audioStatuses)
 UNION ALL
 SELECT 'voice', count(*) FROM voice_creation_tasks
- WHERE status IN ('PENDING','PROCESSING','SAVE_PENDING','SAVING');
+ WHERE status IN ($voiceStatuses)
+UNION ALL
+SELECT 'media', count(*) FROM long_audio_projects
+ WHERE status IN ($mediaStatuses)
+UNION ALL
+SELECT 'merge', count(*) FROM generation_batch_items
+ WHERE merged_video_status IN ($mergeStatuses);
 "
 "@
 }
 
-function Assert-QueuesIdle {
-    $queueOutput = Invoke-RemoteScript -Script (Get-QueueCheckScript) `
+function Get-QueueStatus {
+    param([switch]$InFlightOnly)
+    return Invoke-RemoteScript -Script (Get-QueueCheckScript -InFlightOnly:$InFlightOnly) `
         -Description "读取本项目任务队列"
-    Write-Host $queueOutput
-    $busy = $false
-    foreach ($line in ($queueOutput -split "`n")) {
+}
+
+function Test-QueueBusy {
+    param([Parameter(Mandatory = $true)][string]$QueueOutput)
+    foreach ($line in ($QueueOutput -split "`n")) {
         if ($line -match "^[^|]+\|([1-9][0-9]*)$") {
-            $busy = $true
+            return $true
         }
     }
-    if ($busy) {
+    return $false
+}
+
+function Show-QueueStatus {
+    $queueOutput = Get-QueueStatus
+    Write-Host $queueOutput
+}
+
+function Assert-QueuesIdle {
+    $queueOutput = Get-QueueStatus
+    Write-Host $queueOutput
+    if (Test-QueueBusy -QueueOutput $queueOutput) {
         throw "本项目仍有待处理或运行中的任务，已拒绝部署。请等待任务结束后重试。"
+    }
+}
+
+function Enable-DeploymentDrain {
+    $script:DrainToken = [Guid]::NewGuid().ToString("N")
+    $expiresAtEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + `
+        (($DrainTimeoutMinutes + 30) * 60)
+    $drainScript = @"
+set -euo pipefail
+runtime='$AppDir/data/runtime'
+marker="`$runtime/deployment-drain.json"
+partial="`$marker.$script:DrainToken.partial"
+install -d -m 700 -o '$LinuxUser' -g '$LinuxUser' "`$runtime"
+printf '%s\n' '{"token":"$script:DrainToken","commit":"$commit","expiresAtEpoch":$expiresAtEpoch}' > "`$partial"
+chown '${LinuxUser}:${LinuxUser}' "`$partial"
+chmod 600 "`$partial"
+mv -f -- "`$partial" "`$marker"
+echo "已进入排空模式：`$marker"
+"@
+    Write-Host (Invoke-RemoteScript -Script $drainScript -Description "进入排空模式")
+    $script:DrainEnabled = $true
+}
+
+function Disable-DeploymentDrain {
+    if (-not $script:DrainEnabled -or -not $script:DrainToken) {
+        return
+    }
+    $disableScript = @"
+set -euo pipefail
+marker='$AppDir/data/runtime/deployment-drain.json'
+if [ -f "`$marker" ] && grep -Fq '"token":"$script:DrainToken"' "`$marker"; then
+  rm -f -- "`$marker"
+  echo '已退出排空模式'
+else
+  echo '排空标记已不存在或不属于本次发布，未修改'
+fi
+"@
+    try {
+        Write-Host (Invoke-RemoteScript -Script $disableScript -Description "退出排空模式")
+        $script:DrainEnabled = $false
+    } catch {
+        Write-Warning "自动退出排空模式失败：$($_.Exception.Message)"
+    }
+}
+
+function Wait-QueuesDrained {
+    $deadline = [DateTimeOffset]::UtcNow.AddMinutes($DrainTimeoutMinutes)
+    $idleChecks = 0
+    while ($true) {
+        $queueOutput = Get-QueueStatus -InFlightOnly
+        Write-Host "执行中任务：$($queueOutput.Replace("`n", ", "))"
+        if (-not (Test-QueueBusy -QueueOutput $queueOutput)) {
+            $idleChecks += 1
+            if ($idleChecks -ge 2) {
+                Write-Host "执行中的任务已稳定排空；排队任务将在发布完成后继续。" -ForegroundColor Green
+                return
+            }
+            Write-Host "首次检测为空，等待 10 秒复核，避免领取任务的临界竞争。"
+        } else {
+            $idleChecks = 0
+        }
+        if ([DateTimeOffset]::UtcNow -ge $deadline) {
+            throw "等待执行中任务排空超过 $DrainTimeoutMinutes 分钟，已取消发布。"
+        }
+        Start-Sleep -Seconds 10
     }
 }
 
@@ -237,7 +339,8 @@ done
     $serverStatus = Invoke-RemoteScript -Script $readonlyScript `
         -Description "服务器只读检查"
     Write-Host $serverStatus
-    Assert-QueuesIdle
+    Write-Host "本项目当前队列（只读；排队任务不会阻止支持排空模式的发布）："
+    Show-QueueStatus
 
     $deployedRevision = Invoke-RemoteScript -Description "读取当前部署版本" -Script @"
 set -euo pipefail
@@ -251,6 +354,18 @@ tr -d '\r\n' < '$AppDir/.deployed-revision'
         Write-Host ""
         Write-Host "服务器已经是该 commit，无需重复部署。" -ForegroundColor Green
         return
+    }
+    $drainSupport = Invoke-RemoteScript -Description "检查线上排空能力" -Script @"
+set -euo pipefail
+if [ -f '$AppDir/app/services/deployment_drain.py' ] && \
+   grep -Fq 'DRAIN_MARKER_NAME' '$AppDir/app/services/deployment_drain.py'; then
+  echo 'SUPPORTED'
+else
+  echo 'BOOTSTRAP'
+fi
+"@
+    if ($drainSupport -eq "BOOTSTRAP") {
+        Write-Warning "当前线上版本尚不识别排空标记；首次发布本功能时仍需队列完全空闲。此后更新会自动排空。"
     }
 
     Invoke-LocalText -Description "确认本地包含服务器旧版本" -Command {
@@ -411,10 +526,19 @@ echo '发布包校验和预检通过'
 "@
     Write-Host (Invoke-RemoteScript -Script $stageScript -Description "校验发布包")
 
-    Assert-QueuesIdle
     Confirm-Exact `
-        -Prompt "即将只停止本项目 runninghub-video 服务，更新媒体 Worker，覆盖项目代码，执行数据库迁移，再启动四个服务。不会安装或启动服务器 ASR，其他服务、Nginx、证书均不修改。" `
+        -Prompt "即将进入排空模式：暂停本项目新建/修改和领取新任务，等待执行中任务完成后，只停止本项目 runninghub-video 服务并更新。浏览、预览和下载保持可用；不会安装或启动服务器 ASR，也不会修改其他项目、Nginx 或证书。" `
         -Expected "DEPLOY $shortCommit"
+
+    Write-Step "进入排空模式并等待执行中的任务结束"
+    if ($drainSupport -eq "BOOTSTRAP") {
+        Assert-QueuesIdle
+        Enable-DeploymentDrain
+        Assert-QueuesIdle
+    } else {
+        Enable-DeploymentDrain
+        Wait-QueuesDrained
+    }
 
     Write-Step "更新本项目代码（服务器写操作 3）"
     $mutateScript = @"
@@ -558,7 +682,9 @@ for port in 18080 18081 18082; do
 done
 "@
     Write-Host (Invoke-RemoteScript -Script $verifyScript -Description "发布后验收")
-    Assert-QueuesIdle
+    Write-Host "发布后的队列（排队任务将在退出排空后继续）："
+    Show-QueueStatus
+    Disable-DeploymentDrain
 
     Write-Step "清理本项目发布临时目录（服务器写操作 4）"
     $cleanupScript = @"
@@ -577,6 +703,7 @@ esac
     Write-Host "Nginx 配置、证书和其他项目均未修改。"
 }
 finally {
+    Disable-DeploymentDrain
     if ($script:LocalTemp -and (Test-Path -LiteralPath $script:LocalTemp)) {
         Remove-Item -LiteralPath $script:LocalTemp -Recurse -Force
     }

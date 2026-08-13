@@ -71,6 +71,16 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
 ```
 
 脚本会在关键写操作前显示将修改的范围，并要求输入两次带 commit 的确认词。
+第二次确认后会自动进入“排空模式”：登录、浏览、预览和下载继续可用；新建、修改
+任务以及 Worker 领取下一条任务会暂停；已经提交或执行中的任务会继续收尾。脚本只
+等待真正执行中的任务，不要求 `PENDING` 队列为空，排空后自动完成发布并恢复领取。
+默认最多等待 120 分钟，可用 `-DrainTimeoutMinutes` 在 5 到 720 分钟范围内调整。
+
+排空标记位于 `data/runtime/deployment-drain.json`，由发布脚本以本次随机 token 管理，
+只删除自己创建的标记；标记还带有过期时间，即使发布终端异常退出也不会永久锁住
+操作。首次把排空功能发布到尚不支持它的旧版本时仍要求整个队列空闲一次，此后的
+发布才会自动排空。
+
 它只允许操作以下固定范围：
 
 - `/opt/runninghub-video`
@@ -82,7 +92,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
 - `runninghub-video-worker.service`
 
 脚本不会修改 Nginx、证书、安全组或其他项目，不会自动删除备份。以下情况会拒绝
-自动发布：工作区不干净、本地不是最新 `main`、测试失败、项目队列不为空、主项目
+自动发布：工作区不干净、本地不是最新 `main`、测试失败、执行中任务在排空超时后
+仍未结束、主项目
 `requirements.txt` 发生变化、发布范围不匹配，或本次 Git 变更包含文件删除。
 
 如果上传或预检阶段失败，生产服务尚未停止。代码覆盖或迁移阶段失败时，脚本会

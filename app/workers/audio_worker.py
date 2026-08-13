@@ -25,6 +25,7 @@ from app.models import (
     VoiceAssetStatus,
 )
 from app.services.audio import format_duration_timecode, inspect_audio_duration
+from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import (
     configure_logging,
     log_event,
@@ -868,9 +869,11 @@ def process_task(db: Session, task_id: str) -> None:
 def run_once() -> int:
     processed = 0
     with SessionLocal() as db:
-        while voice_task_id := claim_next_voice_task(db):
-            process_voice_task(db, voice_task_id)
-            processed += 1
+        draining = is_deployment_draining()
+        if not draining:
+            while voice_task_id := claim_next_voice_task(db):
+                process_voice_task(db, voice_task_id)
+                processed += 1
         remote_task_ids = db.scalars(
             select(AudioGenerationTask.id)
             .where(
@@ -882,6 +885,8 @@ def run_once() -> int:
         for task_id in remote_task_ids:
             process_task(db, task_id)
             processed += 1
+        if draining:
+            return processed
         while task_id := claim_next_pending_task(db):
             process_task(db, task_id)
             processed += 1

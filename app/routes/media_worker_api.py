@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import LongAudioProject, LongAudioProjectStatus
+from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import log_event
 from app.services.long_audio import (
     LongAudioError,
@@ -282,6 +283,8 @@ async def claim_job(
         for item in raw_capabilities
         if str(item).strip().lower() in {"analysis", "cut"}
     }
+    if is_deployment_draining(settings):
+        return Response(status_code=204)
     claimed = _claim_next(
         db,
         settings,

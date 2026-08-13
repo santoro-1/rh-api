@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -27,6 +27,7 @@ from app.routes import (
     voices,
     workbench,
 )
+from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import configure_logging, log_event
 
 
@@ -74,6 +75,33 @@ def create_app() -> FastAPI:
         name="static",
     )
     app.state.rate_limits = defaultdict(deque)
+
+    @app.middleware("http")
+    async def deployment_drain_middleware(request: Request, call_next):
+        path = request.url.path
+        method = request.method.upper()
+        allowed_write = path in {"/login", "/logout"} or path.startswith(
+            "/api/media-worker/"
+        )
+        if (
+            method not in {"GET", "HEAD", "OPTIONS"}
+            and not allowed_write
+            and is_deployment_draining(settings)
+        ):
+            message = (
+                "系统正在发布新版本，已暂停新建或修改任务；"
+                "现有任务、浏览、预览和下载不受影响，请稍后重试。"
+            )
+            headers = {"Retry-After": "15", "X-Deployment-Draining": "1"}
+            if path.startswith("/api/"):
+                return JSONResponse(
+                    {"detail": message, "code": "DEPLOYMENT_DRAINING"},
+                    status_code=503,
+                    headers=headers,
+                )
+            return PlainTextResponse(message, status_code=503, headers=headers)
+        return await call_next(request)
+
     app.include_router(auth.router)
     app.include_router(admin.router)
     app.include_router(runninghub_pool_admin.router)

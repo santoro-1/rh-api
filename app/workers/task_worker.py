@@ -38,6 +38,7 @@ from app.services.runninghub_balance import (
     persist_client_account_status,
     save_balance_error,
 )
+from app.services.deployment_drain import is_deployment_draining
 from app.services.runninghub_dispatch import (
     DispatchReservation,
     cool_execution_account,
@@ -1985,6 +1986,8 @@ def run_once() -> int:
             process_task(db, task_id)
             processed += 1
 
+        if is_deployment_draining():
+            return processed
         while pending_task_id := claim_next_pending_task(db):
             process_task(db, pending_task_id)
             processed += 1

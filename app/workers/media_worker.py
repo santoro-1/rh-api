@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import LongAudioProject, LongAudioProjectStatus
+from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import (
     configure_logging,
     log_event,
@@ -186,7 +187,9 @@ def main() -> None:
     while True:
         try:
             with SessionLocal() as db:
-                processed = process_next(db)
+                processed = (
+                    False if is_deployment_draining() else process_next(db)
+                )
             write_heartbeat("media_worker", processed=processed)
         except Exception as exc:
             logger.exception("媒体预处理 Worker 循环异常：%s", exc)
