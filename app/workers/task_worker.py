@@ -34,6 +34,10 @@ from app.services.runninghub import (
     RunningHubError,
     runninghub_upload_diagnostics,
 )
+from app.services.runninghub_balance import (
+    persist_client_account_status,
+    save_balance_error,
+)
 from app.services.runninghub_dispatch import (
     DispatchReservation,
     cool_execution_account,
@@ -1338,6 +1342,12 @@ def _process_enhancement(
     try:
         current_tasks = client.get_account_current_task_count()
     except RunningHubError as exc:
+        if execution_config.credential_fingerprint:
+            save_balance_error(
+                db,
+                credential_fingerprint=execution_config.credential_fingerprint,
+                error=exc,
+            )
         if isinstance(execution_config, SeedVR2ExecutionAccount):
             confirmed_unusable = _seedvr2_account_is_confirmed_unusable(
                 exc.error_code, str(exc)
@@ -1359,6 +1369,9 @@ def _process_enhancement(
         task.error_message = "暂时无法读取 SeedVR2 执行账号容量，将继续等待"
         db.commit()
         return
+    persist_client_account_status(
+        db, client, execution_config.credential_fingerprint
+    )
     limit = int(execution_config.max_concurrent_tasks)
     if current_tasks >= limit:
         if isinstance(execution_config, SeedVR2ExecutionAccount):
@@ -1582,6 +1595,12 @@ def _remote_capacity_is_available(
     try:
         current_tasks = client.get_account_current_task_count()
     except RunningHubError as exc:
+        if config.credential_fingerprint:
+            save_balance_error(
+                db,
+                credential_fingerprint=config.credential_fingerprint,
+                error=exc,
+            )
         if pool_account is not None:
             cool_execution_account(
                 pool_account,
@@ -1599,6 +1618,7 @@ def _remote_capacity_is_available(
             release_pool_account=pool_account is not None,
         )
         return False
+    persist_client_account_status(db, client, config.credential_fingerprint)
     if pool_account is not None:
         _remote_account_task_counts[pool_account.id] = current_tasks
         mark_execution_account_healthy(pool_account)

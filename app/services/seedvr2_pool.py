@@ -19,6 +19,7 @@ from app.models import (
     User,
 )
 from app.services.security import decrypt_secret, encrypt_secret, secret_fingerprint
+from app.services.runninghub_balance import balance_summary
 
 
 class SeedVR2PoolValidationError(ValueError):
@@ -364,6 +365,7 @@ def seedvr2_workbench_account_summary(db: Session, user: User) -> dict[str, obje
                 "is_enabled": account.is_enabled,
                 "selectable": selectable,
                 "availability": availability,
+                "balance": balance_summary(db, account.credential_fingerprint),
             }
         )
     return {"accounts": summaries, "default_selected_account_ids": default_ids}

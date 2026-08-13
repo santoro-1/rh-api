@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from decimal import Decimal
 
 import pytest
 import requests
@@ -147,13 +148,23 @@ def test_account_status_returns_current_task_count_without_exposing_key():
                 {
                     "code": 0,
                     "msg": "success",
-                    "data": {"currentTaskCounts": "1"},
+                    "data": {
+                        "currentTaskCounts": "1",
+                        "remainCoins": "138.54",
+                        "remainMoney": "9.90",
+                        "currency": "CNY",
+                        "apiType": "NORMAL",
+                    },
                 },
             )
         ]
     )
     client = RunningHubClient("secret", "https://rh.example", "app-1", session)
     assert client.get_account_current_task_count() == 1
+    assert client.last_account_status.remain_coins == Decimal("138.54")
+    assert client.last_account_status.remain_money == Decimal("9.90")
+    assert client.last_account_status.currency == "CNY"
+    assert client.last_account_status.api_type == "NORMAL"
     _, kwargs = session.calls[0]
     assert kwargs["json"] == {"apikey": "secret"}
     assert session.calls[0][0][0] == "https://rh.example/uc/openapi/accountStatus"

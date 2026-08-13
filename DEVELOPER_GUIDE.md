@@ -195,6 +195,10 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
   保守容量，禁止自动/人工换号盲目提交；管理员核对 RunningHub 前不得清除此保护。
 - 管理接口可以写入/轮换 Key，但列表、工作台摘要、日志和诊断均不得返回 Key、指纹、
   Base URL 或 AI App ID。自动化测试必须 mock RunningHub/MiniMax。
+- `RunningHubClient.get_account_status()` 复用付费提交前已有的 `accountStatus` 容量查询，同时以
+  `Decimal` 解析 `remainCoins/remainMoney`。`runninghub_credential_balances` 按凭据指纹共享
+  精确文本缓存；管理员页面可显式刷新，工作台清单只返回 RH 币、辅助钱包字段、查询时间和
+  是否过期。第一版余额未知只显示提示，不阻断或迁移任务。
 
 ### 3.6 取消与删除
 
@@ -344,9 +348,9 @@ python -m app.workers.task_worker
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0033_generation_task_seedvr2_switch`。`0031` 新增双池基础实体、执行模式与
+当前迁移头为 `0034_runninghub_credential_balance`。`0031` 新增双池基础实体、执行模式与
 阶段账号快照，`0032` 只新增网页运行模式单例控制表，`0033` 直接增加旧网页任务级 SeedVR2
-开关字段，均不重建既有父表。统一内容分析缓存从
+开关字段，`0034` 新增按不可逆凭据指纹共享的 RunningHub RH 币安全缓存表；均不重建既有父表。统一内容分析缓存从
 `0022_content_analysis_cache` 开始，`0028` 扩展统一视觉计划字段和缓存键，`0029` 新增
 数字人清晰化与尝试表；`0030` 只在内容分析缓存增加独立标题状态、结果和错误字段。
 历史已完成数字人任务仍不自动补跑 SeedVR2。

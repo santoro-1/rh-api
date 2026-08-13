@@ -28,6 +28,7 @@ from app.services.security import (
     encrypt_secret,
     secret_fingerprint,
 )
+from app.services.runninghub_balance import balance_summary
 
 
 ACTIVE_POOL_TASK_STATUSES = {
@@ -491,6 +492,7 @@ def workbench_execution_account_summary(
                 "is_enabled": account.is_enabled,
                 "selectable": selectable,
                 "availability": availability,
+                "balance": balance_summary(db, account.credential_fingerprint),
             }
         )
     return {

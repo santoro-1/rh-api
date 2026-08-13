@@ -12,6 +12,7 @@
 {% if request.query_params.get("created") == "1" %}<p class="success-notice">执行账号已新增。</p>{% endif %}
 {% if request.query_params.get("updated") == "1" %}<p class="success-notice">执行账号配置已更新。</p>{% endif %}
 {% if request.query_params.get("mode_updated") == "1" %}<p class="success-notice">新版工作台运行模式已更新；已启动批次仍保持原模式。</p>{% endif %}
+{% if request.query_params.get("balance_refreshed") == "1" %}<p class="success-notice">RH 币余额已刷新。</p>{% endif %}
 
 <section class="panel">
   <h2>新版工作台运行模式</h2>
@@ -62,6 +63,7 @@
 <section class="pool-account-list">
   {% for account in accounts %}
     {% set member_ids = account.pool_memberships | map(attribute='admin_user_id') | list %}
+    {% set balance = balances.get(account.id) %}
     <article class="panel pool-account-card">
       <div class="pool-account-heading">
         <div>
@@ -75,7 +77,15 @@
         <dt>最近检查</dt><dd>{{ account.health_checked_at or "尚未检查" }}</dd>
         <dt>冷却至</dt><dd>{{ account.cooldown_until or "未冷却" }}</dd>
         <dt>最近使用</dt><dd>{{ account.last_used_at or "尚未使用" }}</dd>
+        <dt>剩余 RH 币</dt><dd><strong>{{ balance.remain_coins if balance and balance.remain_coins is not none else "未知" }}</strong>{% if balance and balance.stale %}（缓存可能已过期）{% endif %}</dd>
+        <dt>钱包余额</dt><dd>{% if balance and balance.remain_money is not none %}{{ balance.remain_money }} {{ balance.currency or "" }}{% else %}未知{% endif %}</dd>
+        <dt>余额状态</dt><dd>{{ balance.status if balance else "UNKNOWN" }}</dd>
+        <dt>余额查询时间</dt><dd>{{ balance.checked_at if balance and balance.checked_at else "尚未查询" }}</dd>
       </dl>
+      <form method="post" action="/admin/runninghub-pool/accounts/{{ account.id }}/refresh-balance" class="button-row">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="secondary">刷新 RH 币</button>
+      </form>
       <form method="post" action="/admin/runninghub-pool/accounts/{{ account.id }}" class="stack-form pool-account-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="two-columns">

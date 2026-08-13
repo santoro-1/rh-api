@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from app.models import (
     MiniMaxConfig,
     MiniMaxVoiceAsset,
     RunningHubExecutionAccount,
+    RunningHubCredentialBalance,
     SeedVR2ExecutionAccount,
     TaskStatus,
     User,
@@ -38,6 +40,7 @@ from app.services.runninghub_dual_pool import (
     dual_pool_runtime_enabled,
     set_dual_pool_grant,
 )
+from app.services.runninghub import RunningHubAccountStatus
 from app.services.seedvr2_pool import create_seedvr2_execution_account
 from app.services.security import decrypt_secret, encrypt_secret, secret_fingerprint
 from app.services.storage import to_relative_data_path
@@ -83,6 +86,57 @@ def _seedvr2_pool_form(
     if enabled:
         payload["is_enabled"] = "true"
     return payload
+
+
+def test_admin_refreshes_pool_account_rh_coins_without_exposing_key(
+    client, monkeypatch, caplog
+):
+    administrator = create_user("pool-balance-admin", is_admin=True)
+    login(client, administrator.username)
+    secret = "pool-balance-secret"
+    response = client.post(
+        "/admin/runninghub-pool/accounts",
+        data=_pool_form([administrator.id], api_key=secret),
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        account = db.query(RunningHubExecutionAccount).one()
+        account_id = account.id
+        fingerprint = account.credential_fingerprint
+
+    class FakeBalanceClient:
+        def __init__(self, api_key, base_url, app_id):
+            assert api_key == secret
+
+        def get_account_status(self):
+            return RunningHubAccountStatus(
+                current_task_count=1,
+                remain_coins=Decimal("321.50"),
+                remain_money=Decimal("12.30"),
+                currency="CNY",
+                api_type="NORMAL",
+            )
+
+    monkeypatch.setattr(
+        "app.services.runninghub_balance.RunningHubClient", FakeBalanceClient
+    )
+    with caplog.at_level(logging.INFO):
+        refreshed = client.post(
+            f"/admin/runninghub-pool/accounts/{account_id}/refresh-balance",
+            data={},
+            follow_redirects=False,
+        )
+    assert refreshed.status_code == 303
+    assert refreshed.headers["location"].endswith("balance_refreshed=1")
+    assert secret not in caplog.text
+    with SessionLocal() as db:
+        balance = db.get(RunningHubCredentialBalance, fingerprint)
+        assert balance is not None
+        assert balance.remain_coins == "321.5"
+
+    page = client.get("/admin/runninghub-pool")
+    assert "321.5" in page.text
 
 
 def _workbench_token(client, username: str) -> str:
@@ -149,6 +203,8 @@ def test_admin_creates_encrypted_pool_account_and_legacy_fingerprints_are_shared
     assert page.status_code == 200
     assert "RunningHub 一号" in page.text
     assert "API Key 已加密保存" in page.text
+    assert "剩余 RH 币" in page.text
+    assert "刷新 RH 币" in page.text
     assert secret not in page.text
     assert 'value="pool-secret-key"' not in page.text
 
@@ -226,6 +282,8 @@ def test_admin_creates_encrypted_seedvr2_account_for_controlled_user(
     assert page.status_code == 200
     assert "SeedVR2 一号" in page.text
     assert "API Key 已加密保存" in page.text
+    assert "剩余 RH 币" in page.text
+    assert "刷新 RH 币" in page.text
     assert secret not in page.text
 
 

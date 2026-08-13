@@ -22,6 +22,7 @@ from app.services.runninghub_pool import (
     execution_accounts_for_admin_page,
     update_execution_account,
 )
+from app.services.runninghub_balance import balance_summary, refresh_pool_account_balance
 from app.services.runninghub_dual_pool import (
     dual_pool_runtime_control,
     dual_pool_runtime_enabled,
@@ -62,11 +63,16 @@ def runninghub_pool_page(
         .order_by(User.id)
     ).all()
     runtime_control = dual_pool_runtime_control(db)
+    accounts = execution_accounts_for_admin_page(db)
     return templates.TemplateResponse(
         request,
         "admin_runninghub_pool.html",
         {
-            "accounts": execution_accounts_for_admin_page(db),
+            "accounts": accounts,
+            "balances": {
+                account.id: balance_summary(db, account.credential_fingerprint)
+                for account in accounts
+            },
             "administrators": administrators,
             "current_user": current_user,
             "default_base_url": get_settings().runninghub_base_url,
@@ -201,6 +207,33 @@ def update_runninghub_pool_account(
     return RedirectResponse("/admin/runninghub-pool?updated=1", status_code=303)
 
 
+@router.post("/accounts/{account_id}/refresh-balance")
+def refresh_runninghub_pool_account_balance(
+    account_id: int,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    account = execution_account_for_admin_page(db, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="RunningHub 执行账号不存在")
+    try:
+        balance = refresh_pool_account_balance(db, account)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="RunningHub 凭据无法读取") from exc
+    log_event(
+        logger,
+        "runninghub_pool.balance_refreshed",
+        "管理员刷新 RunningHub 执行账号 RH 币",
+        operator_user_id=current_user.id,
+        execution_account_id=account.id,
+        balance_status=balance.balance_status,
+    )
+    return RedirectResponse("/admin/runninghub-pool?balance_refreshed=1", status_code=303)
+
+
 @router.get("/seedvr2")
 def seedvr2_pool_page(
     request: Request,
@@ -218,11 +251,16 @@ def seedvr2_pool_page(
         )
         .order_by(User.id)
     ).all()
+    accounts = seedvr2_execution_accounts_for_admin_page(db)
     return templates.TemplateResponse(
         request,
         "admin_seedvr2_pool.html",
         {
-            "accounts": seedvr2_execution_accounts_for_admin_page(db),
+            "accounts": accounts,
+            "balances": {
+                account.id: balance_summary(db, account.credential_fingerprint)
+                for account in accounts
+            },
             "users": users,
             "current_user": current_user,
             "default_base_url": get_settings().runninghub_base_url,
@@ -323,3 +361,32 @@ def update_seedvr2_pool_account(
         user_ids=sorted(user_ids or []),
     )
     return RedirectResponse("/admin/runninghub-pool/seedvr2?updated=1", status_code=303)
+
+
+@router.post("/seedvr2/accounts/{account_id}/refresh-balance")
+def refresh_seedvr2_pool_account_balance(
+    account_id: int,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    account = seedvr2_execution_account_for_admin_page(db, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="SeedVR2 执行账号不存在")
+    try:
+        balance = refresh_pool_account_balance(db, account)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="RunningHub 凭据无法读取") from exc
+    log_event(
+        logger,
+        "seedvr2_pool.balance_refreshed",
+        "管理员刷新 SeedVR2 执行账号 RH 币",
+        operator_user_id=current_user.id,
+        execution_account_id=account.id,
+        balance_status=balance.balance_status,
+    )
+    return RedirectResponse(
+        "/admin/runninghub-pool/seedvr2?balance_refreshed=1", status_code=303
+    )

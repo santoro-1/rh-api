@@ -185,6 +185,40 @@ class RunningHubConfig(Base):
     user: Mapped[User] = relationship(back_populates="runninghub_config")
 
 
+class RunningHubCredentialBalance(Base):
+    """Safe cached accountStatus values shared by one real API credential."""
+
+    __tablename__ = "runninghub_credential_balances"
+
+    credential_fingerprint: Mapped[str] = mapped_column(
+        String(64), primary_key=True
+    )
+    balance_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="UNKNOWN"
+    )
+    # RunningHub returns strings and may return decimal values.  Canonical text
+    # avoids SQLite float coercion; services parse these fields with Decimal.
+    remain_coins: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    remain_money: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    currency: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    api_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    remote_current_task_count: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    retry_after: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class MiniMaxConfig(Base):
     """Encrypted account-level MiniMax connection and pacing settings."""
 

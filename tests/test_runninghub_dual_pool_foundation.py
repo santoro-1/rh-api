@@ -257,6 +257,8 @@ def test_controlled_user_receives_only_safe_dual_pool_summaries(client, monkeypa
     assert payload["execution_mode"] == BATCH_EXECUTION_MODE_DUAL_POOL_V1
     assert payload["digital_human"]["default_selected_account_ids"] == [digital_id]
     assert payload["seedvr2"]["default_selected_account_ids"] == [seed_id]
+    assert payload["digital_human"]["accounts"][0]["balance"]["status"] == "UNKNOWN"
+    assert payload["seedvr2"]["accounts"][0]["balance"]["remain_coins"] is None
     serialized = response.text
     for forbidden in (
         digital_secret,

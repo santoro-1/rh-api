@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,6 +19,30 @@ _QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:api[_-]?key|token|access[_-]?password)=)[^&\s]+"
 )
 RUNNINGHUB_UPLOAD_GUIDANCE_BYTES = 30 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class RunningHubAccountStatus:
+    current_task_count: int
+    remain_coins: Decimal | None
+    remain_money: Decimal | None
+    currency: str | None
+    api_type: str | None
+
+
+def _optional_nonnegative_decimal(value: object, field: str) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text or len(text) > 100:
+        return None
+    try:
+        parsed = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    if not parsed.is_finite() or parsed < 0:
+        return None
+    return parsed
 
 
 def _safe_network_message(exc: BaseException) -> str:
@@ -218,8 +244,8 @@ class RunningHubClient:
             retry_safe=retry_safe,
         )
 
-    def get_account_current_task_count(self) -> int:
-        """Return all current tasks for this API key, including website tasks."""
+    def get_account_status(self) -> RunningHubAccountStatus:
+        """Return safe accountStatus fields without exposing the API key."""
 
         endpoint = f"{self.base_url}/uc/openapi/accountStatus"
         started_at = time.perf_counter()
@@ -259,7 +285,28 @@ class RunningHubClient:
             raise RunningHubError(
                 "读取 RunningHub 账号状态失败：data.currentTaskCounts 不能为负数"
             )
-        return count
+        remain_coins = _optional_nonnegative_decimal(
+            data.get("remainCoins"), "data.remainCoins"
+        )
+        remain_money = _optional_nonnegative_decimal(
+            data.get("remainMoney"), "data.remainMoney"
+        )
+        currency = str(data.get("currency") or "").strip()[:20] or None
+        api_type = str(data.get("apiType") or "").strip()[:50] or None
+        status = RunningHubAccountStatus(
+            current_task_count=count,
+            remain_coins=remain_coins,
+            remain_money=remain_money,
+            currency=currency,
+            api_type=api_type,
+        )
+        self.last_account_status = status
+        return status
+
+    def get_account_current_task_count(self) -> int:
+        """Return all current tasks for this API key, including website tasks."""
+
+        return self.get_account_status().current_task_count
 
     def upload_file(self, file_path: Path) -> str:
         if not file_path.is_file():
