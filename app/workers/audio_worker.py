@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -169,7 +170,9 @@ def recover_interrupted_tasks(db: Session) -> int:
     return recovered
 
 
-def recover_approved_audio_handoffs(db: Session) -> int:
+def recover_approved_audio_handoffs(
+    db: Session, *, task_ids: Collection[str]
+) -> int:
     """Resume approved 4A handoffs that were blocked by a later account switch.
 
     Once an audio version has been downloaded, explicitly approved, and bound
@@ -179,6 +182,11 @@ def recover_approved_audio_handoffs(db: Session) -> int:
     no MiniMax request is made by this recovery path.
     """
 
+    requested_ids = {
+        str(task_id).strip() for task_id in task_ids if str(task_id).strip()
+    }
+    if not requested_ids:
+        return 0
     tasks = db.scalars(
         select(AudioGenerationTask)
         .options(
@@ -194,6 +202,7 @@ def recover_approved_audio_handoffs(db: Session) -> int:
             AudioGenerationTask.reviewed_at.is_not(None),
             AudioGenerationTask.primary_path.is_not(None),
             AudioGenerationTask.output_path.is_not(None),
+            AudioGenerationTask.id.in_(requested_ids),
         )
     ).all()
     recovered: list[AudioGenerationTask] = []
@@ -896,12 +905,6 @@ def main() -> None:
         recovered = recover_interrupted_tasks(db)
         if recovered:
             logger.warning("标记了 %s 个中断语音任务等待人工重试", recovered)
-        approved_handoffs = recover_approved_audio_handoffs(db)
-        if approved_handoffs:
-            logger.warning(
-                "恢复了 %s 个已批准且无需重新生成语音的 4A 交接任务",
-                approved_handoffs,
-            )
     log_event(
         logger,
         "audio.worker_started",

@@ -340,7 +340,9 @@ def test_optional_audio_review_can_regenerate_then_approve(
         task.batch_item.audio_status = "FAILED"
         task.batch_item.status = "AUDIO_FAILED"
         db.commit()
-        assert audio_worker.recover_approved_audio_handoffs(db) == 1
+        assert audio_worker.recover_approved_audio_handoffs(
+            db, task_ids=[task.id]
+        ) == 1
 
     def unexpected_minimax_client(task):
         del task
