@@ -541,9 +541,9 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - `POST /api/workbench/content-analysis` 使用现有工作台短期令牌，接收精确原始脚本、可选
   `force_refresh` 和可选 `visual_context`；后者只含 catalog 版本、概念说明、原文字符锚点、
   短语上下文及 `explicit/enrichment` 用途，禁止素材路径、时间戳及剪映轨道信息。浏览器和
-  工作台不会获得 Ark Key。Prompt v10 要求 enrichment 仅在与上下文高度相关时以 priority 2
+  工作台不会获得 Ark Key。Prompt v12 要求 enrichment 仅在与上下文高度相关时以 priority 2
   返回，唯一可选或勉强相关都必须跳过；同一次调用增加 `title` 第四字段，第一行最多 5 字、
-  第二行最多 8 字，禁止空白、重复、空洞标题党和脚本外事实。
+  第二行最多 5 字，禁止空白、重复、空洞标题党和脚本外事实。
 - `app/services/content_analysis/analysis.py` 负责固定 Prompt、Ark JSON Schema、响应提取、
   音乐、字幕、视觉与标题分支独立校验、确定性字符索引修复、成功分支保护和脱敏状态日志。
 - 迁移 `0028_unified_content_visual_plan` 在原缓存上增加视觉状态与结果，并把 catalog 版本和

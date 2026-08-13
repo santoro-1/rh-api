@@ -8,6 +8,7 @@ from typing import Any
 from app.database import SessionLocal
 from app.models import ArkConfig, User
 from app.services.content_analysis.analysis import analyze_content
+from app.services.content_analysis.contracts import parse_content_visual_context
 from app.services.security import encrypt_secret
 from tests.conftest import create_user
 
@@ -32,6 +33,7 @@ from jyd_probe.semantic_subtitles import (  # noqa: E402
     semantic_break_groups,
 )
 from jyd_probe.semantic_visuals import (  # noqa: E402
+    SemanticVisualCatalog,
     load_semantic_visual_catalog,
     recall_semantic_visual_candidates,
 )
@@ -62,7 +64,7 @@ class _FakeArkClient:
 
 def _fixture_payload() -> dict[str, Any]:
     payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    payload["title"] = {"line_1": "减脂真相", "line_2": "坚持才是关键"}
+    payload["title"] = {"line_1": "减脂真相", "line_2": "坚持更关键"}
     return payload
 
 
@@ -74,7 +76,7 @@ def _provider_payload(*, prefer_after: list[int]) -> dict[str, Any]:
             "allow_after": [],
         },
         "visual_plan": [],
-        "title": {"line_1": "减脂真相", "line_2": "坚持才是关键"},
+        "title": {"line_1": "减脂真相", "line_2": "坚持更关键"},
     }
 
 
@@ -179,6 +181,42 @@ def test_server_and_workbench_share_one_selected_only_visual_plan() -> None:
     assert consumed["subtitle_analysis_status"] == "SUCCESS"
     assert visual["analysis_status"] == "SUCCESS"
     assert visual["visual_plan"] == payload["visual_plan"]
+
+
+def test_enrichment_rotation_exposes_all_concepts_within_cloud_anchor_limit() -> None:
+    catalog = load_semantic_visual_catalog(
+        WORKBENCH_ROOT / "data" / "libraries" / "semantic_visual_library"
+    )
+    concept_ids = [str(item["concept_id"]) for item in catalog.concepts[:10]]
+    base_asset = dict(catalog.assets[0])
+    rotated_catalog = SemanticVisualCatalog(
+        root=catalog.root,
+        schema=catalog.schema,
+        library_id=catalog.library_id,
+        catalog_version=catalog.catalog_version,
+        concepts=catalog.concepts,
+        assets=tuple(
+            {
+                    **base_asset,
+                    "asset_id": f"cross-project-enrichment-{index}",
+                    "concept_ids": [concept_id],
+                    "usage_modes": ["full_screen_broll"],
+                    "auto_eligible": True,
+            }
+            for index, concept_id in enumerate(concept_ids)
+        ),
+    )
+    script = "这是一段不直接命中素材名称的健康生活说明。" * 20
+    candidate_request = recall_semantic_visual_candidates(script, rotated_catalog)
+    visual_context = build_content_visual_context(candidate_request)
+
+    parsed = parse_content_visual_context(visual_context, original_script=script)
+    enrichment = [item for item in parsed.anchors if item.usage == "enrichment"]
+    offered = {concept_id for item in enrichment for concept_id in item.allowed_concepts}
+
+    assert len(enrichment) >= 2
+    assert all(len(item.allowed_concepts) <= 8 for item in enrichment)
+    assert offered == set(concept_ids)
 
 
 def test_server_partial_results_keep_each_valid_workbench_branch() -> None:

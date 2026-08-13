@@ -243,7 +243,7 @@ class ShortVideoTitle(ContractModel):
     """One canonical two-line title shared by the cover and fixed video title."""
 
     line_1: StrictStr = Field(min_length=1, max_length=5)
-    line_2: StrictStr = Field(min_length=1, max_length=8)
+    line_2: StrictStr = Field(min_length=1, max_length=5)
 
     @field_validator("line_1", "line_2")
     @classmethod

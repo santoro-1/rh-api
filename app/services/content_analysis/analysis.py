@@ -48,7 +48,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v11"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v12"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -176,16 +176,15 @@ def _system_prompt() -> str:
 
         title：
         - 这是封面和视频顶部共同使用的唯一两行标题，不生成两套文案。
-        - line_1 为 2～5 个汉字的主题钩子，绝对不能超过 5 个字符；line_2 为 4～8 个字符的
-          信息主句。两行都不能包含空格、换行，不能重复。
-        - 一眼能看懂脚本真正要表达的重点；优先使用具体对象、反常识、关键方法、明确后果或收益，
-          做到吸睛且有信息量。
-        - 禁止“震惊”“必看”“你知道吗”等空洞标题党，禁止空话、废话、只写泛化情绪。
-        - 只能使用脚本已经表达的事实，不捏造数字、效果、身份、医学结论或承诺；健康内容尤其
-          不能把经验分享改写成诊疗结论。
+        - line_1 为 2～5 个汉字的主题钩子，绝对不能超过 5 个字符；line_2 为不超过 5 个字符的信息主句。两行都不能包含空格、换行，不能重复。
+        - 一眼能看懂脚本真正要表达的重点；优先使用疑问句、反常识、关键方法、明确后果或收益，做到吸睛且有信息量。
+        - 禁止空话、废话和只写泛化情绪。
+        - 只能使用脚本已经表达的事实，不捏造数字、效果、身份、医学结论或承诺；健康内容尤其不能把经验分享改写成诊疗结论。
+        - 好的标题例如：line_1“晚上饿了”、line_2“吃什么好”；line_1“减脂关键”、line_2“坚持习惯”。
+          差的标题例如：“持续自律”“分享经验”等空泛表达。以上只是格式与质量参考，不要照搬。
 
         输出示例：
-        {"music_intent":{"primary_scene":"health_education","secondary_scenes":["weight_management"],"content_format":"knowledge_explanation","topics":["general_health"],"primary_mood":"rational","secondary_moods":[],"valence":"positive","energy":3,"pace":"medium","seriousness":4,"warmth":3,"tension":2,"speech_density":"high","vocal_preference":"prefer_instrumental","opening_preference":"soft","avoid_traits":["strong_vocals"],"confidence":0.92},"subtitle_breaks":{"prefer_after":[6],"allow_after":[]},"visual_plan":[],"title":{"line_1":"减脂真相","line_2":"坚持才是关键"}}
+        {"music_intent":{"primary_scene":"health_education","secondary_scenes":["weight_management"],"content_format":"knowledge_explanation","topics":["general_health"],"primary_mood":"rational","secondary_moods":[],"valence":"positive","energy":3,"pace":"medium","seriousness":4,"warmth":3,"tension":2,"speech_density":"high","vocal_preference":"prefer_instrumental","opening_preference":"soft","avoid_traits":["strong_vocals"],"confidence":0.92},"subtitle_breaks":{"prefer_after":[6],"allow_after":[]},"visual_plan":[],"title":{"line_1":"减脂真相","line_2":"坚持更关键"}}
         """
     ).strip()
 
@@ -632,7 +631,7 @@ def _parse_title_branch(payload: Mapping[str, Any]) -> BranchResult:
     except (ValidationError, TypeError, ValueError):
         return BranchResult.failed(
             "TITLE_SCHEMA_INVALID",
-            "两行标题不符合第一行 5 字、第二行 8 字的统一契约",
+            "两行标题不符合第一行 5 字、第二行 5 字的统一契约",
         )
 
 

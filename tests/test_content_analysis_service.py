@@ -32,7 +32,7 @@ SCRIPT = "那么通过八十四天"
 
 def _valid_payload() -> dict[str, Any]:
     payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    payload["title"] = {"line_1": "减脂真相", "line_2": "坚持才是关键"}
+    payload["title"] = {"line_1": "减脂真相", "line_2": "坚持更关键"}
     return payload
 
 
@@ -48,7 +48,7 @@ def _provider_payload(
             "allow_after": allow_after or [],
         },
         "visual_plan": [],
-        "title": {"line_1": "减脂真相", "line_2": "坚持才是关键"},
+        "title": {"line_1": "减脂真相", "line_2": "坚持更关键"},
     }
 
 
@@ -228,7 +228,7 @@ def test_subtitle_failure_does_not_discard_valid_music() -> None:
 def test_title_failure_is_isolated_from_music_subtitle_and_visual_results() -> None:
     user_id = _configured_user("partial-title")
     payload = _provider_payload()
-    payload["title"] = {"line_1": "一二三四五六", "line_2": "坚持才是关键"}
+    payload["title"] = {"line_1": "一二三四五六", "line_2": "坚持更关键"}
     fake = FakeArkClient([_ark_response(payload)])
 
     result = _analyze(user_id, fake)
@@ -247,7 +247,7 @@ def test_title_failure_is_isolated_from_music_subtitle_and_visual_results() -> N
 def test_title_second_line_overflow_is_isolated_from_other_results() -> None:
     user_id = _configured_user("partial-title-line-2")
     payload = _provider_payload()
-    payload["title"] = {"line_1": "健康真相", "line_2": "一二三四五六七八九"}
+    payload["title"] = {"line_1": "健康真相", "line_2": "一二三四五六"}
     fake = FakeArkClient([_ark_response(payload)])
 
     result = _analyze(user_id, fake)
@@ -427,7 +427,7 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
     ]
     assert visual_plan == []
     assert title.line_1 == "减脂真相"
-    assert title.line_2 == "坚持才是关键"
+    assert title.line_2 == "坚持更关键"
 
 
 def test_one_call_visual_plan_uses_only_offered_local_candidates() -> None:
