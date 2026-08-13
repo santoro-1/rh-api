@@ -437,6 +437,11 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         if segment.generation_task is not None
     ]
     audio_task = item.audio_task
+    audio_failed = bool(
+        not tasks
+        and audio_task is not None
+        and audio_task.status == AudioTaskStatus.FAILED.value
+    )
     error_message = item.merged_video_error or item.error_message
     if audio_task is not None and audio_task.error_message:
         error_message = audio_task.error_message
@@ -469,6 +474,8 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
             }
         )
         error_message = failed.error_message or failed.runninghub_failed_reason
+    elif audio_failed:
+        status = "COMPOSITION_FAILED"
     elif any(
         task.enhancement is not None
         and task.enhancement.status != EnhancementStatus.SUCCESS.value
@@ -485,8 +492,6 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         not in {AudioTaskStatus.AWAITING_REVIEW.value, AudioTaskStatus.FAILED.value}
     ):
         status = "COMPOSITION_QUEUED"
-    elif audio_task is not None and audio_task.status == AudioTaskStatus.FAILED.value:
-        status = "COMPOSITION_FAILED"
     else:
         status = "AUDIO_READY"
     enhancement_statuses = [
@@ -527,6 +532,8 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
             else None
         ),
         "error_message": error_message,
+        "error_code": audio_task.error_code if audio_failed else None,
+        "failure_stage": "audio" if audio_failed else None,
         "runninghub_execution_account_ids": batch_execution_account_snapshot(
             item.batch
         ),
@@ -1413,7 +1420,8 @@ def start_workbench_composition(
         if task.status == AudioTaskStatus.AWAITING_REVIEW.value:
             approve_item_audio(batch, item_id)
         elif (
-            task.reviewed_at is not None
+            task.status != AudioTaskStatus.FAILED.value
+            and task.reviewed_at is not None
             and current_attempt(task).status == "APPROVED"
         ) or item.segments or item.generation_task:
             # Retried HTTP requests must not create another paid handoff.

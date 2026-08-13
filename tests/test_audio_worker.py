@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 from app.database import SessionLocal
 from app.models import (
@@ -330,6 +331,22 @@ def test_optional_audio_review_can_regenerate_then_approve(
         follow_redirects=False,
     )
     assert approved.status_code == 303
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).one()
+        task.user.minimax_config.account_binding_id = str(uuid.uuid4())
+        task.status = "FAILED"
+        task.error_code = "CONFIGURATION_ERROR"
+        task.error_message = "MiniMax 账号配置缺失或已更换"
+        task.batch_item.audio_status = "FAILED"
+        task.batch_item.status = "AUDIO_FAILED"
+        db.commit()
+        assert audio_worker.recover_approved_audio_handoffs(db) == 1
+
+    def unexpected_minimax_client(task):
+        del task
+        raise AssertionError("批准且已落盘的语音交接不得重新调用 MiniMax")
+
+    monkeypatch.setattr(audio_worker, "_make_client", unexpected_minimax_client)
     assert audio_worker.run_once() == 1
 
     with SessionLocal() as db:

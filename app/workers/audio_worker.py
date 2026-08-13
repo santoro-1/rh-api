@@ -169,6 +169,78 @@ def recover_interrupted_tasks(db: Session) -> int:
     return recovered
 
 
+def recover_approved_audio_handoffs(db: Session) -> int:
+    """Resume approved 4A handoffs that were blocked by a later account switch.
+
+    Once an audio version has been downloaded, explicitly approved, and bound
+    to the paid 4A image handoff, MiniMax credentials are no longer needed.
+    Older workers nevertheless rejected that local-only handoff when the user
+    changed MiniMax accounts.  Requeue only rows with complete local evidence;
+    no MiniMax request is made by this recovery path.
+    """
+
+    tasks = db.scalars(
+        select(AudioGenerationTask)
+        .options(
+            selectinload(AudioGenerationTask.attempts),
+            selectinload(AudioGenerationTask.batch_item).selectinload(
+                GenerationBatchItem.segments
+            ),
+        )
+        .where(
+            AudioGenerationTask.status == AudioTaskStatus.FAILED.value,
+            AudioGenerationTask.error_code == "CONFIGURATION_ERROR",
+            AudioGenerationTask.error_message == "MiniMax 账号配置缺失或已更换",
+            AudioGenerationTask.reviewed_at.is_not(None),
+            AudioGenerationTask.primary_path.is_not(None),
+            AudioGenerationTask.output_path.is_not(None),
+        )
+    ).all()
+    recovered: list[AudioGenerationTask] = []
+    for task in tasks:
+        if task.batch_item.generation_task is not None or task.batch_item.segments:
+            continue
+        approved_attempt = next(
+            (
+                attempt
+                for attempt in task.attempts
+                if attempt.version == task.generation_version
+                and attempt.status == "APPROVED"
+                and attempt.output_path == task.output_path
+            ),
+            None,
+        )
+        if approved_attempt is None:
+            continue
+        try:
+            output_exists = safe_relative_path(
+                task.output_path, get_settings().data_dir
+            ).is_file()
+            image_exists = safe_relative_path(
+                task.primary_path, get_settings().data_dir
+            ).is_file()
+        except ValueError:
+            continue
+        if not output_exists or not image_exists:
+            continue
+        task.status = AudioTaskStatus.PENDING.value
+        task.error_code = None
+        task.error_message = None
+        task.completed_at = None
+        task.batch_item.audio_status = "AUDIO_APPROVED"
+        task.batch_item.status = "AUDIO_APPROVED"
+        recovered.append(task)
+    db.commit()
+    for task in recovered:
+        log_event(
+            logger,
+            "audio.approved_handoff_recovered",
+            "已复用批准的本地语音恢复 4A 交接，不重新调用 MiniMax",
+            **_audio_log_context(task),
+        )
+    return len(recovered)
+
+
 def claim_next_pending_task(db: Session) -> str | None:
     task_id = db.scalar(
         select(AudioGenerationTask.id)
@@ -666,20 +738,6 @@ def process_task(db: Session, task_id: str) -> None:
     if not task.user.is_active:
         _mark_failed(db, task, "CONFIGURATION_ERROR", "账号已禁用")
         return
-    if (
-        task.user.minimax_config is None
-        or not task.user.minimax_config.api_key_encrypted
-        or task.config_id != task.user.minimax_config.id
-        or task.account_binding_id
-        != task.user.minimax_config.account_binding_id
-    ):
-        _mark_failed(
-            db,
-            task,
-            "CONFIGURATION_ERROR",
-            "MiniMax 账号配置缺失或已更换",
-        )
-        return
     try:
         output_exists = bool(
             task.output_path
@@ -687,6 +745,20 @@ def process_task(db: Session, task_id: str) -> None:
                 task.output_path, get_settings().data_dir
             ).is_file()
         )
+        if not output_exists and (
+            task.user.minimax_config is None
+            or not task.user.minimax_config.api_key_encrypted
+            or task.config_id != task.user.minimax_config.id
+            or task.account_binding_id
+            != task.user.minimax_config.account_binding_id
+        ):
+            _mark_failed(
+                db,
+                task,
+                "CONFIGURATION_ERROR",
+                "MiniMax 账号配置缺失或已更换",
+            )
+            return
         if not output_exists:
             client = _make_client(task)
             voice = task.voice_asset
@@ -824,6 +896,12 @@ def main() -> None:
         recovered = recover_interrupted_tasks(db)
         if recovered:
             logger.warning("标记了 %s 个中断语音任务等待人工重试", recovered)
+        approved_handoffs = recover_approved_audio_handoffs(db)
+        if approved_handoffs:
+            logger.warning(
+                "恢复了 %s 个已批准且无需重新生成语音的 4A 交接任务",
+                approved_handoffs,
+            )
     log_event(
         logger,
         "audio.worker_started",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -242,6 +243,71 @@ def test_workbench_audio_retry_uses_requested_speed(client, monkeypatch):
         assert task.speed == 0.9
         assert task.status == AudioTaskStatus.PENDING.value
         assert task.generation_version == 2
+
+
+def test_workbench_composition_reports_failed_approved_audio_as_audio_stage(
+    client, monkeypatch
+):
+    _account("workbench-audio-stage-failure-user")
+    monkeypatch.setattr(
+        "app.services.speech.workbench_voices.MiniMaxClient.list_voices",
+        lambda self, voice_type="system": OFFICIAL_ITEMS,
+    )
+    token = _token(client, "workbench-audio-stage-failure-user")
+    voices = client.post("/api/workbench/voices", json={"access_token": token})
+    voice_id = voices.json()["voices"][0]["voice_asset_id"]
+    created = client.post(
+        "/api/workbench/audio-batches",
+        json={
+            "access_token": token,
+            "name": "音频失败阶段测试",
+            "request_key": "workbench-audio-stage-failure-1",
+            "rows": [{"row_id": "1", "speech_script": "音频失败阶段测试。"}],
+            "speech_options": {
+                "voiceAssetId": voice_id,
+                "model": "speech-2.8-hd",
+                "speed": 1,
+                "volume": 1,
+                "pitch": 0,
+                "languageBoost": "Chinese",
+                "outputFormat": "mp3",
+                "costConfirmed": True,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    item_id = created.json()["items"][0]["item_id"]
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).one()
+        output = get_settings().outputs_dir / "failed-approved-audio.mp3"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"ID3approved-audio")
+        task.output_path = to_relative_data_path(output, get_settings())
+        task.reviewed_at = datetime.now(timezone.utc)
+        task.status = AudioTaskStatus.FAILED.value
+        task.error_code = "CONFIGURATION_ERROR"
+        task.error_message = "MiniMax 账号配置缺失或已更换"
+        task.batch_item.audio_status = "FAILED"
+        task.batch_item.status = "AUDIO_FAILED"
+        db.add(
+            AudioGenerationAttempt(
+                id=str(uuid.uuid4()),
+                audio_task_id=task.id,
+                version=task.generation_version,
+                output_path=task.output_path,
+                status="APPROVED",
+            )
+        )
+        db.commit()
+
+    manifest = client.post(
+        f"/api/workbench/tasks/{item_id}", json={"access_token": token}
+    )
+    assert manifest.status_code == 200, manifest.text
+    composition = manifest.json()["composition"]
+    assert composition["status"] == "COMPOSITION_FAILED"
+    assert composition["failure_stage"] == "audio"
+    assert composition["error_code"] == "CONFIGURATION_ERROR"
 
 
 def test_workbench_voice_clone_reuses_existing_voice_queue(client, monkeypatch):
