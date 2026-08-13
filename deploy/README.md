@@ -74,6 +74,9 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
 第二次确认后会自动进入“排空模式”：登录、浏览、预览和下载继续可用；新建、修改
 任务以及 Worker 领取下一条任务会暂停；已经提交或执行中的任务会继续收尾。脚本只
 等待真正执行中的任务，不要求 `PENDING` 队列为空，排空后自动完成发布并恢复领取。
+合并队列只把正在合并，或所有分段任务均已成功且确实可以开始合并的记录视为繁忙；
+底层分段已经失败、取消或缺失的历史 `MERGE_PENDING` 标记不会永久阻塞发布，也不会
+由部署脚本改写其业务状态。
 默认最多等待 120 分钟，可用 `-DrainTimeoutMinutes` 在 5 到 720 分钟范围内调整。
 
 排空标记位于 `data/runtime/deployment-drain.json`，由发布脚本以本次随机 token 管理，

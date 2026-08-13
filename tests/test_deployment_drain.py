@@ -124,5 +124,8 @@ def test_deploy_script_uses_owned_expiring_drain_marker():
     assert "'ANALYZING','CUTTING'" in script
     assert "'MERGING'" in script
     assert "generation_batch_items" in script
+    assert "bi.merged_video_status = 'MERGE_PENDING'" in script
+    assert "LEFT JOIN generation_tasks AS gt ON gt.segment_id = gs.id" in script
+    assert "gt.id IS NULL OR gt.status <> 'SUCCESS'" in script
     assert "grep -Fq '\"token\":\"$script:DrainToken\"'" in script
     assert "Disable-DeploymentDrain" in script

@@ -126,13 +126,32 @@ function Get-QueueCheckScript {
         $audioStatuses = "'CLONING','SYNTHESIZING','REMOTE_PENDING','ALIGNING','SEGMENTING','HANDOFF'"
         $voiceStatuses = "'CLONING','SYNTHESIZING','SAVING'"
         $mediaStatuses = "'ANALYZING','CUTTING'"
-        $mergeStatuses = "'MERGING'"
+        $mergePredicate = "bi.merged_video_status = 'MERGING'"
     } else {
         $videoStatuses = "'PENDING','UPLOADING','SUBMITTED','RUNNING'"
         $audioStatuses = "'PENDING','CLONING','SYNTHESIZING','REMOTE_PENDING','ALIGNING','SEGMENTING','HANDOFF'"
         $voiceStatuses = "'PENDING','CLONING','SYNTHESIZING','SAVE_PENDING','SAVING'"
         $mediaStatuses = "'PENDING_ANALYSIS','ANALYZING','PENDING_CUT','CUTTING'"
-        $mergeStatuses = "'MERGE_PENDING','MERGING'"
+        # MERGE_PENDING may remain on a historical row whose child tasks have
+        # already failed or been cancelled.  Such a row cannot be claimed by
+        # the merge worker and must not permanently block a bootstrap deploy.
+        $mergePredicate = @"
+bi.merged_video_status = 'MERGING'
+ OR (
+   bi.merged_video_status = 'MERGE_PENDING'
+   AND EXISTS (
+     SELECT 1 FROM generation_segments AS gs
+      WHERE gs.batch_item_id = bi.id
+   )
+   AND NOT EXISTS (
+     SELECT 1
+       FROM generation_segments AS gs
+       LEFT JOIN generation_tasks AS gt ON gt.segment_id = gs.id
+      WHERE gs.batch_item_id = bi.id
+        AND (gt.id IS NULL OR gt.status <> 'SUCCESS')
+   )
+ )
+"@
     }
     return @"
 set -euo pipefail
@@ -154,8 +173,8 @@ UNION ALL
 SELECT 'media', count(*) FROM long_audio_projects
  WHERE status IN ($mediaStatuses)
 UNION ALL
-SELECT 'merge', count(*) FROM generation_batch_items
- WHERE merged_video_status IN ($mergeStatuses);
+SELECT 'merge', count(*) FROM generation_batch_items AS bi
+ WHERE $mergePredicate;
 "
 "@
 }
