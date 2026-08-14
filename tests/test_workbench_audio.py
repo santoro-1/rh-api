@@ -598,7 +598,9 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
     assert started.json()["composition"]["status"] == "COMPOSITION_QUEUED"
     with SessionLocal() as db:
         stored_task = db.query(AudioGenerationTask).filter_by(batch_item_id=item_id).one()
-        assert json.loads(stored_task.video_parameters_json)["resolution"] == "2048"
+        video_parameters = json.loads(stored_task.video_parameters_json)
+        assert video_parameters["resolution"] == "2048"
+        assert video_parameters["seedvr2_enabled"] is True
     repeated = client.post(
         f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition",
         json={

@@ -23,6 +23,7 @@ def test_digital_human_adapter_is_registered_and_owns_payload_mapping():
         {"prompt": "自定义提示词", "start_time": "0:00", "end_time": "0:10"},
         {"audio_duration_seconds": 10.5},
     )
+    assert parameters["seedvr2_enabled"] is False
     payload_input = workflow.serialize_input(
         [
             WorkflowAsset("image", "image", "uploads/1/a/image.png", "image.png"),

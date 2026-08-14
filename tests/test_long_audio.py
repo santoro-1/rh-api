@@ -78,6 +78,19 @@ def _fake_cut(_source, output, **_kwargs):
         output.write_bytes(b"\x00\x00\x00\x18ftypisomsegment")
 
 
+def test_long_audio_page_defaults_seedvr2_to_off(client):
+    create_user("long-audio-page-user")
+    login(client, "long-audio-page-user")
+
+    response = client.get("/long-audio")
+
+    assert response.status_code == 200
+    seedvr2_input = response.text.split(
+        'id="long-audio-seedvr2-enabled"', 1
+    )[1].split(">", 1)[0]
+    assert "checked" not in seedvr2_input
+
+
 def test_long_audio_review_and_handoff_flow(client, monkeypatch):
     create_user("long-audio-user")
     _configure_ltx("long-audio-user")
@@ -298,7 +311,6 @@ def test_digital_human_long_audio_auto_splits_without_asr(client, monkeypatch):
             "name": "数字人长音频",
             "workflowType": "digital_human",
             "digitalPrompt": "人物自然说话并轻微挥手。",
-            "seedvr2Enabled": "false",
         },
         files={
             "customAudio": ("long.mp3", b"ID3long-audio", "audio/mpeg"),

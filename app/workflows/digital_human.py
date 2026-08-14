@@ -131,7 +131,7 @@ class DigitalHumanWorkflow:
             "resolution": resolution,
             "instance_type": requested_instance_type,
             "seedvr2_enabled": _boolean_parameter(
-                parameters.get("seedvr2_enabled"), default=True
+                parameters.get("seedvr2_enabled"), default=False
             ),
             "timing_mode": (
                 EXACT_TIMESTAMP_TIMING_MODE

@@ -573,6 +573,14 @@ if systemctl cat "`$media_service" >/dev/null 2>&1; then
   services="`$services `$media_service"
   cp -a -- "`$media_unit" "`$media_unit_backup"
 fi
+backup_service='runninghub-video-backup.service'
+backup_unit='/etc/systemd/system/runninghub-video-backup.service'
+backup_unit_backup='$script:RemoteTemp/runninghub-video-backup.service.before'
+backup_unit_existed=0
+if systemctl cat "`$backup_service" >/dev/null 2>&1; then
+  backup_unit_existed=1
+  cp -a -- "`$backup_unit" "`$backup_unit_backup"
+fi
 old_revision='$deployedRevision'
 rollback_code='$BackupDir/runninghub-video-code-pre-$shortCommit-$timestamp.tar.gz'
 pre_deploy_db='$script:RemoteTemp/pre-deploy-app.db'
@@ -614,6 +622,11 @@ rollback() {
     systemctl disable "`$media_service" >/dev/null 2>&1 || true
     rm -f -- "`$media_unit"
   fi
+  if [ "`$backup_unit_existed" -eq 1 ]; then
+    cp -a -- "`$backup_unit_backup" "`$backup_unit"
+  else
+    rm -f -- "`$backup_unit"
+  fi
   printf '%s\n' "`$old_revision" > '$AppDir/.deployed-revision'
   chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
   systemctl daemon-reload
@@ -640,6 +653,8 @@ chmod 600 "`$pre_deploy_db"
 sudo -u '$LinuxUser' tar -C '$AppDir' -xf '$script:RemoteTemp/release.tar'
 install -m 644 -o root -g root \
   '$AppDir/deploy/systemd/runninghub-video-media.service' "`$media_unit"
+install -m 644 -o root -g root \
+  '$AppDir/deploy/systemd/runninghub-video-backup.service' "`$backup_unit"
 printf '%s\n' '$commit' > '$AppDir/.deployed-revision'
 chown '${LinuxUser}:${LinuxUser}' '$AppDir/.deployed-revision'
 chmod 600 '$AppDir/.env'
@@ -669,6 +684,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
 done
 systemctl is-active `$services >/dev/null
 sqlite3 -readonly '$AppDir/data/app.db' 'PRAGMA quick_check;' | grep -qx 'ok'
+sudo -u '$LinuxUser' /bin/bash '$AppDir/deploy/scripts/backup.sh' --rotate-only
 trap - ERR
 "@
     Invoke-RemoteScript -Script $mutateScript -Description "更新生产代码" | Out-Null

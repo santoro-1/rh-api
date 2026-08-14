@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -378,13 +379,94 @@ def test_backup_timer_and_restore_confirmation_are_present():
     timer = (
         PROJECT_ROOT / "deploy" / "systemd" / "runninghub-video-backup.timer"
     ).read_text(encoding="utf-8")
+    service = (
+        PROJECT_ROOT / "deploy" / "systemd" / "runninghub-video-backup.service"
+    ).read_text(encoding="utf-8")
+    backup = (
+        PROJECT_ROOT / "deploy" / "scripts" / "backup.sh"
+    ).read_text(encoding="utf-8")
     restore = (
         PROJECT_ROOT / "deploy" / "scripts" / "restore.sh"
     ).read_text(encoding="utf-8")
     assert "Persistent=true" in timer
+    assert "Environment=RUNNINGHUB_BACKUP_KEEP_COUNT=2" in service
+    assert 'BACKUP_KEEP_COUNT="${RUNNINGHUB_BACKUP_KEEP_COUNT:-2}"' in backup
+    assert "^runninghub-video-[0-9]{8}T[0-9]{6}Z\\.tar\\.gz$" in backup
+    assert 'rm -f -- "$BACKUP_DIR/$filename"' in backup
+    assert 'PARTIAL_ARCHIVE="$ARCHIVE.partial"' in backup
+    assert 'mv -f -- "$PARTIAL_ARCHIVE" "$ARCHIVE"' in backup
+    assert backup.index('mv -f -- "$PARTIAL_ARCHIVE" "$ARCHIVE"') < backup.rindex(
+        "rotate_full_backups"
+    )
     assert '"$CONFIRM" != "--confirm"' in restore
     assert "runninghub-video-media.service" in restore
     assert "runninghub-video-asr.service" not in restore
+
+
+def test_backup_rotate_only_keeps_latest_full_archives_and_unrelated_files(tmp_path):
+    bash = shutil.which("bash")
+    if bash is None and os.name == "nt":
+        candidate = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git/bin/bash.exe"
+        )
+        if candidate.is_file():
+            bash = str(candidate)
+    if bash is None:
+        pytest.skip("bash is unavailable")
+
+    def bash_path(path: Path) -> str:
+        if os.name != "nt":
+            return str(path)
+        converted = subprocess.run(
+            [bash, "-lc", 'cygpath -u "$1"', "backup-test", str(path)],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+        )
+        return converted.stdout.strip()
+
+    app_dir = tmp_path / "app"
+    backup_dir = tmp_path / "backups"
+    app_dir.mkdir()
+    backup_dir.mkdir()
+    full_archives = [
+        "runninghub-video-20260812T010000Z.tar.gz",
+        "runninghub-video-20260813T010000Z.tar.gz",
+        "runninghub-video-20260814T010000Z.tar.gz",
+    ]
+    protected_files = [
+        "runninghub-video-code-pre-deadbee-20260814T010000Z.tar.gz",
+        "runninghub-video-20260811T010000Z.tar.gz.partial",
+        "pre-deploy-app.db",
+    ]
+    for filename in full_archives + protected_files:
+        (backup_dir / filename).write_bytes(b"test")
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "RUNNINGHUB_APP_DIR": bash_path(app_dir),
+            "RUNNINGHUB_BACKUP_DIR": bash_path(backup_dir),
+            "RUNNINGHUB_BACKUP_KEEP_COUNT": "2",
+        }
+    )
+    subprocess.run(
+        [
+            bash,
+            bash_path(PROJECT_ROOT / "deploy" / "scripts" / "backup.sh"),
+            "--rotate-only",
+        ],
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+        env=environment,
+    )
+
+    remaining = {path.name for path in backup_dir.iterdir()}
+    assert full_archives[0] not in remaining
+    assert set(full_archives[1:]) <= remaining
+    assert set(protected_files) <= remaining
 
 
 def test_windows_production_update_script_is_explicit_and_scoped():
@@ -424,8 +506,14 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert "failed-app.db" in updater
     assert "正在恢复发布前代码和数据库" in updater
     assert "systemctl daemon-reload" in updater
+    assert "backup.sh' --rotate-only" in updater
     assert "runninghub-video-media.service" in updater
     assert "runninghub-video-media.service.before" in updater
+    assert "runninghub-video-backup.service.before" in updater
+    assert (
+        "'$AppDir/deploy/systemd/runninghub-video-backup.service' \"`$backup_unit\""
+        in updater
+    )
     assert "systemctl enable runninghub-video-asr.service" not in updater
     assert "/bin/bash deploy/scripts/install-asr.sh" not in updater
     assert "http://127.0.0.1:18084/healthz" not in updater

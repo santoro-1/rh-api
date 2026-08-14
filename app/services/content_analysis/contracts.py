@@ -48,13 +48,15 @@ CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID = (
 
 _LOCAL_PREFERRED_BREAK_CHARACTERS = frozenset("，。！？；：、,.!?;:\n\r")
 _STRUCTURAL_PARTICLES = frozenset("的地得")
+_BOUND_RELATIVE_SUFFIXES = ("类的", "中的", "里的", "内的", "上的", "下的")
+_LOCATIVE_RELATIVE_SUFFIXES = frozenset({"中的", "里的", "内的", "上的", "下的"})
 
 jieba.setLogLevel(logging.ERROR)
 _JIEBA_TOKENIZER = jieba.Tokenizer()
 
 
 def _lexical_unsafe_break_positions(original_script: str) -> set[int]:
-    """Return boundaries inside general Chinese tokens or around particles."""
+    """Return boundaries inside Chinese tokens or bound relative suffixes."""
 
     unsafe: set[int] = set()
     for token, start, end in _JIEBA_TOKENIZER.tokenize(
@@ -64,10 +66,21 @@ def _lexical_unsafe_break_positions(original_script: str) -> set[int]:
             continue
         unsafe.update(range(int(start) + 1, int(end)))
     for position in range(1, len(original_script)):
-        if (
-            original_script[position] in _STRUCTURAL_PARTICLES
-            or original_script[position - 1] in _STRUCTURAL_PARTICLES
+        suffix_ending_at_boundary = original_script[max(0, position - 2) : position]
+        allow_after_locative_relative = (
+            suffix_ending_at_boundary in _LOCATIVE_RELATIVE_SUFFIXES
+        )
+        if original_script[position] in _STRUCTURAL_PARTICLES or (
+            original_script[position - 1] in _STRUCTURAL_PARTICLES
+            and not allow_after_locative_relative
         ):
+            unsafe.add(position)
+        if any(
+            original_script.startswith(suffix, position)
+            for suffix in _BOUND_RELATIVE_SUFFIXES
+        ):
+            # Keep category/locative relative suffixes with their head phrase:
+            # 快餐|类的、疲惫生活|中的 are never useful caption starts.
             unsafe.add(position)
     return unsafe
 

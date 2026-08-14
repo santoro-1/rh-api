@@ -181,6 +181,8 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     assert "anchor.usage=enrichment" in system_prompt
     assert "anchor.usage=seam_broll" in system_prompt
     assert "priority=1" in system_prompt
+    assert "concept_id 以 editorial. 开头的是编辑型空镜池" in system_prompt
+    assert "editorial.meal_daily" in system_prompt
     assert "绝不能为了填满频率或连接处强行填充" in system_prompt
     assert "不返回时间戳" in system_prompt
 

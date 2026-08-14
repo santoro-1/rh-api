@@ -24,6 +24,10 @@ def test_generate_page_uses_fixed_stable_mode_v2(client):
     assert "Stand 运行（24G）" in response.text
     assert "Plus 运行（48G）" in response.text
     assert 'id="task-seedvr2-enabled"' in response.text
+    seedvr2_input = response.text.split('id="task-seedvr2-enabled"', 1)[1].split(
+        ">", 1
+    )[0]
+    assert "checked" not in seedvr2_input
     assert "数字人 API 文档支持" not in response.text
     assert "LTX 2.3 对口型" not in response.text
     assert "视频对口型" in response.text
@@ -115,8 +119,8 @@ def test_task_creation_returns_immediately_without_calling_runninghub(client, mo
         assert payload["parameters"]["resolution"] == "1024"
         assert payload["parameters"]["person_mode"] == "1"
         assert payload["parameters"]["instance_type"] == "plus"
-        assert payload["parameters"]["seedvr2_enabled"] is True
-        assert task.seedvr2_enabled is True
+        assert payload["parameters"]["seedvr2_enabled"] is False
+        assert task.seedvr2_enabled is False
         assert "overall_mode" not in payload["parameters"]
         assert "left_audio" not in payload["assets"]
         assert "right_audio" not in payload["assets"]
@@ -148,10 +152,11 @@ def test_digital_human_task_freezes_admin_instance_and_seedvr2_choice(
         data={
             "startTime": "0:00",
             "endTime": "0:15",
-            "prompt": "24G 且不放大",
+            "prompt": "24G 且放大",
             # A forged browser value cannot override the administrator setting.
             "instanceType": "plus",
-            "seedvr2Enabled": "false",
+            # The legacy page still allows an explicit per-task opt-in.
+            "seedvr2Enabled": "true",
         },
         files={
             "image": ("person.png", b"\x89PNG\r\n\x1a\npayload", "image/png"),
@@ -164,8 +169,8 @@ def test_digital_human_task_freezes_admin_instance_and_seedvr2_choice(
         task = db.get(GenerationTask, response.json()["taskId"])
         payload = json.loads(task.input_payload)
         assert payload["parameters"]["instance_type"] == "default"
-        assert payload["parameters"]["seedvr2_enabled"] is False
-        assert task.seedvr2_enabled is False
+        assert payload["parameters"]["seedvr2_enabled"] is True
+        assert task.seedvr2_enabled is True
 
 
 def test_digital_human_task_uses_plus_instance(client, monkeypatch):

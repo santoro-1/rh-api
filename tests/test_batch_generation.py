@@ -183,6 +183,10 @@ def test_batch_page_and_templates_support_excel_and_csv(client):
     assert script.status_code == 200
     assert "batchParameters" in script.text
     assert 'id="batch-seedvr2-enabled"' in page.text
+    seedvr2_input = page.text.split('id="batch-seedvr2-enabled"', 1)[1].split(
+        ">", 1
+    )[0]
+    assert "checked" not in seedvr2_input
     assert 'seedvr2_enabled' in script.text
     assert "moveAsset" in script.text
     assert "reuseAsset" in script.text
@@ -505,7 +509,6 @@ def test_digital_batch_reuses_one_image_for_multiple_audio_rows(
         "batchParameters": {
             "person_mode": "单人",
             "resolution": "1024",
-            "seedvr2_enabled": "false",
         },
         "rows": [
             {

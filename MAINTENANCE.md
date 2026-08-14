@@ -71,7 +71,7 @@ scripts/local_services.py    本地一键启动、停止、子进程守护
 - SeedVR2 固定 `plus`（48G）且不可由请求覆盖；数字人源片段成功后禁止因清晰化失败回退
   到数字人阶段，SeedVR2 下载失败只能复用同一远端 ID 重下。
 - `GenerationTask.seedvr2_enabled` 与序列化参数是创建时冻结的费用快照。关闭时不得创建
-  `GenerationTaskEnhancement`；旧网页下一次创建重新默认开启，新工作台始终开启。
+  `GenerationTaskEnhancement`；旧网页新建任务默认关闭、可按次开启，新工作台始终开启。
 - RunningHub 正常排队和执行以第三方状态为准；本地远程看门狗只处理提交后超过 4 小时
   仍无终态的异常任务。到期必须先查询、再远程取消，只有取消成功才释放槽位；取消
   失败继续轮询和重试取消，不能直接写本地失败或自动重提。

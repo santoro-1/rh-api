@@ -81,7 +81,7 @@
       <textarea name="prompt" rows="4" maxlength="5000" required {% if not has_api_key %}disabled{% endif %}>{{ config.default_prompt if config else "" }}</textarea>
     </label>
     <label class="inline-check batch-confirm">
-      <input id="task-seedvr2-enabled" type="checkbox" checked {% if not has_api_key %}disabled{% endif %}>
+      <input id="task-seedvr2-enabled" type="checkbox" {% if not has_api_key %}disabled{% endif %}>
       <span>数字人完成后使用 SeedVR2 48G 放大（会产生额外 RunningHub 费用）</span>
     </label>
     <p id="form-error" class="error hidden"></p>

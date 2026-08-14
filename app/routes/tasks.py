@@ -298,7 +298,7 @@ def create_task(
     resolution: str = Form("1024"),
     personMode: str = Form("1"),
     instanceType: str = Form("plus"),
-    seedvr2Enabled: bool = Form(True),
+    seedvr2Enabled: bool = Form(False),
     leftAudio: UploadFile | None = File(None),
     rightAudio: UploadFile | None = File(None),
     csrf_ok: None = Depends(require_csrf),

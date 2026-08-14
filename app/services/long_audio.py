@@ -168,7 +168,7 @@ def create_long_audio_project(
     source_video: UploadFile,
     prompt_prefix: str,
     instance_type: str,
-    seedvr2_enabled: bool = True,
+    seedvr2_enabled: bool = False,
     alignment_provider: str = "funasr_http",
     workflow_type: str = LTX_WORKFLOW,
     review_required: bool = False,
@@ -689,7 +689,7 @@ def materialize_long_audio_project(
                         ),
                         "instance_type": instance_type,
                         "seedvr2_enabled": parameters.get(
-                            "seedvr2_enabled", True
+                            "seedvr2_enabled", False
                         ),
                     }
                 )

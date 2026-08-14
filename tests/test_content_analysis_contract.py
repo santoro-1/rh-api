@@ -290,6 +290,19 @@ def test_boundary_candidates_withhold_general_chinese_words_and_particles() -> N
     assert particle + 1 not in positions
 
 
+def test_boundary_candidates_keep_bound_relative_suffixes_intact() -> None:
+    script = "早餐不要吃快餐类的，早餐不要吃蛋糕类的，疲惫生活中的一副重要解药"
+    positions = set(subtitle_break_candidate_positions(script))
+
+    first_category = script.index("类的")
+    second_category = script.index("类的", first_category + 1)
+    locative = script.index("中的")
+    assert first_category not in positions
+    assert second_category not in positions
+    assert locative not in positions
+    assert locative + len("中的") in positions
+
+
 def test_break_plan_is_expanded_from_exact_source_slices() -> None:
     script = "百分之八十四是由呼吸的形式来离开我们身体的"
 

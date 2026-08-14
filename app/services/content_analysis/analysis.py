@@ -48,7 +48,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v13"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v14"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -167,6 +167,11 @@ def _system_prompt() -> str:
         - anchor.usage=enrichment 表示周期性空镜尝试；anchor.usage=seam_broll 表示分段
           连接处的空镜尝试，context 以下一段开头语义为准。这两种 usage 都不表示
           allowed_concepts 已自动匹配，必须再判断 concept 与 context 的关联。
+        - concept_id 以 editorial. 开头的是编辑型空镜池，不表示脚本字面提到了具体对象。
+          对 enrichment 或 seam_broll，可按完整句子的生活场景、情绪和叙事功能选择自然陪衬的
+          editorial 空镜，即使原文没有出现池名称；这类选择通常返回 priority=1。
+        - editorial.meal_daily 只能用于三餐、买菜、做饭、饮食习惯等自然语境，不能因为脚本
+          提到蛋白质、营养或某种健康功效，就把普通饭菜画面当成该观点或功效的证据。
         - 直接、强相关且是当前重点的画面可返回 priority=2；同一场景、动作或类别下
           广义但自然、不会误导的相关画面可返回 priority=1。只是勉强沾边、容易误解、
           与下一段无关或仅因为它是唯一可选项时不要返回。没有合格画面就跳过，
@@ -174,7 +179,8 @@ def _system_prompt() -> str:
         - 每项仅含 anchor_id、concept_id、priority。anchor 和 concept 必须来自 visual_context，且
           concept 必须属于该 anchor 的 allowed_concepts。
         - priority 只能为 0、1、2：2 为关键画面，1 为普通画面，0 为仅供人工审核。
-        - 优先明确实物、食物、动作和过程；也可选择对当前语义高度相关的场景。
+        - 优先明确实物、食物、动作和过程；没有精准画面时，也可选择与完整句子自然相伴的
+          编辑型空镜，但不能用宽泛氛围画面替代本应精确表达的对象或结论。
         - 跳过成语、比喻、否定、词语讨论、顺带提及、重复概念和宽泛无关空镜。
         - 不返回时间戳、asset、图片/视频类型、路径、位置、尺寸、时长、置信度或原因。
 

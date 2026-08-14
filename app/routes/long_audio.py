@@ -165,7 +165,7 @@ def create_project(
         "镜头保持稳定。"
     ),
     instanceType: str = Form("plus"),
-    seedvr2Enabled: bool = Form(True),
+    seedvr2Enabled: bool = Form(False),
     reviewRequired: bool = Form(False),
     alignmentProvider: str = Form(""),
     csrf_ok: None = Depends(require_csrf),

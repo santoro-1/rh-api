@@ -526,7 +526,7 @@ def validate_batch(
                 "", workflow_config.instance_type
             )
             batch_seedvr2_enabled = batch_parameters.get(
-                "seedvr2_enabled", True
+                "seedvr2_enabled", False
             )
             if audio_mode == "minimax" and batch_person_mode != "1":
                 raise ValueError("脚本生成语音只支持数字人单人模式")
@@ -1026,7 +1026,7 @@ def create_batch(
                                 or "plus"
                             ),
                             "seedvr2_enabled": row_plan.parameters.get(
-                                "seedvr2_enabled", True
+                                "seedvr2_enabled", False
                             ),
                             "digital_prompt": (
                                 str(row_plan.parameters.get("prompt") or "")

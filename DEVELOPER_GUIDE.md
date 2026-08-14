@@ -104,8 +104,8 @@ RunningHub 取消。取消成功后写入 `REMOTE_WATCHDOG_TIMEOUT` 终态；取
 
 数字人运行实例由管理员按用户配置为 `default`（24G）或 `plus`（48G），创建任务时写入
 适配器输入快照；之后修改用户配置不会迁移已排队或已提交任务。旧网页单条、批量和长音频
-入口另有默认开启的 SeedVR2 开关，同样冻结到每个 `GenerationTask`。关闭时数字人结果下载
-成功即结束，不建立清晰化记录；下一次创建重新默认开启。新版工作台 4A 始终开启 SeedVR2，
+入口另有默认关闭、可按次开启的 SeedVR2 开关，同样冻结到每个 `GenerationTask`。关闭时数字人
+结果下载成功即结束，不建立清晰化记录。新版工作台 4A 始终开启 SeedVR2，
 SeedVR2 自身仍固定 `plus`（48G）。
 
 ### 3.3 MiniMax 完整流程
@@ -448,7 +448,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1
 powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
 ```
 
-脚本创建项目独立备份、上传指定 commit、执行迁移并只重启本项目服务；不会安装服务器
+脚本创建项目独立备份、上传指定 commit、执行迁移并只重启本项目服务；完整数据备份成功后
+按 `RUNNINGHUB_BACKUP_KEEP_COUNT` 轮换，生产 systemd 默认保留最近 2 份。它不会安装服务器
 ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验收与恢复命令只在
 `deploy/README.md` 维护，发布前必须按该文档执行。
 
