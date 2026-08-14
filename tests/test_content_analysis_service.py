@@ -400,6 +400,10 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
     assert "不得超过 13 个全角中文字符等效宽度" in system_prompt
     assert "13 是上限，不是固定长度" in system_prompt
     assert "只选最少量自然边界" in system_prompt
+    assert "封面标题必须独立满足平台安全" in system_prompt
+    assert "控重" in system_prompt
+    assert "禁止用谐音字" in system_prompt
+    assert "生活提醒" in system_prompt
     assert "不返回时间戳" in system_prompt
     user_payload = json.loads(messages[1]["content"])
     assert set(user_payload) == {
