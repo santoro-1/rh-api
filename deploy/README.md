@@ -95,7 +95,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy
 - `runninghub-video-worker.service`
 
 脚本不会修改 Nginx、证书、安全组或其他项目。完整数据备份创建成功后会按精确文件名自动
-轮换；默认保留最近 2 份，代码包、独立数据库快照和配置备份不在该轮换范围内。以下情况会拒绝
+轮换；默认保留最近 1 份完整数据备份和 1 份名称符合规则的部署代码回滚快照，独立数据库快照
+和配置备份不在该轮换范围内。以下情况会拒绝
 自动发布：工作区不干净、本地不是最新 `main`、测试失败、执行中任务在排空超时后
 仍未结束、主项目
 `requirements.txt` 发生变化、发布范围不匹配，或本次 Git 变更包含文件删除。
@@ -142,9 +143,11 @@ sudo -u rhvideo /bin/bash /opt/runninghub-video/deploy/scripts/backup.sh
 ```
 
 备份必须包含 SQLite、上传、输出和 `.env`，并保存到
-`/var/backups/runninghub-video/`。`RUNNINGHUB_BACKUP_KEEP_COUNT` 控制完整数据备份保留数量，
-必须为大于 0 的整数；systemd 生产单元显式设置为 `2`。轮换只在新归档创建并设好权限后执行，
-只匹配 `runninghub-video-YYYYmmddTHHMMSSZ.tar.gz`，不会删除其他用途的备份文件。
+`/var/backups/runninghub-video/`。`RUNNINGHUB_BACKUP_KEEP_COUNT` 同时控制完整数据备份和部署
+代码回滚快照的保留数量，必须为大于 0 的整数；systemd 生产单元显式设置为 `1`。轮换只在
+新归档创建并设好权限后执行，只匹配 `runninghub-video-YYYYmmddTHHMMSSZ.tar.gz` 和
+`runninghub-video-code-pre-<12位commit>-YYYYmmddTHHMMSSZ.tar.gz`，不会删除独立数据库快照、
+配置备份或其他用途的文件。
 
 ## 更新代码
 

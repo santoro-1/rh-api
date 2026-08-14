@@ -50,23 +50,6 @@ def _uses_exact_timestamp_timing(task: GenerationTask) -> bool:
     )
 
 
-def workbench_final_segment_tail_seconds(task: GenerationTask) -> float:
-    """Return the frozen parameter-only tail for a new-workbench final segment."""
-
-    try:
-        payload = json.loads(str(getattr(task, "input_payload", "") or ""))
-    except (TypeError, json.JSONDecodeError):
-        return 0.0
-    parameters = payload.get("parameters") if isinstance(payload, dict) else None
-    if not isinstance(parameters, dict):
-        return 0.0
-    try:
-        value = float(parameters.get(WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER) or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return value if value == WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS else 0.0
-
-
 def generation_tail_padding_seconds(task: GenerationTask) -> float:
     """Return safe padding for full-range batch inputs without crossing 45 s."""
 
@@ -283,14 +266,6 @@ class DigitalHumanWorkflow:
         if tail_padding > 0:
             values["end_time"] = format_duration_timecode(
                 task.audio_duration_seconds + tail_padding
-            )
-        final_segment_tail = workbench_final_segment_tail_seconds(task)
-        if final_segment_tail > 0:
-            # RunningHub accepts whole-second timecodes.  The new workbench
-            # intentionally extends only the final segment's requested window;
-            # it does not create or upload a padded MiniMax audio replacement.
-            values["end_time"] = format_duration_timecode(
-                task.audio_duration_seconds + final_segment_tail
             )
         nodes = [
             {

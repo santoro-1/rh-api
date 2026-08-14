@@ -7,7 +7,6 @@ from app.config import Settings
 from app.models import GenerationBatchItem, GenerationTask, TaskStatus
 from app.services.speech.async_outputs import load_subtitle_cues
 from app.services.storage import safe_relative_path
-from app.workflows.digital_human import workbench_final_segment_tail_seconds
 from app.services.video_enhancement import (
     task_processing_stage,
     task_quality_variant,
@@ -151,10 +150,9 @@ def postproduction_manifest(
                 "script_text": segment.script_text if segment is not None else "",
                 "start_seconds": segment.start_seconds if segment is not None else 0.0,
                 "end_seconds": (
-                    segment.end_seconds + workbench_final_segment_tail_seconds(task)
+                    segment.end_seconds
                     if segment is not None
                     else task.audio_duration_seconds
-                    + workbench_final_segment_tail_seconds(task)
                 ),
             }
         )

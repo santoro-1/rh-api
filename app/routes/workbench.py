@@ -1353,6 +1353,12 @@ def start_workbench_composition(
             ).strip()
             if configured_prompt:
                 video_parameters["prompt"] = configured_prompt
+        # Module 4A in the new workbench always includes SeedVR2.  Older audio
+        # rows were created before this snapshot field existed; allowing the
+        # workflow validator's False default here would silently skip the
+        # enhancement stage after the user had confirmed the complete 4A cost.
+        if batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH:
+            video_parameters["seedvr2_enabled"] = True
         current_image_sha256 = str(task.primary_sha256 or "").strip().lower()
         if task.primary_path and not current_image_sha256:
             try:

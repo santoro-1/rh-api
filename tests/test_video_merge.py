@@ -125,9 +125,7 @@ def _fake_legacy_merge(inputs, target, *, target_durations=None):
 
 
 def _fake_workbench_merge(inputs, target, *, target_durations=None):
-    assert target_durations == (
-        [31.0] if len(inputs) == 1 else [30.0, 31.0]
-    )
+    assert target_durations == [30.0] * len(inputs)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"|".join(path.read_bytes() for path in inputs))
 

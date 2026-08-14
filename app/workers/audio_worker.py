@@ -20,7 +20,6 @@ from app.models import (
     AudioTaskStatus,
     GenerationBatchItem,
     GenerationSegment,
-    BATCH_SOURCE_NEW_WORKBENCH,
     MiniMaxVoiceAsset,
     User,
     VoiceAssetStatus,
@@ -63,10 +62,6 @@ from app.services.storage import safe_relative_path, to_relative_data_path
 from app.services.task_creation import create_generation_task, validate_task_input
 from app.services.video_merge import merge_status_after_handoff
 from app.workflows.base import WorkflowAsset
-from app.workflows.digital_human import (
-    WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER,
-    WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -101,24 +96,6 @@ def _audio_log_context(task: AudioGenerationTask) -> dict[str, object]:
         "batch_item_id": task.batch_item_id,
         "task_id": task.id,
     }
-
-
-def _workbench_final_tail_for_plan(
-    task: AudioGenerationTask,
-    *,
-    plan_index: int,
-    plan_count: int,
-) -> float:
-    """Freeze the +1 s generation window on the final new-workbench segment."""
-
-    batch = task.batch_item.batch if task.batch_item else None
-    if (
-        batch is not None
-        and batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
-        and plan_index == plan_count
-    ):
-        return WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS
-    return 0.0
 
 
 def _mark_failed(
@@ -683,20 +660,12 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
             }
             primary_name = "video"
         else:
-            final_segment_tail_seconds = (
-                _workbench_final_tail_for_plan(
-                    task,
-                    plan_index=plan.index,
-                    plan_count=len(plans),
-                )
-            )
             segment_prompt = str(parameters.get("prompt") or "")
             segment_parameters = {
                 **parameters,
                 "start_time": "0:00",
                 "end_time": format_duration_timecode(segment_duration),
                 "person_mode": "1",
-                WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER: final_segment_tail_seconds,
             }
             metadata = {"audio_duration_seconds": segment_duration}
             primary_name = "image"

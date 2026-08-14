@@ -8,7 +8,7 @@ Group=rhvideo
 WorkingDirectory=/opt/runninghub-video
 Environment=RUNNINGHUB_APP_DIR=/opt/runninghub-video
 Environment=RUNNINGHUB_BACKUP_DIR=/var/backups/runninghub-video
-Environment=RUNNINGHUB_BACKUP_KEEP_COUNT=2
+Environment=RUNNINGHUB_BACKUP_KEEP_COUNT=1
 ExecStart=/bin/bash /opt/runninghub-video/deploy/scripts/backup.sh
 UMask=0077
 NoNewPrivileges=true

@@ -343,7 +343,7 @@ def test_timestamped_workbench_payload_uses_ceiling_without_silent_tail():
     assert nodes[("341", "end_time")] == "0:25"
 
 
-def test_timestamped_workbench_final_segment_extends_parameter_by_one_second_only():
+def test_historical_workbench_final_segment_tail_is_ignored():
     workflow = get_workflow("digital_human")
     parameters = workflow.validate_parameters(
         {
@@ -385,7 +385,7 @@ def test_timestamped_workbench_final_segment_extends_parameter_by_one_second_onl
         (node["nodeId"], node["fieldName"]): node["fieldValue"]
         for node in payload["nodeInfoList"]
     }
-    assert nodes[("341", "end_time")] == "0:26"
+    assert nodes[("341", "end_time")] == "0:25"
     assert nodes[("339", "audio")] == "original-remote-audio"
 
 

@@ -554,6 +554,13 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         task.status = AudioTaskStatus.AWAITING_REVIEW.value
         task.batch_item.audio_status = "AWAITING_REVIEW"
         task.batch_item.status = "AWAITING_AUDIO_REVIEW"
+        # Simulate an audio row created before new-workbench SeedVR2 was
+        # persisted in the immutable video parameter snapshot.
+        video_parameters = json.loads(task.video_parameters_json)
+        video_parameters.pop("seedvr2_enabled", None)
+        task.video_parameters_json = json.dumps(
+            video_parameters, ensure_ascii=False
+        )
         db.commit()
 
     status = client.post(

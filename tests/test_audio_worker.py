@@ -361,23 +361,3 @@ def test_optional_audio_review_can_regenerate_then_approve(
         assert task.reviewed_at is not None
         assert attempts[1].status == "APPROVED"
         assert db.query(GenerationTask).count() == 1
-
-
-def test_new_workbench_tail_is_frozen_only_on_final_plan():
-    task = SimpleNamespace(
-        batch_item=SimpleNamespace(
-            batch=SimpleNamespace(source_channel="new_workbench")
-        )
-    )
-
-    assert audio_worker._workbench_final_tail_for_plan(
-        task, plan_index=1, plan_count=2
-    ) == 0.0
-    assert audio_worker._workbench_final_tail_for_plan(
-        task, plan_index=2, plan_count=2
-    ) == 1.0
-
-    task.batch_item.batch.source_channel = "legacy_web"
-    assert audio_worker._workbench_final_tail_for_plan(
-        task, plan_index=2, plan_count=2
-    ) == 0.0
