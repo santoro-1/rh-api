@@ -33,7 +33,6 @@ from jyd_probe.semantic_subtitles import (  # noqa: E402
     semantic_break_groups,
 )
 from jyd_probe.semantic_visuals import (  # noqa: E402
-    SemanticVisualCatalog,
     load_semantic_visual_catalog,
     recall_semantic_visual_candidates,
 )
@@ -183,40 +182,35 @@ def test_server_and_workbench_share_one_selected_only_visual_plan() -> None:
     assert visual["visual_plan"] == payload["visual_plan"]
 
 
-def test_enrichment_rotation_exposes_all_concepts_within_cloud_anchor_limit() -> None:
+def test_periodic_and_seam_broll_only_expose_contextual_concepts() -> None:
     catalog = load_semantic_visual_catalog(
         WORKBENCH_ROOT / "data" / "libraries" / "semantic_visual_library"
     )
-    concept_ids = [str(item["concept_id"]) for item in catalog.concepts[:10]]
-    base_asset = dict(catalog.assets[0])
-    rotated_catalog = SemanticVisualCatalog(
-        root=catalog.root,
-        schema=catalog.schema,
-        library_id=catalog.library_id,
-        catalog_version=catalog.catalog_version,
-        concepts=catalog.concepts,
-        assets=tuple(
+    opening = "日常轻活动要循序渐进，按照自己的节奏慢慢坚持。" * 8
+    next_segment = "接下来安排日常轻活动，并留意身体感受。"
+    script = opening + next_segment
+    candidate_request = recall_semantic_visual_candidates(
+        script,
+        catalog,
+        video_duration_us=60_000_000,
+        segment_boundaries=[
             {
-                    **base_asset,
-                    "asset_id": f"cross-project-enrichment-{index}",
-                    "concept_ids": [concept_id],
-                    "usage_modes": ["full_screen_broll"],
-                    "auto_eligible": True,
+                "boundary_us": 50_000_000,
+                "script_text": next_segment,
             }
-            for index, concept_id in enumerate(concept_ids)
-        ),
+        ],
     )
-    script = "这是一段不直接命中素材名称的健康生活说明。" * 20
-    candidate_request = recall_semantic_visual_candidates(script, rotated_catalog)
     visual_context = build_content_visual_context(candidate_request)
 
     parsed = parse_content_visual_context(visual_context, original_script=script)
     enrichment = [item for item in parsed.anchors if item.usage == "enrichment"]
-    offered = {concept_id for item in enrichment for concept_id in item.allowed_concepts}
+    seams = [item for item in parsed.anchors if item.usage == "seam_broll"]
 
-    assert len(enrichment) >= 2
+    assert enrichment
+    assert seams
     assert all(len(item.allowed_concepts) <= 8 for item in enrichment)
-    assert offered == set(concept_ids)
+    assert all("activity.light_daily" in item.allowed_concepts for item in enrichment)
+    assert "activity.light_daily" in seams[0].allowed_concepts
 
 
 def test_server_partial_results_keep_each_valid_workbench_branch() -> None:

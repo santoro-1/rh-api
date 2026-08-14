@@ -179,7 +179,9 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     assert "一次完成 music_intent、subtitle_breaks、visual_plan、title 四项任务" in system_prompt
     assert "每项仅含 anchor_id、concept_id、priority" in system_prompt
     assert "anchor.usage=enrichment" in system_prompt
-    assert "绝不能为了丰富性强行填充" in system_prompt
+    assert "anchor.usage=seam_broll" in system_prompt
+    assert "priority=1" in system_prompt
+    assert "绝不能为了填满频率或连接处强行填充" in system_prompt
     assert "不返回时间戳" in system_prompt
 
 
