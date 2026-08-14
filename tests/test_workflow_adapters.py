@@ -343,6 +343,52 @@ def test_timestamped_workbench_payload_uses_ceiling_without_silent_tail():
     assert nodes[("341", "end_time")] == "0:25"
 
 
+def test_timestamped_workbench_final_segment_extends_parameter_by_one_second_only():
+    workflow = get_workflow("digital_human")
+    parameters = workflow.validate_parameters(
+        {
+            "prompt": "完整口播",
+            "start_time": "0:00",
+            "end_time": "0:25",
+            "timing_mode": "exact_timestamps",
+            "workbench_final_segment_tail_seconds": 1,
+        },
+        {"audio_duration_seconds": 24.4},
+    )
+    task = SimpleNamespace(
+        input_payload=json.dumps(
+            workflow.serialize_input(
+                [
+                    WorkflowAsset("image", "image", "image.png", "image.png"),
+                    WorkflowAsset("audio", "audio", "audio.mp3", "audio.mp3"),
+                ],
+                parameters,
+                {"audio_duration_seconds": 24.4},
+            )
+        ),
+        audio_duration_seconds=24.4,
+        start_seconds=0,
+        end_seconds=25,
+        prompt="完整口播",
+        segment_id="segment-final",
+        batch_item_id=None,
+    )
+    assert generation_tail_padding_seconds(task) == 0.0
+    payload = workflow.build_payload(
+        task,
+        {"image": "remote-image", "audio": "original-remote-audio"},
+        ai_app_id="app-id",
+        instance_type="default",
+        settings={},
+    )
+    nodes = {
+        (node["nodeId"], node["fieldName"]): node["fieldValue"]
+        for node in payload["nodeInfoList"]
+    }
+    assert nodes[("341", "end_time")] == "0:26"
+    assert nodes[("339", "audio")] == "original-remote-audio"
+
+
 def test_ltx_lip_sync_adapter_maps_custom_audio_and_output_node():
     workflow = get_workflow("ltx_lip_sync")
     assert workflow.submission_type == "workflow"

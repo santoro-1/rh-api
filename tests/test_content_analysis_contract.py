@@ -277,7 +277,7 @@ def test_boundary_indexed_script_withholds_punctuation_and_ascii_word_breaks() -
     assert indexed.replace("⟦", "").count("B") > 0
 
 
-def test_boundary_candidates_withhold_general_chinese_words_and_particles() -> None:
+def test_boundary_candidates_withhold_words_and_particle_starts_but_allow_completed_modifiers() -> None:
     script = "破罐子破摔，工作上的情绪，从原来的160斤"
     positions = set(subtitle_break_candidate_positions(script))
 
@@ -287,7 +287,16 @@ def test_boundary_candidates_withhold_general_chinese_words_and_particles() -> N
     assert not positions.intersection(range(idiom_start + 1, idiom_start + len("破罐子破摔")))
     assert emotion_start + 1 not in positions
     assert particle not in positions
-    assert particle + 1 not in positions
+    assert particle + 1 in positions
+
+
+def test_boundary_candidates_offer_task_30_completed_modifier() -> None:
+    script = "世界上公认的十大免费最好的医生"
+    positions = set(subtitle_break_candidate_positions(script))
+
+    modifier_end = len("世界上公认的")
+    assert modifier_end in positions
+    assert script[:modifier_end] == "世界上公认的"
 
 
 def test_boundary_candidates_keep_bound_relative_suffixes_intact() -> None:

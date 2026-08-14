@@ -89,7 +89,19 @@ def _segmented_batch(
                 user_id=user.id,
                 segment=segment,
                 workflow_type="digital_human",
-                input_payload=json.dumps({"assets": [], "parameters": {}}),
+                input_payload=json.dumps(
+                    {
+                        "assets": [],
+                        "parameters": {
+                            **(
+                                {"workbench_final_segment_tail_seconds": 1.0}
+                                if source_channel == BATCH_SOURCE_NEW_WORKBENCH
+                                and index == len(sources)
+                                else {}
+                            )
+                        },
+                    }
+                ),
                 image_path="placeholder.png",
                 audio_path="placeholder.mp3",
                 image_original_name="placeholder.png",
@@ -113,7 +125,9 @@ def _fake_legacy_merge(inputs, target, *, target_durations=None):
 
 
 def _fake_workbench_merge(inputs, target, *, target_durations=None):
-    assert target_durations == [30.0] * len(inputs)
+    assert target_durations == (
+        [31.0] if len(inputs) == 1 else [30.0, 31.0]
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"|".join(path.read_bytes() for path in inputs))
 
@@ -238,6 +252,10 @@ def test_new_workbench_single_segment_is_normalized_as_base_video(monkeypatch):
     with SessionLocal() as db:
         item = db.get(GenerationBatchItem, item_id)
         item.segments.pop()
+        remaining_task = item.segments[0].generation_task
+        payload = json.loads(remaining_task.input_payload)
+        payload["parameters"]["workbench_final_segment_tail_seconds"] = 1.0
+        remaining_task.input_payload = json.dumps(payload)
         db.commit()
     monkeypatch.setattr(
         "app.services.video_merge.merge_segment_videos",

@@ -49,7 +49,6 @@ CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID = (
 _LOCAL_PREFERRED_BREAK_CHARACTERS = frozenset("，。！？；：、,.!?;:\n\r")
 _STRUCTURAL_PARTICLES = frozenset("的地得")
 _BOUND_RELATIVE_SUFFIXES = ("类的", "中的", "里的", "内的", "上的", "下的")
-_LOCATIVE_RELATIVE_SUFFIXES = frozenset({"中的", "里的", "内的", "上的", "下的"})
 
 jieba.setLogLevel(logging.ERROR)
 _JIEBA_TOKENIZER = jieba.Tokenizer()
@@ -66,14 +65,11 @@ def _lexical_unsafe_break_positions(original_script: str) -> set[int]:
             continue
         unsafe.update(range(int(start) + 1, int(end)))
     for position in range(1, len(original_script)):
-        suffix_ending_at_boundary = original_script[max(0, position - 2) : position]
-        allow_after_locative_relative = (
-            suffix_ending_at_boundary in _LOCATIVE_RELATIVE_SUFFIXES
-        )
-        if original_script[position] in _STRUCTURAL_PARTICLES or (
-            original_script[position - 1] in _STRUCTURAL_PARTICLES
-            and not allow_after_locative_relative
-        ):
+        if original_script[position] in _STRUCTURAL_PARTICLES:
+            # A structural particle may not start a subtitle.  The boundary
+            # after it is intentionally still offered: a completed attributive
+            # phrase can be the natural prompt/answer boundary, for example
+            # `世界上公认的|十大免费最好的医生`.
             unsafe.add(position)
         if any(
             original_script.startswith(suffix, position)

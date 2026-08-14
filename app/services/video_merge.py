@@ -17,6 +17,7 @@ from app.models import (
     GenerationSegment,
     TaskStatus,
 )
+from app.workflows.digital_human import workbench_final_segment_tail_seconds
 from app.services.processes import hidden_creation_flags
 from app.services.storage import remove_directory, safe_relative_path, to_relative_data_path
 
@@ -335,7 +336,10 @@ def merge_batch_item(
             return True
         inputs.append(path)
         if target_durations is not None:
-            target_durations.append(float(task.audio_duration_seconds or 0))
+            target_durations.append(
+                float(task.audio_duration_seconds or 0)
+                + workbench_final_segment_tail_seconds(task)
+            )
 
     item.merged_video_status = MERGING
     item.merged_video_error = None

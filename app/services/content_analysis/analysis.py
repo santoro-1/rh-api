@@ -48,7 +48,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v14"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v15"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -155,8 +155,12 @@ def _system_prompt() -> str:
 
         subtitle_breaks：
         - 最终字幕单行正文不得超过 13 个全角中文字符等效宽度。
-        - 13 是上限，不是固定长度；未超限不加断点，超限时只选最少量自然边界。
-        - 只选择 boundary_indexed_script 已提供的位置；prefer_after 为首选，allow_after 为次选。
+        - 13 是上限，不是固定长度，也不是是否断句的唯一依据。字数未超限时，仍可保留少量强语义断点。
+        - 显式或省略“是”的“类别/问题/评价对象 -> 答案”必须作为强语义断点，例如
+          `最简单的排毒法|揉肚子`、`最好的医生是|你自己`。并列列举中的同类结构要保持一致。
+        - prefer_after 只放强语义节拍；allow_after 放超宽时可用的自然备选。两者都只能选择
+          boundary_indexed_script 已提供的位置。
+        - 除上述强语义断点外，只选最少量自然边界，不为凑齐长度或节奏制造碎片。
         - 两个数组升序、无重复、互不重叠；标点和空白边界由服务端处理。
         - 不拆数字、数量单位、完整词、专有名词和紧密短语，不让助词孤立。
 

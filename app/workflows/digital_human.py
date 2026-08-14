@@ -17,6 +17,8 @@ DIGITAL_HUMAN_MAX_SECONDS = DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
 DIGITAL_HUMAN_TAIL_PADDING_SECONDS = 0.5
 DIGITAL_HUMAN_DEFAULT_INSTANCE_TYPE = "plus"
 EXACT_TIMESTAMP_TIMING_MODE = "exact_timestamps"
+WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS = 1.0
+WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER = "workbench_final_segment_tail_seconds"
 
 
 def _boolean_parameter(value: Any, *, default: bool) -> bool:
@@ -46,6 +48,23 @@ def _uses_exact_timestamp_timing(task: GenerationTask) -> bool:
         isinstance(parameters, dict)
         and parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
     )
+
+
+def workbench_final_segment_tail_seconds(task: GenerationTask) -> float:
+    """Return the frozen parameter-only tail for a new-workbench final segment."""
+
+    try:
+        payload = json.loads(str(getattr(task, "input_payload", "") or ""))
+    except (TypeError, json.JSONDecodeError):
+        return 0.0
+    parameters = payload.get("parameters") if isinstance(payload, dict) else None
+    if not isinstance(parameters, dict):
+        return 0.0
+    try:
+        value = float(parameters.get(WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if value == WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS else 0.0
 
 
 def generation_tail_padding_seconds(task: GenerationTask) -> float:
@@ -121,6 +140,24 @@ class DigitalHumanWorkflow:
         ).strip()
         if requested_instance_type not in {"default", "plus"}:
             raise ValueError("实例类型不合法")
+        timing_mode = (
+            EXACT_TIMESTAMP_TIMING_MODE
+            if parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
+            else None
+        )
+        try:
+            final_segment_tail_seconds = float(
+                parameters.get(WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER) or 0.0
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("新版工作台最终分段收尾时间不合法") from exc
+        if final_segment_tail_seconds not in {
+            0.0,
+            WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS,
+        }:
+            raise ValueError("新版工作台最终分段收尾时间不合法")
+        if final_segment_tail_seconds and timing_mode != EXACT_TIMESTAMP_TIMING_MODE:
+            raise ValueError("最终分段收尾时间只允许用于新版工作台精确时间轴")
         return {
             "prompt": prompt,
             "start_seconds": start_seconds,
@@ -133,11 +170,8 @@ class DigitalHumanWorkflow:
             "seedvr2_enabled": _boolean_parameter(
                 parameters.get("seedvr2_enabled"), default=False
             ),
-            "timing_mode": (
-                EXACT_TIMESTAMP_TIMING_MODE
-                if parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
-                else None
-            ),
+            "timing_mode": timing_mode,
+            WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER: final_segment_tail_seconds,
         }
 
     def serialize_input(
@@ -249,6 +283,14 @@ class DigitalHumanWorkflow:
         if tail_padding > 0:
             values["end_time"] = format_duration_timecode(
                 task.audio_duration_seconds + tail_padding
+            )
+        final_segment_tail = workbench_final_segment_tail_seconds(task)
+        if final_segment_tail > 0:
+            # RunningHub accepts whole-second timecodes.  The new workbench
+            # intentionally extends only the final segment's requested window;
+            # it does not create or upload a padded MiniMax audio replacement.
+            values["end_time"] = format_duration_timecode(
+                task.audio_duration_seconds + final_segment_tail
             )
         nodes = [
             {
