@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.models import (
     GenerationBatch,
+    GenerationBatchItem,
     GenerationTaskEnhancement,
     GenerationTaskEnhancementAttempt,
     RunningHubDualPoolGrant,
@@ -427,6 +428,72 @@ def seedvr2_batch_account_snapshot(batch: GenerationBatch) -> list[int] | None:
     ):
         raise SeedVR2PoolSnapshotConflictError("SeedVR2 执行账号操作快照已损坏")
     return sorted(value)
+
+
+def seedvr2_item_account_snapshot(
+    item: GenerationBatchItem,
+) -> list[int] | None:
+    if item.seedvr2_execution_account_ids_json:
+        try:
+            value = json.loads(item.seedvr2_execution_account_ids_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise SeedVR2PoolSnapshotConflictError(
+                "SeedVR2 行级执行账号快照已损坏"
+            ) from exc
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(type(account_id) is not int or account_id <= 0 for account_id in value)
+            or len(set(value)) != len(value)
+        ):
+            raise SeedVR2PoolSnapshotConflictError(
+                "SeedVR2 行级执行账号快照已损坏"
+            )
+        return sorted(value)
+    return seedvr2_batch_account_snapshot(item.batch)
+
+
+def bind_seedvr2_item_account_snapshot(
+    db: Session,
+    item: GenerationBatchItem,
+    selected_account_ids: list[int],
+    *,
+    allow_replace: bool = False,
+) -> list[int]:
+    canonical_ids = sorted(selected_account_ids)
+    if not canonical_ids:
+        raise SeedVR2PoolSelectionFormatError("至少选择一个 SeedVR2 执行账号")
+    serialized = json.dumps(canonical_ids, ensure_ascii=False, separators=(",", ":"))
+    current = (
+        seedvr2_item_account_snapshot(item)
+        if item.seedvr2_execution_account_ids_json
+        else None
+    )
+    if current == canonical_ids:
+        return canonical_ids
+    if current is not None and not allow_replace:
+        raise SeedVR2PoolSnapshotConflictError(
+            "该画面生成任务的 SeedVR2 执行账号快照已锁定，不能修改"
+        )
+    expected = item.seedvr2_execution_account_ids_json
+    result = db.execute(
+        update(GenerationBatchItem)
+        .where(
+            GenerationBatchItem.id == item.id,
+            GenerationBatchItem.seedvr2_execution_account_ids_json == expected,
+        )
+        .values(seedvr2_execution_account_ids_json=serialized)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 1:
+        item.seedvr2_execution_account_ids_json = serialized
+        return canonical_ids
+    db.refresh(item, attribute_names=["seedvr2_execution_account_ids_json"])
+    if seedvr2_item_account_snapshot(item) != canonical_ids:
+        raise SeedVR2PoolSnapshotConflictError(
+            "该画面生成任务的 SeedVR2 执行账号快照已被其他请求修改"
+        )
+    return canonical_ids
 
 
 def bind_seedvr2_batch_account_snapshot(

@@ -1087,6 +1087,12 @@ class GenerationBatchItem(Base):
     row_number: Mapped[int] = mapped_column(Integer, nullable=False)
     row_key: Mapped[str] = mapped_column(String(100), nullable=False)
     manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+    runninghub_execution_account_ids_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    seedvr2_execution_account_ids_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
     audio_status: Mapped[str] = mapped_column(
         String(30), nullable=False, default="AUDIO_READY"
     )

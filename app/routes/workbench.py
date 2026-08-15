@@ -66,6 +66,8 @@ from app.services.runninghub_pool import (
     RunningHubPoolSnapshotConflictError,
     batch_execution_account_snapshot,
     bind_batch_execution_account_snapshot,
+    bind_item_execution_account_snapshot,
+    item_execution_account_snapshot,
     validate_workbench_execution_account_selection,
     workbench_execution_account_summary,
 )
@@ -82,7 +84,9 @@ from app.services.seedvr2_pool import (
     SeedVR2PoolSelectionUnavailableError,
     SeedVR2PoolSnapshotConflictError,
     bind_seedvr2_batch_account_snapshot,
+    bind_seedvr2_item_account_snapshot,
     seedvr2_batch_account_snapshot,
+    seedvr2_item_account_snapshot,
     seedvr2_workbench_account_summary,
     validate_seedvr2_account_selection,
 )
@@ -535,10 +539,8 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         "error_message": error_message,
         "error_code": audio_task.error_code if audio_failed else None,
         "failure_stage": "audio" if audio_failed else None,
-        "runninghub_execution_account_ids": batch_execution_account_snapshot(
-            item.batch
-        ),
-        "seedvr2_execution_account_ids": seedvr2_batch_account_snapshot(item.batch),
+        "runninghub_execution_account_ids": item_execution_account_snapshot(item),
+        "seedvr2_execution_account_ids": seedvr2_item_account_snapshot(item),
         "execution_mode": item.batch.execution_mode,
         "execution_assignments": _execution_assignments(
             tasks, item.batch.execution_mode
@@ -1260,6 +1262,11 @@ def start_workbench_composition(
     )
     try:
         bind_batch_execution_mode(db, batch, execution_mode)
+        allow_item_account_replace = (
+            task.reviewed_at is None
+            and not item.segments
+            and item.generation_task is None
+        )
         if execution_mode == BATCH_EXECUTION_MODE_DUAL_POOL_V1:
             selected_account_ids = validate_workbench_execution_account_selection(
                 db,
@@ -1271,8 +1278,24 @@ def start_workbench_composition(
             selected_seedvr2_account_ids = validate_seedvr2_account_selection(
                 db, user=user, raw_selection=payload.get("seedvr2_execution_account_ids")
             )
-            bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
-            bind_seedvr2_batch_account_snapshot(db, batch, selected_seedvr2_account_ids)
+            if batch_execution_account_snapshot(batch) is None:
+                bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
+            if seedvr2_batch_account_snapshot(batch) is None:
+                bind_seedvr2_batch_account_snapshot(
+                    db, batch, selected_seedvr2_account_ids
+                )
+            bind_item_execution_account_snapshot(
+                db,
+                item,
+                selected_account_ids,
+                allow_replace=allow_item_account_replace,
+            )
+            bind_seedvr2_item_account_snapshot(
+                db,
+                item,
+                selected_seedvr2_account_ids,
+                allow_replace=allow_item_account_replace,
+            )
         else:
             if "seedvr2_execution_account_ids" in payload:
                 raise RunningHubDualPoolError(
@@ -1285,7 +1308,14 @@ def start_workbench_composition(
                 raw_selection=payload.get("runninghub_execution_account_ids"),
                 allow_non_admin=user_has_dual_pool_entitlement(db, user),
             )
-            bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
+            if batch_execution_account_snapshot(batch) is None:
+                bind_batch_execution_account_snapshot(db, batch, selected_account_ids)
+            bind_item_execution_account_snapshot(
+                db,
+                item,
+                selected_account_ids,
+                allow_replace=allow_item_account_replace,
+            )
     except RunningHubPoolSelectionFormatError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc

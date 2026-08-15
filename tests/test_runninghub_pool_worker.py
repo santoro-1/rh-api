@@ -267,7 +267,7 @@ def test_pool_keeps_digital_human_and_seedvr2_on_one_pipeline_account(monkeypatc
         assert task.enhancement.attempts[0].status == "SUCCESS"
 
 
-def test_explicit_digital_failure_can_reselect_then_locks_seedvr2_account(monkeypatch):
+def test_explicit_digital_failure_retries_on_original_pipeline_account(monkeypatch):
     admin = create_user("pool-reselect-admin", is_admin=True, with_config=False)
     with SessionLocal() as db:
         first = _create_account(
@@ -310,25 +310,56 @@ def test_explicit_digital_failure_can_reselect_then_locks_seedvr2_account(monkey
         task_worker.process_task(db, "pool-reselect-task")
         task = db.get(GenerationTask, "pool-reselect-task")
         assert task.status == TaskStatus.PENDING.value
-        assert task.execution_account_id is None
+        assert task.execution_account_id == first_account_id
         task.runninghub_auto_retry_after = datetime.now(timezone.utc) - timedelta(seconds=1)
         db.commit()
 
         assert task_worker.claim_next_pending_task(db) == "pool-reselect-task"
         task = db.get(GenerationTask, "pool-reselect-task")
-        assert task.execution_account_id in account_ids
-        assert task.execution_account_id != first_account_id
-        second_account_id = task.execution_account_id
+        assert task.execution_account_id == first_account_id
+        retry_account_id = task.execution_account_id
         task_worker.process_task(db, "pool-reselect-task")
         task_worker.process_task(db, "pool-reselect-task")
         db.expire_all()
         task = db.get(GenerationTask, "pool-reselect-task")
         assert [attempt.execution_account_id for attempt in task.runninghub_attempts] == [
             first_account_id,
-            second_account_id,
+            first_account_id,
         ]
         assert task.runninghub_attempts[0].status == "FAILED"
-        assert task.enhancement.execution_account_id == second_account_id
+        assert task.enhancement.execution_account_id == retry_account_id
+
+
+def test_manual_retry_keeps_cloud_accepted_pipeline_account():
+    admin = create_user("pool-manual-retry-admin", is_admin=True, with_config=False)
+    with SessionLocal() as db:
+        account = _create_account(
+            db,
+            admin.id,
+            label="手动重试原账号",
+            api_key="pool-manual-retry-key",
+        )
+        db.commit()
+        account_id = account.id
+    _create_pool_tasks(admin.id, [account_id], ["pool-manual-retry-task"])
+    _prepare_real_pool_task_files("pool-manual-retry-task")
+
+    with SessionLocal() as db:
+        assert task_worker.claim_next_pending_task(db) == "pool-manual-retry-task"
+        task = db.get(GenerationTask, "pool-manual-retry-task")
+        assert task is not None
+        assert task.execution_account_id == account_id
+        task.status = TaskStatus.FAILED.value
+        task.runninghub_task_id = "failed-remote-task"
+        attempt = task.runninghub_attempts[-1]
+        attempt.status = "FAILED"
+        attempt.remote_task_id = task.runninghub_task_id
+
+        prepare_task_retry(task, get_settings())
+
+        assert task.status == TaskStatus.PENDING.value
+        assert task.runninghub_task_id is None
+        assert task.execution_account_id == account_id
 
 
 def test_ambiguous_pool_submit_keeps_account_capacity_and_blocks_retry(monkeypatch):

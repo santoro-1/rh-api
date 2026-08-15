@@ -131,7 +131,7 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('runninghub_credential_balances')"
             )
         }
-    assert revision == "0034_runninghub_credential_balance"
+    assert revision == "0035_workbench_item_execution_pool"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -145,6 +145,8 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
     assert "runninghub_execution_account_ids_json" in batch_columns
     assert "seedvr2_execution_account_ids_json" in batch_columns
     assert "execution_mode" in batch_columns
+    assert "runninghub_execution_account_ids_json" in item_columns
+    assert "seedvr2_execution_account_ids_json" in item_columns
     assert {"user_id", "is_enabled", "allow_non_admin", "note"} <= dual_pool_grant_columns
     assert {
         "api_key_encrypted",
@@ -338,7 +340,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0034_runninghub_credential_balance"
+        assert version == "0035_workbench_item_execution_pool"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -400,7 +402,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0034_runninghub_credential_balance"
+        assert revision == "0035_workbench_item_execution_pool"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -573,7 +575,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0034_runninghub_credential_balance"
+        assert revision == "0035_workbench_item_execution_pool"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -710,7 +712,7 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
             ).fetchall()
         connection.close()
 
-        assert revision == "0034_runninghub_credential_balance"
+        assert revision == "0035_workbench_item_execution_pool"
         assert grant == (7, 1, 1)
         assert batch_snapshot == (None, None)
         assert foreign_key_errors == []
@@ -751,6 +753,60 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
         assert "seedvr2_execution_account_id" not in enhancement_columns
         assert new_table is None
         assert foreign_key_errors_after_downgrade == []
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_item_execution_pool_migration_copies_legacy_batch_snapshots():
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-item-pool-{uuid.uuid4().hex}.db"
+    timestamp = "2026-08-15 09:00:00"
+    try:
+        _run_alembic(database, "0034_runninghub_credential_balance")
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "INSERT INTO users "
+                "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+                "VALUES (9, 'item-pool-user', 'hash', 1, 1, ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO generation_batches "
+                "(id, user_id, name, workflow_type, source_channel, audio_mode, "
+                "review_required, video_review_required, request_key, status, total_items, "
+                "runninghub_execution_account_ids_json, seedvr2_execution_account_ids_json, "
+                "created_at, updated_at) VALUES "
+                "('item-pool-batch', 9, 'existing', 'digital_human', 'new_workbench', "
+                "'upload', 0, 0, 'item-pool-request', 'ACTIVE', 1, '[3,5]', '[7]', ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO generation_batch_items "
+                "(id, batch_id, row_number, row_key, manifest_json, audio_status, status, "
+                "created_at, updated_at) VALUES "
+                "('item-pool-row', 'item-pool-batch', 1, '001', '{}', 'SUCCESS', "
+                "'VIDEO_PENDING', ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.commit()
+        connection.close()
+
+        _run_alembic(database, "head")
+
+        with sqlite3.connect(database) as connection:
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            snapshots = connection.execute(
+                "SELECT runninghub_execution_account_ids_json, "
+                "seedvr2_execution_account_ids_json FROM generation_batch_items "
+                "WHERE id='item-pool-row'"
+            ).fetchone()
+        connection.close()
+
+        assert revision == "0035_workbench_item_execution_pool"
+        assert snapshots == ("[3,5]", "[7]")
     finally:
         database.unlink(missing_ok=True)
 

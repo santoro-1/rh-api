@@ -16,6 +16,7 @@ from app.models import (
     AudioTaskStatus,
     BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
+    GenerationBatchItem,
     GenerationTask,
     MiniMaxConfig,
     MiniMaxVoiceAsset,
@@ -33,7 +34,9 @@ from app.services.runninghub_pool import (
     RunningHubPoolSnapshotConflictError,
     batch_execution_account_snapshot,
     bind_batch_execution_account_snapshot,
+    bind_item_execution_account_snapshot,
     create_execution_account,
+    item_execution_account_snapshot,
     validate_workbench_execution_account_selection,
 )
 from app.services.runninghub_dual_pool import (
@@ -782,6 +785,40 @@ def test_batch_snapshot_compare_and_set_rejects_stale_competing_selection():
         batch = db.get(GenerationBatch, "snapshot-race-batch")
         assert batch is not None
         assert batch_execution_account_snapshot(batch) == [first_id]
+
+
+def test_unpaid_item_can_replace_legacy_batch_account_snapshot():
+    administrator = create_user("item-snapshot-admin", is_admin=True)
+    with SessionLocal() as db:
+        batch = GenerationBatch(
+            id="item-snapshot-batch",
+            user_id=administrator.id,
+            name="行级账号快照",
+            workflow_type="digital_human",
+            source_channel=BATCH_SOURCE_NEW_WORKBENCH,
+            request_key="item-snapshot-request",
+            total_items=1,
+            runninghub_execution_account_ids_json="[3]",
+        )
+        item = GenerationBatchItem(
+            id="item-snapshot-item",
+            batch=batch,
+            row_number=1,
+            row_key="001",
+            manifest_json="{}",
+            runninghub_execution_account_ids_json="[3]",
+        )
+        db.add(batch)
+        db.flush()
+
+        assert bind_item_execution_account_snapshot(
+            db, item, [3, 5], allow_replace=True
+        ) == [3, 5]
+        db.commit()
+        assert item_execution_account_snapshot(item) == [3, 5]
+        assert batch_execution_account_snapshot(batch) == [3]
+        with pytest.raises(RunningHubPoolSnapshotConflictError):
+            bind_item_execution_account_snapshot(db, item, [3])
 
 
 def test_admin_composition_route_revalidates_ids_and_locks_snapshot(client):

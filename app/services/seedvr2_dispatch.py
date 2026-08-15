@@ -13,7 +13,7 @@ from app.models import (
     GenerationTaskEnhancementAttempt,
     SeedVR2ExecutionAccount,
 )
-from app.services.seedvr2_pool import seedvr2_batch_account_snapshot
+from app.services.seedvr2_pool import seedvr2_item_account_snapshot
 
 
 ACTIVE_SEEDVR2_STATUSES = {
@@ -81,7 +81,10 @@ def reserve_seedvr2_account(
     batch = task_batch(task)
     if batch is None or batch.execution_mode != BATCH_EXECUTION_MODE_DUAL_POOL_V1:
         return None
-    snapshot = seedvr2_batch_account_snapshot(batch) or []
+    item = task.batch_item or (task.segment.batch_item if task.segment else None)
+    if item is None:
+        return None
+    snapshot = seedvr2_item_account_snapshot(item) or []
     now = datetime.now(timezone.utc)
     accounts = list(
         db.scalars(

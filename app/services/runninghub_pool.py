@@ -596,6 +596,71 @@ def batch_execution_account_snapshot(
     )
 
 
+def item_execution_account_snapshot(
+    item: GenerationBatchItem,
+) -> list[int] | None:
+    """Return the row-level pool, falling back to the legacy batch snapshot."""
+
+    if item.runninghub_execution_account_ids_json:
+        return _decode_batch_execution_account_snapshot(
+            item.runninghub_execution_account_ids_json
+        )
+    return batch_execution_account_snapshot(item.batch)
+
+
+def bind_item_execution_account_snapshot(
+    db: Session,
+    item: GenerationBatchItem,
+    selected_account_ids: list[int] | None,
+    *,
+    allow_replace: bool = False,
+) -> list[int] | None:
+    """Bind one row's pool; unpaid rows may replace an earlier failed choice."""
+
+    if selected_account_ids is None:
+        if item.runninghub_execution_account_ids_json:
+            raise RunningHubPoolSnapshotConflictError(
+                "该画面生成任务已绑定 RunningHub 执行账号资源池"
+            )
+        return None
+    canonical_ids = sorted(selected_account_ids)
+    serialized = json.dumps(canonical_ids, ensure_ascii=False, separators=(",", ":"))
+    current = (
+        _decode_batch_execution_account_snapshot(
+            item.runninghub_execution_account_ids_json
+        )
+        if item.runninghub_execution_account_ids_json
+        else None
+    )
+    if current == canonical_ids:
+        return canonical_ids
+    if current is not None and not allow_replace:
+        raise RunningHubPoolSnapshotConflictError(
+            "该画面生成任务的 RunningHub 执行账号快照已锁定，不能修改"
+        )
+    expected = item.runninghub_execution_account_ids_json
+    result = db.execute(
+        update(GenerationBatchItem)
+        .where(
+            GenerationBatchItem.id == item.id,
+            GenerationBatchItem.runninghub_execution_account_ids_json
+            == expected,
+        )
+        .values(runninghub_execution_account_ids_json=serialized)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 1:
+        item.runninghub_execution_account_ids_json = serialized
+        return canonical_ids
+    db.refresh(item, attribute_names=["runninghub_execution_account_ids_json"])
+    refreshed = item_execution_account_snapshot(item)
+    if refreshed != canonical_ids:
+        raise RunningHubPoolSnapshotConflictError(
+            "该画面生成任务的 RunningHub 执行账号快照已被其他请求修改"
+        )
+    return canonical_ids
+
+
 def bind_batch_execution_account_snapshot(
     db: Session,
     batch: GenerationBatch,

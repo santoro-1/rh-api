@@ -131,9 +131,9 @@ def prepare_task_retry(
         task.result_path = None
         task.output_metadata = None
         task.status = TaskStatus.PENDING.value
-        if task_uses_execution_pool(task):
-            task.execution_account_id = None
-            task.execution_account = None
+        # A cloud-accepted attempt keeps its recorded pool account.  Safe
+        # pre-submission failures release their reservation before reaching
+        # this path, so only never-started work can be assigned afresh.
         # Retried work returns at the end of the shared per-user FIFO.
         task.created_at = retry_time
 

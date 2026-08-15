@@ -772,7 +772,6 @@ def _handle_remote_status(
         scheduled = _schedule_runninghub_auto_retry(
             task,
             message=failure_message,
-            release_pool_account=task.execution_account_id is not None,
         )
         if scheduled is not None:
             previous_remote_id, delay_seconds = scheduled

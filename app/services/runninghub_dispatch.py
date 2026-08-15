@@ -17,10 +17,10 @@ from app.models import (
 )
 from app.services.runninghub_pool import (
     backfill_runninghub_config_fingerprints,
-    batch_execution_account_snapshot,
     credential_active_count_subquery,
     credential_active_task_count,
     execution_account_configuration_ready,
+    item_execution_account_snapshot,
 )
 
 
@@ -57,12 +57,13 @@ def task_batch(task: GenerationTask) -> GenerationBatch | None:
 def task_uses_execution_pool(task: GenerationTask) -> bool:
     """Return whether this task is inside the strictly gated pool path."""
 
-    batch = task_batch(task)
+    item = task.batch_item or (task.segment.batch_item if task.segment else None)
+    batch = item.batch if item else None
     return bool(
         batch
         and batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
         and task.workflow_type == "digital_human"
-        and batch.runninghub_execution_account_ids_json
+        and item_execution_account_snapshot(item)
     )
 
 
@@ -90,7 +91,9 @@ def reserve_pool_task(
         return None
     batch = task_batch(task)
     assert batch is not None
-    selected_ids = batch_execution_account_snapshot(batch)
+    item = task.batch_item or (task.segment.batch_item if task.segment else None)
+    assert item is not None
+    selected_ids = item_execution_account_snapshot(item)
     if task.execution_account_id is not None:
         # Until per-attempt switching is implemented, an already bound retry
         # stays on its recorded account instead of overwriting history.
