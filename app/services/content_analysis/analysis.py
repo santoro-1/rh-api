@@ -48,7 +48,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v16"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v17"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -175,13 +175,14 @@ def _system_prompt() -> str:
           对 enrichment 或 seam_broll，可按完整句子的生活场景、情绪和叙事功能选择自然陪衬的
           editorial 空镜，即使原文没有出现池名称；这类选择通常返回 priority=1。
         - seam_broll 的 context 可能同时包含上一段结尾和下一段开头；优先匹配下一段，若上一段
-          的具体对象或场景能形成自然转场也可以选择。只要 allowed_concepts 中存在自然、不会误导
-          的连接画面就应返回，只有全部候选都不相关或会误导时才跳过。
+          的具体对象或场景能形成自然转场也可以选择。连接处不是必填项，必须达到明确对象、同一
+          动作、同一具体生活场景或自然且不会误导的编辑型陪衬之一才返回。
         - editorial.meal_daily 只能用于三餐、买菜、做饭、饮食习惯等自然语境，不能因为脚本
           提到蛋白质、营养或某种健康功效，就把普通饭菜画面当成该观点或功效的证据。
-        - 直接、强相关且是当前重点的画面可返回 priority=2；同一场景、动作或类别下
-          广义但自然、不会误导的相关画面可返回 priority=1。只是勉强沾边、容易误解、
-          与下一段无关或仅因为它是唯一可选项时不要返回。没有合格画面就跳过，
+        - 直接、强相关且是当前重点的画面可返回 priority=2；同一具体场景、同一动作或自然的
+          编辑型陪衬可返回 priority=1。只有宽泛大类相同、一个多义词、健康主题相同、勉强沾边、
+          容易误解、与下一段无关或仅因为它是唯一可选项时不要返回。素材画面自带网络文字不是
+          语义拒绝条件。没有合格画面就跳过，
           绝不能为了填满频率或连接处强行填充。
         - 每项仅含 anchor_id、concept_id、priority。anchor 和 concept 必须来自 visual_context，且
           concept 必须属于该 anchor 的 allowed_concepts。

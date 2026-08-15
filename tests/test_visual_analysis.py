@@ -9,7 +9,10 @@ import pytest
 from app.database import SessionLocal
 from app.models import ArkConfig, User, VisualAnalysisCache
 from app.services.security import encrypt_secret
-from app.services.visual_analysis.analysis import analyze_visual_context
+from app.services.visual_analysis.analysis import (
+    _system_prompt,
+    analyze_visual_context,
+)
 from app.services.visual_analysis.contracts import (
     VISUAL_ANALYSIS_REQUEST_SCHEMA_VERSION,
     VISUAL_ANALYSIS_SCHEMA_VERSION,
@@ -127,6 +130,25 @@ def test_result_requires_every_candidate_once_and_allowed_concepts() -> None:
     )
     parsed_review = parse_visual_analysis_result(review, request=request)
     assert parsed_review.decisions[0].decision.value == "REVIEW"
+
+
+def test_seam_candidate_contract_and_prompt_define_a_real_relevance_floor() -> None:
+    request = _request()
+    request["candidates"] = [
+        {
+            **request["candidates"][0],
+            "usage": "seam_broll",
+            "direct_concept_ids": ["food.egg"],
+            "segment_boundary_us": 2_000_000,
+        }
+    ]
+
+    parsed = parse_visual_analysis_request(request)
+    assert parsed.candidates[0].usage == "seam_broll"
+    prompt = _system_prompt()
+    assert "连接处或频率强行选择" in prompt
+    assert "宽泛" in prompt
+    assert "素材画面本身可能带网络文字" in prompt
 
 
 class FakeArkClient:

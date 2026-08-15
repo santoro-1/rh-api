@@ -51,10 +51,17 @@ class VisualUsage(str, Enum):
     PASSING_MENTION = "passing_mention"
     UNCERTAIN = "uncertain"
     NO_ASSET = "no_asset"
+    ACTION = "action"
+    SCENE = "scene"
+    EDITORIAL_CONTEXT = "editorial_context"
 
 
 class VisualReasonCode(str, Enum):
     LITERAL_CONCRETE_OBJECT = "LITERAL_CONCRETE_OBJECT"
+    MATCH_EXACT_OBJECT = "MATCH_EXACT_OBJECT"
+    MATCH_SAME_ACTION = "MATCH_SAME_ACTION"
+    MATCH_SAME_SCENE = "MATCH_SAME_SCENE"
+    MATCH_EDITORIAL_CONTEXT = "MATCH_EDITORIAL_CONTEXT"
     SKIP_IDIOM = "SKIP_IDIOM"
     SKIP_METAPHOR = "SKIP_METAPHOR"
     SKIP_NEGATED = "SKIP_NEGATED"
@@ -62,6 +69,7 @@ class VisualReasonCode(str, Enum):
     SKIP_PASSING_MENTION = "SKIP_PASSING_MENTION"
     SKIP_UNCERTAIN = "SKIP_UNCERTAIN"
     SKIP_NO_ASSET = "SKIP_NO_ASSET"
+    SKIP_UNRELATED = "SKIP_UNRELATED"
 
 
 class AllowedConcept(ContractModel):
@@ -75,6 +83,9 @@ class VisualCandidate(ContractModel):
     char_start: StrictInt = Field(ge=0)
     char_end: StrictInt = Field(gt=0)
     allowed_concepts: list[AllowedConcept] = Field(min_length=1, max_length=8)
+    usage: Literal["explicit", "enrichment", "seam_broll"] = "explicit"
+    direct_concept_ids: list[StrictStr] = Field(default_factory=list, max_length=8)
+    segment_boundary_us: StrictInt | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_span_and_concepts(self) -> "VisualCandidate":
@@ -83,6 +94,12 @@ class VisualCandidate(ContractModel):
         concept_ids = [item.concept_id for item in self.allowed_concepts]
         if len(concept_ids) != len(set(concept_ids)):
             raise ValueError("allowed concept ids must be unique")
+        if len(self.direct_concept_ids) != len(set(self.direct_concept_ids)):
+            raise ValueError("direct concept ids must be unique")
+        if not set(self.direct_concept_ids).issubset(concept_ids):
+            raise ValueError("direct concept ids must belong to allowed concepts")
+        if self.usage == "seam_broll" and self.segment_boundary_us is None:
+            raise ValueError("seam_broll candidate requires segment_boundary_us")
         return self
 
 
@@ -109,6 +126,7 @@ class VisualAnalysisRequest(ContractModel):
         if self.script_sha256 != actual_hash:
             raise ValueError("script_sha256 does not match original_script")
         previous_end = -1
+        previous_usage = ""
         for candidate in self.candidates:
             if candidate.char_end > len(self.original_script):
                 raise ValueError("candidate span exceeds original_script")
@@ -117,9 +135,12 @@ class VisualAnalysisRequest(ContractModel):
                 != candidate.text
             ):
                 raise ValueError("candidate text does not match original_script span")
-            if candidate.char_start < previous_end:
+            if candidate.char_start < previous_end and not (
+                previous_usage == "seam_broll" and candidate.usage == "seam_broll"
+            ):
                 raise ValueError("candidates must be ordered and non-overlapping")
             previous_end = candidate.char_end
+            previous_usage = candidate.usage
         return self
 
 

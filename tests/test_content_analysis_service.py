@@ -182,7 +182,9 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     assert "anchor.usage=seam_broll" in system_prompt
     assert "priority=1" in system_prompt
     assert "concept_id 以 editorial. 开头的是编辑型空镜池" in system_prompt
-    assert "只有全部候选都不相关或会误导时才跳过" in system_prompt
+    assert "连接处不是必填项" in system_prompt
+    assert "只有宽泛大类相同、一个多义词、健康主题相同" in system_prompt
+    assert "素材画面自带网络文字不是" in system_prompt
     assert "editorial.meal_daily" in system_prompt
     assert "绝不能为了填满频率或连接处强行填充" in system_prompt
     assert "不返回时间戳" in system_prompt

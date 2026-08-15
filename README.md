@@ -399,7 +399,7 @@ RunningHub 已明确返回 `FAILED` 的视频任务默认自动重试 3 次，�
 
 ## 工作台语义视觉图片与视频
 
-云端暂时保留兼容用的独立 `POST /api/workbench/visual-analysis`。工作台只提交精确脚本、字符候选和
+云端保留独立 `POST /api/workbench/visual-analysis`。工作台只提交精确脚本、字符候选和
 允许的概念；云端使用用户级 Ark 配置做语境消歧，并按用户、脚本、目录、候选集合、模型、
 Prompt 和契约版本独立缓存。接口不会接收本地素材路径或音视频时间，失败也不会改变声音、
 字幕、BGM、RunningHub 或已有视频。请求契约为 `jyd.visual-analysis.request.v1`，响应契约为
@@ -409,5 +409,6 @@ Prompt 和契约版本独立缓存。接口不会接收本地素材路径或音�
 产生 `visual_plan`；工作台项目主流程已经完成阶段 2 切换，原视觉按钮也复用统一协调器。
 visual context 输入锚点包含短语上下文和 `explicit/enrichment/seam_broll` 用途，但模型输出仍
 严格只有 `anchor_id/concept_id/priority`；直接强相关可用 priority 2，同场景、动作或类别下
-自然且不误导的宽相关可用 priority 1，勉强相关或无关候选必须跳过。独立视觉
-接口暂不删除，仅作为迁移期兼容入口。
+自然且不误导的宽相关可用 priority 1，勉强相关或无关候选必须跳过。数字人真实分段在首轮
+分析后才生成，因此工作台 4B 会自动用独立视觉接口补一次仅含 `seam_broll` 的轻量分析；该调用
+按候选摘要幂等，只合并接缝结果，失败或没有合格素材时保留原溶解并继续生成。
