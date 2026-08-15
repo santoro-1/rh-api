@@ -48,7 +48,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v17"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v18"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -149,7 +149,8 @@ def _system_prompt() -> str:
         输入：
         - original_script：完整原文，只用于理解。
         - boundary_indexed_script：只在安全位置插入 ⟦B编号⟧；标记不是原文。
-        - visual_context：包含可选视觉 concept 和 anchor；不含时间、文件或媒体轨道。
+        - visual_context：包含可选视觉 concept 和 VA 锚点；不含时间、文件或媒体轨道。
+          VA 编号只属于视觉计划，绝不能把字幕的 B 编号当作视觉 anchor_id。
 
         music_intent：按整篇内容判断，不返回曲名、文件名或路径。
 
@@ -633,6 +634,7 @@ def _parse_visual_plan_branch(
             parse_visual_plan_payload(
                 payload.get("visual_plan"),
                 visual_context=visual_context,
+                drop_invalid_references=True,
             )
         )
     except ContentAnalysisContractError as exc:

@@ -250,7 +250,7 @@ def test_schema_is_versioned_strict_and_provider_neutral() -> None:
 def test_provider_schema_returns_only_compact_three_branch_decisions() -> None:
     schema = content_analysis_provider_json_schema()
 
-    assert schema["$id"].endswith("jyd.content-analysis.provider.v4.json")
+    assert schema["$id"].endswith("jyd.content-analysis.provider.v5.json")
     assert schema["additionalProperties"] is False
     assert schema["required"] == [
         "music_intent",
@@ -264,6 +264,7 @@ def test_provider_schema_returns_only_compact_three_branch_decisions() -> None:
     assert '"text"' not in serialized
     assert "timestamp" not in serialized
     assert "asset" not in serialized
+    assert "VA[0-9]+" in serialized
 
 
 def test_boundary_indexed_script_withholds_punctuation_and_ascii_word_breaks() -> None:

@@ -518,9 +518,12 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - 权威代码位于 `app/services/content_analysis/`，契约版本为
   `jyd.content-analysis.v1`。
 - 对工作台公开的响应包含 `music_intent`、`subtitle_units`、`visual_plan` 和唯一两行 `title`；
-  内部 Ark 响应使用紧凑的 `jyd.content-analysis.provider.v4`，一次返回音乐意图、字幕断点编号、
+  内部 Ark 响应使用紧凑的 `jyd.content-analysis.provider.v5`，一次返回音乐意图、字幕断点编号、
   选中的 `anchor_id`/`concept_id`/`priority` 与标题。服务端按原脚本本地切片，并校验视觉项只能
   引用请求中提供的候选。模型不返回视觉时间、素材身份或呈现参数。
+  视觉锚点使用独立 `VA` 前缀，避免与字幕候选的 `B` 前缀混淆；旧工作台提交的 `B` 视觉锚点
+  会在调用模型前规范化为 `VA`。Provider 偶发返回未提供或越权的单个视觉项时只丢弃该项，
+  其余合法视觉选择继续生效。
 - `subtitle_units` 使用 Python Unicode code point 的左闭右开字符位置，必须首尾相接、
   完整覆盖原始脚本，且每段满足 `original_script[start:end] == text`。
 - 模型不得返回字幕时间戳或本地音乐文件身份。MiniMax 时间轴映射、真实字体测宽和本地
@@ -553,10 +556,10 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - `POST /api/workbench/content-analysis` 使用现有工作台短期令牌，接收精确原始脚本、可选
   `force_refresh` 和可选 `visual_context`；后者只含 catalog 版本、概念说明、原文字符锚点、
   短语上下文及 `explicit/enrichment/seam_broll` 用途，禁止素材路径、时间戳及剪映轨道信息。
-  浏览器和工作台不会获得 Ark Key。Prompt v17 要求普通空镜和连接处空镜都按当前/下一段语境
+  浏览器和工作台不会获得 Ark Key。Prompt v18 要求普通空镜和连接处空镜都按当前/下一段语境
   判断：直接强相关返回 priority 2，自然且不误导的宽相关可返回 priority 1，唯一可选、勉强相关
   或无关候选都必须跳过，不能为了凑频率强行填充；同一次调用增加 `title` 第四字段，第一行最多 5 字、
-  第二行最多 5 字，禁止空白、重复、空洞标题党和脚本外事实。Prompt v17 同时收紧弱匹配：
+  第二行最多 5 字，禁止空白、重复、空洞标题党和脚本外事实。Prompt v18 同时收紧弱匹配：
   只有宽泛大类相同、多义词碰巧相同、同属健康主题或唯一可选项不能返回；素材自带网络文字
   不是语义拒绝条件。标题继续独立
   满足法律、网络生态、隐私、未成年人、低俗、伪科学、医疗科普和私域引流约束；低风险体重

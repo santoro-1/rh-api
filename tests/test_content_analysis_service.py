@@ -463,7 +463,7 @@ def test_one_call_visual_plan_uses_only_offered_local_candidates() -> None:
     }
     payload = _provider_payload(prefer_after=[4])
     payload["visual_plan"] = [
-        {"anchor_id": "B2", "concept_id": "exercise.walk", "priority": 1}
+        {"anchor_id": "VA2", "concept_id": "exercise.walk", "priority": 1}
     ]
     fake = FakeArkClient([_ark_response(payload)])
 
@@ -478,7 +478,47 @@ def test_one_call_visual_plan_uses_only_offered_local_candidates() -> None:
     assert result["visual_catalog_version"] == "food-motion-v1"
     assert result["visual_plan"] == payload["visual_plan"]
     request_payload = json.loads(fake.calls[0]["messages"][1]["content"])
-    assert request_payload["visual_context"] == visual_context
+    assert request_payload["visual_context"] == {
+        **visual_context,
+        "anchors": [{**visual_context["anchors"][0], "anchor_id": "VA2"}],
+    }
+
+
+def test_one_invalid_visual_reference_is_dropped_without_failing_valid_choices() -> None:
+    user_id = _configured_user("visual-plan-partial-repair")
+    visual_context = {
+        "catalog_version": "food-motion-v1",
+        "concepts": [
+            {"concept_id": "exercise.walk", "description": "步行动作"},
+        ],
+        "anchors": [
+            {
+                "anchor_id": "VA2",
+                "char_start": 2,
+                "char_end": 4,
+                "text": "通过",
+                "context": "通过八十四天",
+                "usage": "explicit",
+                "allowed_concepts": ["exercise.walk"],
+            }
+        ],
+    }
+    payload = _provider_payload(prefer_after=[4])
+    payload["visual_plan"] = [
+        {"anchor_id": "VA2", "concept_id": "food.not-offered", "priority": 1},
+        {"anchor_id": "VA99", "concept_id": "exercise.walk", "priority": 1},
+        {"anchor_id": "VA2", "concept_id": "exercise.walk", "priority": 1},
+    ]
+    fake = FakeArkClient([_ark_response(payload)])
+
+    result = _analyze(
+        user_id,
+        fake,
+        visual_context_payload=visual_context,
+    )
+
+    assert result["visual_analysis_status"] == "SUCCESS"
+    assert result["visual_plan"] == [payload["visual_plan"][2]]
 
 
 def test_compact_provider_breaks_expand_to_public_subtitle_units() -> None:
