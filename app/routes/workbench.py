@@ -28,6 +28,7 @@ from app.models import (
     VoiceCreationTask,
 )
 from app.routes.dependencies import check_rate_limit
+from app.services.audio import ensure_generated_speech_mastered
 from app.services.audio_review import (
     AudioReviewError,
     approve_item_audio,
@@ -1173,6 +1174,7 @@ def download_workbench_audio(
     path = safe_relative_path(item.audio_task.output_path, get_settings().data_dir)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="生成音频文件不存在")
+    ensure_generated_speech_mastered(path)
     return FileResponse(path, media_type="audio/mpeg", filename=f"{item.row_key}.mp3")
 
 

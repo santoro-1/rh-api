@@ -83,6 +83,12 @@ def _write_audio_segment(source, target, **kwargs):
     target.write_bytes(b"ID3segment")
 
 
+def _copy_mastered_speech(source, target, **kwargs):
+    del kwargs
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(source.read_bytes())
+
+
 def test_local_segment_plan_preserves_script_and_hard_limit():
     script = "".join(
         [
@@ -233,6 +239,9 @@ def test_ltx_full_flow_calls_tts_once_and_creates_sequential_children(
     )
     video_cuts: list[tuple[float, float]] = []
     monkeypatch.setattr(audio_worker, "_make_client", lambda task: fake_client)
+    monkeypatch.setattr(
+        audio_worker, "master_generated_speech", _copy_mastered_speech
+    )
     monkeypatch.setattr(
         audio_worker,
         "inspect_audio_duration",

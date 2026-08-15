@@ -77,6 +77,12 @@ def _write_fake_segment(source, target, **kwargs):
     target.write_bytes(b"ID3segment")
 
 
+def _copy_mastered_speech(source, target, **kwargs):
+    del kwargs
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(source.read_bytes())
+
+
 def test_audio_worker_activates_voices_and_hands_off_to_video_queue(
     client, monkeypatch
 ):
@@ -155,6 +161,9 @@ def test_audio_worker_activates_voices_and_hands_off_to_video_queue(
 
     fake_client = FakeMiniMaxClient()
     monkeypatch.setattr(audio_worker, "_make_client", lambda task: fake_client)
+    monkeypatch.setattr(
+        audio_worker, "master_generated_speech", _copy_mastered_speech
+    )
     assert audio_worker.run_once() == 1
     with SessionLocal() as db:
         submitted = db.query(AudioGenerationTask).one()
@@ -270,6 +279,9 @@ def test_optional_audio_review_can_regenerate_then_approve(
 
     fake_client = FakeMiniMaxClient()
     monkeypatch.setattr(audio_worker, "_make_client", lambda task: fake_client)
+    monkeypatch.setattr(
+        audio_worker, "master_generated_speech", _copy_mastered_speech
+    )
     assert audio_worker.run_once() == 1
     assert audio_worker.run_once() == 1
     assert audio_worker.run_once() == 1

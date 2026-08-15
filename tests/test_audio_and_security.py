@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import wave
 
 import pytest
@@ -194,3 +195,95 @@ def test_audio_duration_falls_back_to_mutagen_when_ffprobe_fails(monkeypatch):
 
     monkeypatch.setattr(audio.subprocess, "run", lambda *args, **kwargs: FailedProcess())
     assert audio.inspect_audio_duration(sample) == pytest.approx(2.0)
+
+
+def test_generated_speech_mastering_adds_three_db_and_caps_peak(
+    monkeypatch,
+):
+    working_dir = get_settings().data_dir / "speech-mastering-success"
+    working_dir.mkdir(parents=True, exist_ok=True)
+    source = working_dir / "provider.mp3"
+    target = working_dir / "generated.mp3"
+    source.write_bytes(b"provider-audio")
+    commands = []
+
+    class SuccessfulProcess:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"mastered-audio")
+        return SuccessfulProcess()
+
+    monkeypatch.setattr(audio.subprocess, "run", fake_run)
+    monkeypatch.setattr(audio, "inspect_audio_duration", lambda path: 12.0)
+
+    audio.master_generated_speech(source, target)
+
+    assert target.read_bytes() == b"mastered-audio"
+    audio_filter = commands[0][commands[0].index("-af") + 1]
+    assert "volume=3.000dB" in audio_filter
+    assert "alimiter=limit=0.891250938" in audio_filter
+    assert "level=false" in audio_filter
+    assert "latency=true" in audio_filter
+    assert list(working_dir.glob(".*.mastering-*.mp3")) == []
+
+
+def test_generated_speech_mastering_preserves_previous_file_on_failure(
+    monkeypatch,
+):
+    working_dir = get_settings().data_dir / "speech-mastering-failure"
+    working_dir.mkdir(parents=True, exist_ok=True)
+    source = working_dir / "provider.mp3"
+    target = working_dir / "generated.mp3"
+    source.write_bytes(b"provider-audio")
+    target.write_bytes(b"previous-good-audio")
+
+    class FailedProcess:
+        returncode = 1
+        stderr = "decode failed"
+        stdout = ""
+
+    monkeypatch.setattr(
+        audio.subprocess, "run", lambda *args, **kwargs: FailedProcess()
+    )
+
+    with pytest.raises(audio.AudioInspectionError, match="提升口播音量失败"):
+        audio.master_generated_speech(source, target)
+
+    assert target.read_bytes() == b"previous-good-audio"
+    assert list(working_dir.glob(".*.mastering-*.mp3")) == []
+
+
+def test_legacy_generated_speech_is_mastered_only_once(monkeypatch):
+    working_dir = get_settings().data_dir / "speech-mastering-legacy"
+    working_dir.mkdir(parents=True, exist_ok=True)
+    target = working_dir / "generated.mp3"
+    target.write_bytes(b"legacy-audio")
+    commands = []
+
+    class SuccessfulProcess:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"mastered-legacy-audio")
+        return SuccessfulProcess()
+
+    monkeypatch.setattr(audio.subprocess, "run", fake_run)
+    monkeypatch.setattr(audio, "inspect_audio_duration", lambda path: 12.0)
+
+    assert audio.ensure_generated_speech_mastered(target) is True
+    assert audio.ensure_generated_speech_mastered(target) is False
+    assert target.read_bytes() == b"mastered-legacy-audio"
+    assert len(commands) == 1
+
+    target.write_bytes(b"replacement-audio")
+    assert audio.ensure_generated_speech_mastered(target) is True
+    assert len(commands) == 2

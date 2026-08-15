@@ -31,13 +31,14 @@ from app.routes.dependencies import (
     get_current_user,
     get_page_user,
 )
-from app.services.batch_assets import StagedAssetError, stage_asset
+from app.services.audio import ensure_generated_speech_mastered
 from app.services.audio_review import (
     AudioReviewError,
     approve_all_audio as approve_all_review_audio,
     approve_item_audio,
     regenerate_item_audio,
 )
+from app.services.batch_assets import StagedAssetError, stage_asset
 from app.services.batch_generation import (
     BatchValidationError,
     create_batch,
@@ -938,6 +939,7 @@ def download_full_audio(
     )
     if not path.is_file():
         raise HTTPException(status_code=404, detail="完整语音文件不存在")
+    ensure_generated_speech_mastered(path)
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     return FileResponse(
         path,
@@ -980,6 +982,7 @@ def download_audio_attempt(
     path = safe_relative_path(attempt.output_path, get_settings().data_dir)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="语音版本文件不存在")
+    ensure_generated_speech_mastered(path)
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     return FileResponse(path, media_type=media_type)
 

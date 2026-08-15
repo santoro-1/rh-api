@@ -24,7 +24,12 @@ from app.models import (
     User,
     VoiceAssetStatus,
 )
-from app.services.audio import format_duration_timecode, inspect_audio_duration
+from app.services.audio import (
+    format_duration_timecode,
+    inspect_audio_duration,
+    mark_generated_speech_mastered,
+    master_generated_speech,
+)
 from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import (
     configure_logging,
@@ -376,9 +381,15 @@ def _write_audio(task: AudioGenerationTask, audio_bytes: bytes) -> Path:
         )
     )
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".part")
-    temporary.write_bytes(audio_bytes)
-    os.replace(temporary, target)
+    provider_output = target.with_name(
+        f".{target.stem}.provider-{uuid.uuid4().hex}{target.suffix}"
+    )
+    try:
+        provider_output.write_bytes(audio_bytes)
+        master_generated_speech(provider_output, target)
+        mark_generated_speech_mastered(target)
+    finally:
+        provider_output.unlink(missing_ok=True)
     return target
 
 

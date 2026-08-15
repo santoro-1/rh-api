@@ -572,10 +572,16 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
     assert row["status"] == "AWAITING_REVIEW"
     assert row["audio_ready"] is True
     assert row["captions"]["source"] == "minimax_timestamps"
+    mastered_paths = []
+    monkeypatch.setattr(
+        "app.routes.workbench.ensure_generated_speech_mastered",
+        lambda path: mastered_paths.append(path) or True,
+    )
     audio = client.get(
         f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/audio",
         headers={"Authorization": f"Bearer {token}"},
     )
+    assert mastered_paths == [output]
     assert audio.status_code == 200
     assert audio.content == b"ID3generated-audio"
 
