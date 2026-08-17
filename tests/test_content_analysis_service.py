@@ -182,6 +182,8 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     assert "anchor.usage=seam_broll" in system_prompt
     assert "priority=1" in system_prompt
     assert "concept_id 以 editorial. 开头的是编辑型空镜池" in system_prompt
+    assert "editorial 空镜只允许用于 seam_broll，不能用于 enrichment" in system_prompt
+    assert "合格的 editorial 接缝必须返回 priority=2" in system_prompt
     assert "连接处不是必填项" in system_prompt
     assert "只有宽泛大类相同、一个多义词、健康主题相同" in system_prompt
     assert "素材画面自带网络文字不是" in system_prompt

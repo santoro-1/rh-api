@@ -169,19 +169,21 @@ def _system_prompt() -> str:
         - 只返回明确值得考虑的画面；未返回即跳过，允许返回空数组。
         - anchor.usage=explicit 表示原文直接命中，context 用于识别复合词和否定语境；必须按完整
           context 判断，不能把“鸡蛋糕”当成“鸡蛋”，也不能把宽泛词替换成错误的具体素材。
-        - anchor.usage=enrichment 表示周期性空镜尝试；anchor.usage=seam_broll 表示分段
-          连接处的空镜尝试，context 以下一段开头语义为准。这两种 usage 都不表示
-          allowed_concepts 已自动匹配，必须再判断 concept 与 context 的关联。
+        - anchor.usage=enrichment 表示周期性空镜尝试，只能选择 context 中直接出现的具体对象、
+          动作或场景；anchor.usage=seam_broll 表示分段连接处约 1 秒的短空镜尝试，context 以下一段
+          开头语义为主。这两种 usage 都不表示 allowed_concepts 已自动匹配，必须再判断 concept 与
+          context 的关联。
         - concept_id 以 editorial. 开头的是编辑型空镜池，不表示脚本字面提到了具体对象。
-          对 enrichment 或 seam_broll，可按完整句子的生活场景、情绪和叙事功能选择自然陪衬的
-          editorial 空镜，即使原文没有出现池名称；这类选择通常返回 priority=1。
+          editorial 空镜只允许用于 seam_broll，不能用于 enrichment。只有接缝前后出现与素材一致的
+          具体对象、动作或明确生活场景，并且不会误导时才可选择；仅有健康、坚持、变好、生活、
+          心态或相近情绪不算高相关。合格的 editorial 接缝必须返回 priority=2，否则不要返回。
         - seam_broll 的 context 可能同时包含上一段结尾和下一段开头；优先匹配下一段，若上一段
           的具体对象或场景能形成自然转场也可以选择。连接处不是必填项，必须达到明确对象、同一
           动作、同一具体生活场景或自然且不会误导的编辑型陪衬之一才返回。
         - editorial.meal_daily 只能用于三餐、买菜、做饭、饮食习惯等自然语境，不能因为脚本
           提到蛋白质、营养或某种健康功效，就把普通饭菜画面当成该观点或功效的证据。
-        - 直接、强相关且是当前重点的画面可返回 priority=2；同一具体场景、同一动作或自然的
-          编辑型陪衬可返回 priority=1。只有宽泛大类相同、一个多义词、健康主题相同、勉强沾边、
+        - 直接、强相关且是当前重点的画面可返回 priority=2；普通明确对象可返回 priority=1，
+          但 enrichment、seam_broll 只有 priority=2 才会自动使用。只有宽泛大类相同、一个多义词、健康主题相同、勉强沾边、
           容易误解、与下一段无关或仅因为它是唯一可选项时不要返回。素材画面自带网络文字不是
           语义拒绝条件。没有合格画面就跳过，
           绝不能为了填满频率或连接处强行填充。
