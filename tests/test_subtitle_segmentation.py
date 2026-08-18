@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+from app.services.content_analysis.subtitle_segmentation import (
+    SUBTITLE_ANALYSIS_PROMPT_VERSION,
+    build_subtitle_messages,
+    deterministic_subtitle_units,
+    effective_character_count,
+    subtitle_system_prompt,
+    validate_subtitle_split,
+)
+
+
+def test_v20_prompt_keeps_the_complete_hard_requirements() -> None:
+    prompt = subtitle_system_prompt()
+
+    assert SUBTITLE_ANALYSIS_PROMPT_VERSION == "jyd.subtitle-analysis.prompt.v20"
+    assert "唯一目的" in prompt
+    assert "必须100%原样保留" in prompt
+    assert "新增逗号数量必须最少" in prompt
+    assert "10个有效字符是上限，不是建议长度" in prompt
+    assert "原文完全不变 ＞ 每段不超过10个有效字符" in prompt
+    assert "只要仍有任何一段超过10个有效字符" in prompt
+    assert "每个阿拉伯数字计1个有效字符" in prompt
+    assert "每个英文字母计1个有效字符" in prompt
+    assert "只输出切分后的完整文案" in prompt
+
+    messages = build_subtitle_messages("每天喝2000ml水")
+    assert len(messages) == 2
+    assert '"每天喝2000ml水"' in messages[1]["content"]
+
+
+def test_effective_count_includes_han_digits_and_english() -> None:
+    assert effective_character_count("每天喝2000ml水") == 10
+    assert effective_character_count("3.5kg，OK！") == 6
+
+
+def test_validator_rejects_overflow_and_source_edits() -> None:
+    source = "减肥成功的人特别不想跟你分享的"
+
+    overflow = validate_subtitle_split(source, source)
+    changed = validate_subtitle_split(source, "控重成功的人特别，不想跟你分享的")
+
+    assert overflow.valid is False
+    assert "需要最少1个新增逗号" in overflow.error
+    assert changed.valid is False
+    assert "修改、删除、移动" in changed.error
+
+
+def test_validator_accepts_minimal_safe_split_and_rejects_short_span_split() -> None:
+    source = "减肥成功的人特别不想跟你分享的"
+    accepted = validate_subtitle_split(source, "减肥成功的人特别，不想跟你分享的")
+    unnecessary = validate_subtitle_split("每天喝2000ml水", "每天喝，2000ml水")
+
+    assert accepted.valid is True
+    assert accepted.inserted_positions == (8,)
+    assert unnecessary.valid is False
+    assert "不允许新增逗号" in unnecessary.error
+
+
+def test_deterministic_fallback_uses_minimal_safe_boundaries() -> None:
+    source = "但是一定要有三次轻松的活动，"
+
+    units = deterministic_subtitle_units(source)
+
+    assert "".join(unit.text for unit in units) == source
+    assert [unit.text for unit in units] == ["但是一定要有", "三次轻松的活动，"]
+    assert all(unit.break_after.value == "prefer" for unit in units)
+
+
+def test_august_14_row_13_overflows_all_receive_a_safe_break() -> None:
+    sources = [
+        "减肥成功的人特别不想跟你分享的",
+        "每天早晨必须吃一个鸡蛋，",
+        "但是一定要有三次轻松的活动，",
+        "记住每天喝水是两千毫升，",
+        "想吃一点甜的就吃个苹果，",
+    ]
+
+    for source in sources:
+        units = deterministic_subtitle_units(source)
+        assert "".join(unit.text for unit in units) == source
+        assert len(units) >= 2
+        assert all(
+            effective_character_count(unit.text) <= 10
+            for unit in units
+        )

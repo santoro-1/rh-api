@@ -8,6 +8,7 @@ param(
     [string]$BackupDir = "/var/backups/runninghub-video",
     [string]$LinuxUser = "rhvideo",
     [string]$Domain = "video.lanyingjk01.com",
+    [ValidateSet("Full", "Code")][string]$BackupMode = "Full",
     [ValidateRange(5, 720)][int]$DrainTimeoutMinutes = 120
 )
 
@@ -434,16 +435,49 @@ fi
         }
     }
 
+    if ($BackupMode -eq "Code") {
+        $changedFilesText = Invoke-LocalText -Description "检查代码更新范围" -Command {
+            git -c core.quotePath=false diff --name-only $deployedRevision $commit
+        }
+        $blockedCodeOnlyFiles = @()
+        foreach ($relativePath in ($changedFilesText -split "`n")) {
+            if (-not $relativePath) {
+                continue
+            }
+            $normalizedPath = $relativePath.Replace("\", "/")
+            if (
+                $normalizedPath -match "^(alembic/|data/|tools/|deploy/nginx/|deploy/scripts/|deploy/systemd/)" -or
+                $normalizedPath -match "^requirements([^/]*)\.txt$" -or
+                $normalizedPath -match "^(alembic\.ini|pyproject\.toml|uv\.lock|\.env.*)$"
+            ) {
+                $blockedCodeOnlyFiles += $relativePath
+            }
+        }
+        if ($blockedCodeOnlyFiles.Count -gt 0) {
+            throw "代码更新包含依赖、迁移、数据或服务器配置变更，必须改用 deploy-update.ps1：`n$($blockedCodeOnlyFiles -join "`n")"
+        }
+        Write-Host "代码更新范围检查通过：不会创建 uploads/outputs 全量备份。" -ForegroundColor Green
+    }
+
     if (-not $Deploy) {
         Write-Host ""
         Write-Host "只读检查通过；没有修改服务器。" -ForegroundColor Green
         Write-Host "确认要部署时重新运行："
-        Write-Host "  powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy"
+        if ($BackupMode -eq "Code") {
+            Write-Host "  powershell -ExecutionPolicy Bypass -File .\deploy\deploy-code-update.ps1 -Deploy"
+        } else {
+            Write-Host "  powershell -ExecutionPolicy Bypass -File .\deploy\deploy-update.ps1 -Deploy"
+        }
         return
     }
 
+    $backupDescription = if ($BackupMode -eq "Code") {
+        "代码回滚包和临时数据库回滚点（不备份 uploads/outputs）"
+    } else {
+        "完整生产数据备份和代码回滚包"
+    }
     Confirm-Exact `
-        -Prompt "下一步会创建本项目备份并上传 commit $shortCommit；不会安装服务器 ASR，也不会停止服务。" `
+        -Prompt "下一步会创建$backupDescription并上传 commit $shortCommit；不会安装服务器 ASR，也不会停止服务。" `
         -Expected "BACKUP $shortCommit"
 
     Write-Step "打包当前 Git commit（不包含 .env、数据库、上传、输出和日志）"
@@ -465,13 +499,18 @@ fi
     $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     $script:RemoteTemp = "/var/tmp/runninghub-video-$shortCommit-$timestamp"
 
-    Write-Step "创建本项目独立备份（服务器写操作 1）"
+    Write-Step "创建本项目$backupDescription（服务器写操作 1）"
+    $fullDataBackupCommand = if ($BackupMode -eq "Full") {
+        "sudo -u '$LinuxUser' /bin/bash '$AppDir/deploy/scripts/backup.sh'"
+    } else {
+        "echo '代码更新模式：跳过 uploads/outputs 全量备份；停止服务后仍会创建 SQLite 临时回滚点。'"
+    }
     $backupScript = @"
 set -euo pipefail
 umask 077
 install -d -m 700 -o '$LinuxUser' -g '$LinuxUser' '$script:RemoteTemp'
 install -d -m 700 -o '$LinuxUser' -g '$LinuxUser' '$BackupDir'
-sudo -u '$LinuxUser' /bin/bash '$AppDir/deploy/scripts/backup.sh'
+$fullDataBackupCommand
 code_backup='$BackupDir/runninghub-video-code-pre-$shortCommit-$timestamp.tar.gz'
 tar -C '$AppDir' \
   --exclude='./.env' \
@@ -734,7 +773,11 @@ esac
 
     Write-Host ""
     Write-Host "部署完成：$commit" -ForegroundColor Green
-    Write-Host "数据备份和代码备份保留在：$BackupDir"
+    if ($BackupMode -eq "Code") {
+        Write-Host "代码回滚备份保留在：$BackupDir；本次未复制 uploads/outputs。"
+    } else {
+        Write-Host "数据备份和代码备份保留在：$BackupDir"
+    }
     Write-Host "Nginx 配置、证书和其他项目均未修改。"
 }
 finally {

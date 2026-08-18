@@ -44,6 +44,9 @@ from app.services.content_analysis.contracts import (
     visual_context_sha256,
     validate_subtitle_units,
 )
+from app.services.content_analysis.subtitle_segmentation import (
+    SUBTITLE_ANALYSIS_PROMPT_VERSION,
+)
 from app.services.content_analysis.taxonomy import (
     MUSIC_MATCHER_HARD_FILTERS_V1,
     MUSIC_MATCHER_VERSION,
@@ -65,6 +68,7 @@ __all__ = [
     "CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION",
     "ARK_DEFAULT_BASE_URL",
     "CONTENT_ANALYSIS_PROMPT_VERSION",
+    "SUBTITLE_ANALYSIS_PROMPT_VERSION",
     "ArkConcurrencyLimiter",
     "ContentAnalysisInputError",
     "ContentAnalysisUnavailable",

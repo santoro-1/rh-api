@@ -49,6 +49,24 @@ systemd 服务、Nginx 配置和证书，不与服务器上的其他项目共用
 仓库，因此脚本会在本地把已经合并到 `main` 的准确 commit 打包后，通过 SSH
 上传到本项目独立的临时目录。
 
+### 普通代码更新（推荐日常使用）
+
+只修改 `app/` 业务代码、页面、Prompt、测试或文档时，使用
+[`deploy-code-update.ps1`](./deploy-code-update.ps1)。它复用完整部署脚本的测试、版本校验、
+排空、临时 SQLite 回滚点、代码回滚和健康检查，但不会复制 `uploads/outputs`，因此不会产生
+数十 GB 的备份峰值：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\deploy-code-update.ps1
+powershell -ExecutionPolicy Bypass -File .\deploy\deploy-code-update.ps1 -Deploy
+```
+
+代码更新模式发现 `requirements*.txt`、`pyproject.toml`、`uv.lock`、`alembic/`、`data/`、
+`tools/`、`deploy/scripts/`、`deploy/systemd/`、`deploy/nginx/` 或 `.env*` 发生变化时会拒绝继续；
+这类更新必须使用下方的完整部署脚本。
+
+### 完整更新
+
 先更新本地 `main`：
 
 ```powershell

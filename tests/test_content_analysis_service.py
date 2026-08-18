@@ -19,8 +19,6 @@ from app.services.content_analysis.analysis import (
 from app.services.content_analysis.ark import ArkAPIError
 from app.services.content_analysis.contracts import (
     CONTENT_ANALYSIS_PROVIDER_SCHEMA_VERSION,
-    boundary_indexed_script,
-    parse_content_analysis_provider_payload,
 )
 from app.services.security import encrypt_secret
 from tests.conftest import create_user
@@ -43,10 +41,6 @@ def _provider_payload(
 ) -> dict[str, Any]:
     return {
         "music_intent": _valid_payload()["music_intent"],
-        "subtitle_breaks": {
-            "prefer_after": prefer_after or [],
-            "allow_after": allow_after or [],
-        },
         "visual_plan": [],
         "title": {"line_1": "减脂真相", "line_2": "坚持更关键"},
     }
@@ -79,13 +73,34 @@ def _configured_user(username: str = "analysis-user") -> int:
 
 
 class FakeArkClient:
-    def __init__(self, responses: list[Any]) -> None:
+    def __init__(
+        self,
+        responses: list[Any],
+        *,
+        subtitle_responses: list[Any] | None = None,
+    ) -> None:
         self.responses = list(responses)
+        self.subtitle_responses = list(subtitle_responses or [])
         self.calls: list[dict[str, Any]] = []
 
     def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
-        result = self.responses.pop(0)
+        if kwargs.get("response_format") is None:
+            if self.subtitle_responses:
+                result = self.subtitle_responses.pop(0)
+            else:
+                user_content = kwargs["messages"][-1]["content"]
+                encoded = user_content.split(
+                    "【待切分文案 JSON 字符串】\n", maxsplit=1
+                )[1].split("\n\n", maxsplit=1)[0]
+                result = {
+                    "id": "resp-subtitle-auto",
+                    "choices": [
+                        {"message": {"content": json.loads(encoded)}}
+                    ],
+                }
+        else:
+            result = self.responses.pop(0)
         if isinstance(result, Exception):
             raise result
         return result
@@ -117,7 +132,7 @@ def test_analysis_saves_valid_branches_and_reuses_cache() -> None:
     assert second["cache_hit"] is True
     assert second["music_intent"] == first["music_intent"]
     assert second["subtitle_units"] == first["subtitle_units"]
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
     assert fake.calls[0]["temperature"] == 0.0
     assert fake.calls[0]["max_tokens"] == 1536
     assert fake.calls[0]["response_format"]["type"] == "json_schema"
@@ -126,6 +141,29 @@ def test_analysis_saves_valid_branches_and_reuses_cache() -> None:
         assert record.script_length == len(SCRIPT)
         assert record.cacheable is True
         assert record.provider_request_id == "resp-test"
+
+
+def test_v20_reuses_prior_non_subtitle_branches_and_only_refreshes_subtitles() -> None:
+    user_id = _configured_user("reuse-planning")
+    first_fake = FakeArkClient([_ark_response(_provider_payload(), "resp-planning")])
+    first = _analyze(user_id, first_fake)
+    assert first["overall_status"] == "SUCCESS"
+
+    with SessionLocal() as db:
+        previous = db.query(ContentAnalysisCache).one()
+        previous.prompt_version = "jyd.content-analysis.prompt.v19"
+        db.commit()
+
+    subtitle_only_fake = FakeArkClient([])
+    refreshed = _analyze(user_id, subtitle_only_fake)
+
+    assert refreshed["overall_status"] == "SUCCESS"
+    assert refreshed["music_intent"] == first["music_intent"]
+    assert refreshed["visual_plan"] == first["visual_plan"]
+    assert refreshed["title"] == first["title"]
+    assert refreshed["subtitle_prompt_version"] == "jyd.subtitle-analysis.prompt.v20"
+    assert len(subtitle_only_fake.calls) == 1
+    assert subtitle_only_fake.calls[0].get("response_format") is None
 
 
 def test_analysis_accepts_json_wrapped_in_markdown_and_explanation() -> None:
@@ -170,13 +208,9 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     serialized_schema = json.dumps(response_schema, ensure_ascii=False)
     system_prompt = fake.calls[0]["messages"][0]["content"]
     assert '"$ref"' not in serialized_schema
-    assert response_schema["required"] == [
-        "music_intent",
-        "subtitle_breaks",
-        "visual_plan",
-        "title",
-    ]
-    assert "一次完成 music_intent、subtitle_breaks、visual_plan、title 四项任务" in system_prompt
+    assert response_schema["required"] == ["music_intent", "visual_plan", "title"]
+    assert "一次完成 music_intent、visual_plan、title 三项任务" in system_prompt
+    assert "字幕切分由独立专用请求完成" in system_prompt
     assert "每项仅含 anchor_id、concept_id、priority" in system_prompt
     assert "anchor.usage=enrichment" in system_prompt
     assert "anchor.usage=seam_broll" in system_prompt
@@ -197,7 +231,7 @@ def test_long_script_gets_full_safe_output_budget_in_one_request() -> None:
     assert _content_analysis_max_tokens("健" * 2000, visual_anchor_count=200) == 4096
 
 
-def test_music_only_provider_object_is_partial_without_a_second_request() -> None:
+def test_music_only_planning_object_is_partial_but_subtitles_still_succeed() -> None:
     user_id = _configured_user("provider-music-only")
     payload = _valid_payload()
     fake = FakeArkClient(
@@ -209,19 +243,22 @@ def test_music_only_provider_object_is_partial_without_a_second_request() -> Non
     assert result["overall_status"] == "PARTIAL"
     assert result["music_analysis_status"] == "SUCCESS"
     assert result["music_intent"] == payload["music_intent"]
-    assert result["subtitle_analysis_status"] == "FAILED"
-    assert result["subtitle_units"] is None
-    assert result["errors"]["subtitle"]["code"] == "SUBTITLE_MISSING"
+    assert result["subtitle_analysis_status"] == "SUCCESS"
+    assert result["subtitle_units"] is not None
+    assert result["errors"]["subtitle"] is None
     assert result["provider_request_id"] == "resp-music-only"
-    assert result["provider_attempts"] == 1
-    assert len(fake.calls) == 1
+    assert result["provider_attempts"] == 2
+    assert len(fake.calls) == 2
 
 
 def test_subtitle_failure_does_not_discard_valid_music() -> None:
     user_id = _configured_user("partial-music")
-    payload = _valid_payload()
-    payload["subtitle_units"][1]["text"] = "通道"
-    fake = FakeArkClient([_ark_response(payload)])
+    fake = FakeArkClient(
+        [_ark_response(_provider_payload())],
+        subtitle_responses=[
+            ArkAPIError("ARK_TIMEOUT", "safe", retryable=True, attempts=3)
+        ],
+    )
 
     result = _analyze(user_id, fake)
 
@@ -230,7 +267,7 @@ def test_subtitle_failure_does_not_discard_valid_music() -> None:
     assert result["music_intent"] is not None
     assert result["subtitle_analysis_status"] == "FAILED"
     assert result["subtitle_units"] is None
-    assert result["errors"]["subtitle"]["code"] == "SUBTITLE_TEXT_MISMATCH"
+    assert result["errors"]["subtitle"]["code"] == "ARK_TIMEOUT"
     assert result["cacheable"] is True
 
 
@@ -250,7 +287,7 @@ def test_title_failure_is_isolated_from_music_subtitle_and_visual_results() -> N
     assert result["title"] is None
     assert result["errors"]["title"]["code"] == "TITLE_SCHEMA_INVALID"
     assert result["cacheable"] is True
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
 
 
 def test_title_second_line_overflow_is_isolated_from_other_results() -> None:
@@ -268,33 +305,33 @@ def test_title_second_line_overflow_is_isolated_from_other_results() -> None:
     assert result["title_analysis_status"] == "FAILED"
     assert result["title"] is None
     assert result["errors"]["title"]["code"] == "TITLE_SCHEMA_INVALID"
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
 
 
-def test_subtitle_mismatch_debug_snapshot_is_explicitly_opt_in(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    user_id = _configured_user("subtitle-debug")
-    payload = _valid_payload()
-    payload["subtitle_units"][1]["text"] = "通道"
-    monkeypatch.setenv("CONTENT_ANALYSIS_DEBUG_CAPTURE", "true")
-    monkeypatch.setenv("CONTENT_ANALYSIS_DEBUG_DIR", str(tmp_path))
+def test_subtitle_text_mutation_is_retried_with_the_original_script() -> None:
+    user_id = _configured_user("subtitle-retry")
+    fake = FakeArkClient(
+        [_ark_response(_provider_payload())],
+        subtitle_responses=[
+            {
+                "id": "subtitle-bad",
+                "choices": [{"message": {"content": "那么通道八十四天"}}],
+            },
+            {
+                "id": "subtitle-good",
+                "choices": [{"message": {"content": SCRIPT}}],
+            },
+        ],
+    )
 
-    result = _analyze(user_id, FakeArkClient([_ark_response(payload)]))
+    result = _analyze(user_id, fake)
 
-    assert result["subtitle_analysis_status"] == "FAILED"
-    snapshots = list(tmp_path.glob("subtitle-mismatch-*.json"))
-    assert len(snapshots) == 1
-    snapshot = json.loads(snapshots[0].read_text(encoding="utf-8"))
-    assert snapshot["original_script"] == SCRIPT
-    assert snapshot["returned_subtitle_text"] == "那么通道八十四天"
-    assert snapshot["first_difference"] == {
-        "index": 3,
-        "source_character": "过",
-        "returned_character": "道",
-    }
-    assert snapshot["subtitle_units"] == payload["subtitle_units"]
+    assert result["subtitle_analysis_status"] == "SUCCESS"
+    assert "".join(unit["text"] for unit in result["subtitle_units"]) == SCRIPT
+    assert len(fake.calls) == 3
+    retry_prompt = fake.calls[2]["messages"][-1]["content"]
+    assert "上一次结果不合格" in retry_prompt
+    assert "修改、删除、移动" in retry_prompt
 
 
 def test_schema_version_mismatch_debug_snapshot_is_explicitly_opt_in(
@@ -309,7 +346,8 @@ def test_schema_version_mismatch_debug_snapshot_is_explicitly_opt_in(
 
     result = _analyze(user_id, FakeArkClient([_ark_response(payload, "resp-contract")]))
 
-    assert result["overall_status"] == "FAILED"
+    assert result["overall_status"] == "PARTIAL"
+    assert result["subtitle_analysis_status"] == "SUCCESS"
     snapshots = list(tmp_path.glob("contract-failure-*.json"))
     assert len(snapshots) == 1
     snapshot = json.loads(snapshots[0].read_text(encoding="utf-8"))
@@ -336,22 +374,15 @@ def test_music_failure_does_not_discard_valid_subtitles() -> None:
     assert result["subtitle_units"] is not None
 
 
-def test_subtitle_indexes_are_rebuilt_only_when_text_is_exact() -> None:
-    user_id = _configured_user("repair-indexes")
-    payload = _valid_payload()
-    for index, unit in enumerate(payload["subtitle_units"]):
-        unit["start"] = 100 + index
-        unit["end"] = 200 + index
-    fake = FakeArkClient([_ark_response(payload)])
+def test_dedicated_subtitle_result_is_converted_to_public_units() -> None:
+    user_id = _configured_user("dedicated-units")
+    fake = FakeArkClient([_ark_response(_provider_payload())])
 
     result = _analyze(user_id, fake)
 
     assert result["subtitle_analysis_status"] == "SUCCESS"
     assert [(unit["start"], unit["end"]) for unit in result["subtitle_units"]] == [
-        (0, 2),
-        (2, 4),
-        (4, 7),
-        (7, 8),
+        (0, len(SCRIPT))
     ]
 
 
@@ -371,8 +402,8 @@ def test_force_refresh_failure_never_overwrites_previous_success() -> None:
     assert refreshed["overall_status"] == "SUCCESS"
     assert refreshed["music_intent"] == first["music_intent"]
     assert refreshed["subtitle_units"] == first["subtitle_units"]
-    assert refreshed["provider_request_id"] == "resp-good"
-    assert len(fake.calls) == 2
+    assert refreshed["provider_request_id"] == "resp-subtitle-auto"
+    assert len(fake.calls) == 4
 
 
 def test_complete_transport_failure_is_not_sticky_cache() -> None:
@@ -380,8 +411,11 @@ def test_complete_transport_failure_is_not_sticky_cache() -> None:
     fake = FakeArkClient(
         [
             ArkAPIError("ARK_TIMEOUT", "safe", retryable=True, attempts=3),
-            _ark_response(_valid_payload()),
-        ]
+            _ark_response(_provider_payload()),
+        ],
+        subtitle_responses=[
+            ArkAPIError("ARK_TIMEOUT", "safe", retryable=True, attempts=3)
+        ],
     )
 
     failed = _analyze(user_id, fake)
@@ -389,9 +423,9 @@ def test_complete_transport_failure_is_not_sticky_cache() -> None:
 
     assert failed["overall_status"] == "FAILED"
     assert failed["cacheable"] is False
-    assert failed["provider_attempts"] == 3
+    assert failed["provider_attempts"] == 6
     assert retried["overall_status"] == "SUCCESS"
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 4
 
 
 def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> None:
@@ -400,14 +434,9 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
     system_prompt = messages[0]["content"]
 
     assert len(messages) == 2
-    assert "一次完成 music_intent、subtitle_breaks、visual_plan、title 四项任务" in system_prompt
+    assert "一次完成 music_intent、visual_plan、title 三项任务" in system_prompt
     assert "长脚本也不能" in system_prompt
-    assert "某段不超过 10 个汉字时" in system_prompt
-    assert "10 个汉字是上限而非建议长度" in system_prompt
-    assert "边界数量必须最少" in system_prompt
-    assert "allow_after 必须为空数组" in system_prompt
-    assert "不必要的 2～5 字碎片" in system_prompt
-    assert "不是为了满足“每段不超过 10 个汉字”" in system_prompt
+    assert "字幕切分由独立专用请求完成" in system_prompt
     assert "13 个全角中文字符等效宽度" not in system_prompt
     assert "封面标题必须独立满足平台安全" in system_prompt
     assert "控重" in system_prompt
@@ -417,11 +446,9 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
     user_payload = json.loads(messages[1]["content"])
     assert set(user_payload) == {
         "original_script",
-        "boundary_indexed_script",
         "visual_context",
     }
     assert user_payload["original_script"] == script
-    assert user_payload["boundary_indexed_script"] == boundary_indexed_script(script)
 
     assert user_payload["visual_context"] == {
         "catalog_version": "none",
@@ -430,21 +457,7 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
     }
     example_json = system_prompt.split("输出示例：\n", maxsplit=1)[1]
     example_payload = json.loads(example_json)
-    assert example_payload["subtitle_breaks"] == {
-        "prefer_after": [6],
-        "allow_after": [],
-    }
-    _, example_units, visual_plan, title = parse_content_analysis_provider_payload(
-        example_payload,
-        original_script="百分之八十四是由呼吸离开身体的",
-    )
-    assert [unit.text for unit in example_units] == [
-        "百分之八十四",
-        "是由呼吸离开身体的",
-    ]
-    assert visual_plan == []
-    assert title.line_1 == "减脂真相"
-    assert title.line_2 == "坚持更关键"
+    assert set(example_payload) == {"music_intent", "visual_plan", "title"}
 
 
 def test_one_call_visual_plan_uses_only_offered_local_candidates() -> None:
@@ -527,30 +540,61 @@ def test_one_invalid_visual_reference_is_dropped_without_failing_valid_choices()
     assert result["visual_plan"] == [payload["visual_plan"][2]]
 
 
-def test_compact_provider_breaks_expand_to_public_subtitle_units() -> None:
-    user_id = _configured_user("provider-breaks")
-    fake = FakeArkClient([_ark_response(_provider_payload(prefer_after=[4]))])
+def test_dedicated_full_text_expands_to_public_subtitle_units() -> None:
+    script = "减肥成功的人特别不想跟你分享的"
+    user_id = _configured_user("dedicated-full-text")
+    fake = FakeArkClient(
+        [_ark_response(_provider_payload())],
+        subtitle_responses=[
+            {
+                "id": "subtitle-split",
+                "choices": [
+                    {"message": {"content": "减肥成功的人特别，不想跟你分享的"}}
+                ],
+            }
+        ],
+    )
 
-    result = _analyze(user_id, fake)
+    with SessionLocal() as db:
+        result = analyze_content(
+            db,
+            db.get(User, user_id),
+            original_script=script,
+            client_factory=lambda _: fake,
+        )
 
     assert result["overall_status"] == "SUCCESS"
     assert result["schema_version"] == "jyd.content-analysis.v1"
     assert [unit["text"] for unit in result["subtitle_units"]] == [
-        "那么通过",
-        "八十四天",
+        "减肥成功的人特别",
+        "不想跟你分享的",
     ]
     assert [
         (unit["start"], unit["end"], unit["break_after"])
         for unit in result["subtitle_units"]
-    ] == [(0, 4, "prefer"), (4, 8, "prefer")]
-    assert len(fake.calls) == 1
+    ] == [(0, 8, "prefer"), (8, 15, "prefer")]
+    assert len(fake.calls) == 2
 
 
-def test_semantic_break_plan_uses_positions_without_returning_split_text() -> None:
+def test_dedicated_subtitle_returns_full_text_then_converts_to_positions() -> None:
     script = "百分之八十四是由呼吸的形式来离开我们身体的"
     user_id = _configured_user("semantic-breaks")
-    provider_payload = _provider_payload(prefer_after=[6], allow_after=[13])
-    fake = FakeArkClient([_ark_response(provider_payload)])
+    provider_payload = _provider_payload()
+    fake = FakeArkClient(
+        [_ark_response(provider_payload)],
+        subtitle_responses=[
+            {
+                "id": "subtitle-semantic",
+                "choices": [
+                    {
+                        "message": {
+                            "content": "百分之八十四，是由呼吸的形式，来离开我们身体的"
+                        }
+                    }
+                ],
+            }
+        ],
+    )
 
     with SessionLocal() as db:
         result = analyze_content(
@@ -567,13 +611,10 @@ def test_semantic_break_plan_uses_positions_without_returning_split_text() -> No
     ]
     assert [unit["break_after"] for unit in result["subtitle_units"]] == [
         "prefer",
-        "allow",
+        "prefer",
         "prefer",
     ]
-    assert provider_payload["subtitle_breaks"] == {
-        "prefer_after": [6],
-        "allow_after": [13],
-    }
+    assert "subtitle_breaks" not in provider_payload
 
 
 def test_punctuation_breaks_are_added_locally_without_model_output() -> None:
@@ -596,21 +637,35 @@ def test_punctuation_breaks_are_added_locally_without_model_output() -> None:
     ]
 
 
-def test_unoffered_break_position_is_dropped_without_failing_subtitle_branch() -> None:
-    user_id = _configured_user("invalid-provider-break")
-    fake = FakeArkClient([_ark_response(_provider_payload(prefer_after=[4, 99]))])
+def test_three_invalid_subtitle_results_use_deterministic_safe_fallback() -> None:
+    script = "但是一定要有三次轻松的活动，"
+    user_id = _configured_user("subtitle-fallback")
+    invalid = {
+        "id": "subtitle-invalid",
+        "choices": [{"message": {"content": script}}],
+    }
+    fake = FakeArkClient(
+        [_ark_response(_provider_payload())],
+        subtitle_responses=[invalid, invalid, invalid],
+    )
 
-    result = _analyze(user_id, fake)
+    with SessionLocal() as db:
+        result = analyze_content(
+            db,
+            db.get(User, user_id),
+            original_script=script,
+            client_factory=lambda _: fake,
+        )
 
     assert result["overall_status"] == "SUCCESS"
     assert result["music_analysis_status"] == "SUCCESS"
     assert result["subtitle_analysis_status"] == "SUCCESS"
     assert result["errors"]["subtitle"] is None
     assert [unit["text"] for unit in result["subtitle_units"]] == [
-        "那么通过",
-        "八十四天",
+        "但是一定要有",
+        "三次轻松的活动，",
     ]
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 4
 
 
 def test_ark_limiter_allows_at_most_ten_active_calls() -> None:
@@ -667,7 +722,7 @@ def test_workbench_analysis_endpoint_calls_service_and_then_cache(
     assert first.json()["cache_hit"] is False
     assert second.status_code == 200
     assert second.json()["cache_hit"] is True
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
 
 
 def test_workbench_analysis_endpoint_keeps_script_exact(client, monkeypatch) -> None:

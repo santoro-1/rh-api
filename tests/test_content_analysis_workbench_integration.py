@@ -43,18 +43,24 @@ from jyd_probe.unified_visual_plan import (  # noqa: E402
 
 
 class _FakeArkClient:
-    def __init__(self, payload: dict[str, Any]) -> None:
+    def __init__(self, payload: dict[str, Any], script: str) -> None:
         self.payload = payload
+        self.script = script
         self.calls = 0
 
-    def create_chat_completion(self, **_kwargs: Any) -> dict[str, Any]:
+    def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
         self.calls += 1
+        content = (
+            json.dumps(self.payload, ensure_ascii=False)
+            if kwargs.get("response_format") is not None
+            else self.script
+        )
         return {
             "id": f"acceptance-{self.calls}",
             "choices": [
                 {
                     "message": {
-                        "content": json.dumps(self.payload, ensure_ascii=False)
+                        "content": content
                     }
                 }
             ],
@@ -70,10 +76,6 @@ def _fixture_payload() -> dict[str, Any]:
 def _provider_payload(*, prefer_after: list[int]) -> dict[str, Any]:
     return {
         "music_intent": _fixture_payload()["music_intent"],
-        "subtitle_breaks": {
-            "prefer_after": prefer_after,
-            "allow_after": [],
-        },
         "visual_plan": [],
         "title": {"line_1": "减脂真相", "line_2": "坚持更关键"},
     }
@@ -102,7 +104,7 @@ def _analyze(
         )
         db.commit()
 
-    fake = _FakeArkClient(payload)
+    fake = _FakeArkClient(payload, script)
     with SessionLocal() as db:
         attached = db.get(User, user.id)
         result = analyze_content(
@@ -112,7 +114,7 @@ def _analyze(
             visual_context_payload=visual_context,
             client_factory=lambda _config: fake,
         )
-    assert fake.calls == 1
+    assert fake.calls == 2
     return result
 
 
@@ -141,7 +143,7 @@ def test_server_success_contract_drives_workbench_subtitles_and_top1() -> None:
 
     assert consumed["music_analysis_status"] == "SUCCESS"
     assert consumed["subtitle_analysis_status"] == "SUCCESS"
-    assert [group["text"] for group in groups] == ["那么通过", "八十四天"]
+    assert [group["text"] for group in groups] == [SCRIPT]
     assert selection["bgm_identity"].startswith("music_id:")
     assert "candidates" not in selection
     assert "top3" not in selection
@@ -246,8 +248,8 @@ def test_server_partial_results_keep_each_valid_workbench_branch() -> None:
     )
 
     assert music_result["music_analysis_status"] == "SUCCESS"
-    assert music_result["subtitle_analysis_status"] == "FAILED"
-    assert music_result["subtitle_units"] is None
+    assert music_result["subtitle_analysis_status"] == "SUCCESS"
+    assert music_result["subtitle_units"] is not None
     assert selection["bgm_identity"].startswith("music_id:")
     assert subtitle_result["music_analysis_status"] == "FAILED"
     assert subtitle_result["subtitle_analysis_status"] == "SUCCESS"
@@ -300,14 +302,8 @@ def test_repaired_indexes_preserve_spaces_newlines_and_tilde_across_projects() -
         ],
     )
 
-    assert [(unit["start"], unit["end"]) for unit in units] == [
-        (0, 1),
-        (1, 3),
-        (3, 4),
-        (4, 6),
-        (6, 9),
-        (9, 10),
-        (10, 11),
-    ]
+    assert units[0]["start"] == 0
+    assert units[-1]["end"] == len(script)
+    assert "".join(unit["text"] for unit in units) == script
     assert "".join(unit["text"] for unit in timed_units) == script
-    assert timed_units[-1]["text"] == "~"
+    assert timed_units[-1]["text"].endswith("~")
