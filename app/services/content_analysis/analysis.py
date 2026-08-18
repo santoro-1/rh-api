@@ -48,7 +48,7 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v18"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v19"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -155,15 +155,20 @@ def _system_prompt() -> str:
         music_intent：按整篇内容判断，不返回曲名、文件名或路径。
 
         subtitle_breaks：
-        - 最终字幕单行正文不得超过 13 个全角中文字符等效宽度。
-        - 13 是上限，不是固定长度，也不是是否断句的唯一依据。字数未超限时，仍可保留少量强语义断点。
-        - 显式或省略“是”的“类别/问题/评价对象 -> 答案”必须作为强语义断点，例如
-          `最简单的排毒法|揉肚子`、`最好的医生是|你自己`。并列列举中的同类结构要保持一致。
-        - prefer_after 只放强语义节拍；allow_after 放超宽时可用的自然备选。两者都只能选择
-          boundary_indexed_script 已提供的位置。
-        - 除上述强语义断点外，只选最少量自然边界，不为凑齐长度或节奏制造碎片。
-        - 两个数组升序、无重复、互不重叠；标点和空白边界由服务端处理。
-        - 不拆数字、数量单位、完整词、专有名词和紧密短语，不让助词孤立。
+        - 核心原则是不修改、删除、替换、移动 original_script 中的任何文字、数字、标点、空格或顺序；
+          任务只等价于在确有必要时新增中文逗号，以解决原文某段连续文字超过 10 个汉字的问题。
+        - 以原文已有标点作为天然边界，逐段检查两个已有标点之间的连续正文。某段不超过 10 个汉字时，
+          禁止在该段内部选择任何 B 边界；语义自然不能成为额外切分理由。
+        - 只有某段超过 10 个汉字时才必须切分，使切分后的每段均不超过 10 个汉字；在满足上限的前提下，
+          边界数量必须最少。10 个汉字是上限而非建议长度，不得为了形成更短字幕继续拆分。
+        - 本合同不返回改写后的全文：每个等价于“新增逗号”的必要位置，只把 boundary_indexed_script 中
+          对应的 B 编号放入 prefer_after；allow_after 必须为空数组。标点和空白边界由服务端本地处理，
+          不得在已有标点前后重复选择边界。
+        - 只有已经确定必须切分后，才根据语义选择断点。优先把每段切到接近 10 个汉字，避免产生
+          不必要的 2～5 字碎片。
+        - 不拆完整词语、专有名词、数字与单位、固定搭配或紧密短语，不让助词单独成段；只能选择输入
+          已提供的 B 编号。
+        - prefer_after 升序且无重复；输出前删除所有不是为了满足“每段不超过 10 个汉字”而选择的边界。
 
         visual_plan：
         - 只返回明确值得考虑的画面；未返回即跳过，允许返回空数组。

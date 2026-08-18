@@ -402,9 +402,13 @@ def test_default_prompt_treats_exact_script_as_data_and_forbids_timestamps() -> 
     assert len(messages) == 2
     assert "一次完成 music_intent、subtitle_breaks、visual_plan、title 四项任务" in system_prompt
     assert "长脚本也不能" in system_prompt
-    assert "不得超过 13 个全角中文字符等效宽度" in system_prompt
-    assert "13 是上限，不是固定长度" in system_prompt
-    assert "只选最少量自然边界" in system_prompt
+    assert "某段不超过 10 个汉字时" in system_prompt
+    assert "10 个汉字是上限而非建议长度" in system_prompt
+    assert "边界数量必须最少" in system_prompt
+    assert "allow_after 必须为空数组" in system_prompt
+    assert "不必要的 2～5 字碎片" in system_prompt
+    assert "不是为了满足“每段不超过 10 个汉字”" in system_prompt
+    assert "13 个全角中文字符等效宽度" not in system_prompt
     assert "封面标题必须独立满足平台安全" in system_prompt
     assert "控重" in system_prompt
     assert "禁止用谐音字" in system_prompt
