@@ -1,6 +1,7 @@
 .env
 .env.worker
 .pytest_cache/
+.codex_tmp/
 tests/.runtime/
 tests/.template-preview/
 __pycache__/

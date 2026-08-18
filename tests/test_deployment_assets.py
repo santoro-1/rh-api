@@ -542,6 +542,9 @@ def test_windows_production_update_script_is_explicit_and_scoped():
     assert "跳过 uploads/outputs 全量备份" in updater
     assert "代码更新包含依赖、迁移、数据或服务器配置变更" in updater
     assert "pre-deploy-app.db" in updater
+    assert "$backupDescription并上传" not in updater
+    assert "${backupDescription}并上传" in updater
+    assert "本项目${backupDescription}（服务器写操作 1）" in updater
 
     preflight = (
         PROJECT_ROOT / "deploy" / "scripts" / "preflight.sh"

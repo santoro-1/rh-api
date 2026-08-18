@@ -477,7 +477,7 @@ fi
         "完整生产数据备份和代码回滚包"
     }
     Confirm-Exact `
-        -Prompt "下一步会创建$backupDescription并上传 commit $shortCommit；不会安装服务器 ASR，也不会停止服务。" `
+        -Prompt "下一步会创建${backupDescription}并上传 commit $shortCommit；不会安装服务器 ASR，也不会停止服务。" `
         -Expected "BACKUP $shortCommit"
 
     Write-Step "打包当前 Git commit（不包含 .env、数据库、上传、输出和日志）"
@@ -499,7 +499,7 @@ fi
     $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     $script:RemoteTemp = "/var/tmp/runninghub-video-$shortCommit-$timestamp"
 
-    Write-Step "创建本项目$backupDescription（服务器写操作 1）"
+    Write-Step "创建本项目${backupDescription}（服务器写操作 1）"
     $fullDataBackupCommand = if ($BackupMode -eq "Full") {
         "sudo -u '$LinuxUser' /bin/bash '$AppDir/deploy/scripts/backup.sh'"
     } else {
