@@ -58,7 +58,7 @@ from app.services.logging_config import log_event
 logger = logging.getLogger(__name__)
 
 CONTENT_PLANNING_PROMPT_VERSION = "jyd.content-planning.prompt.v19"
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v20"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v21"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -167,6 +167,8 @@ def _system_prompt() -> str:
         - 只返回明确值得考虑的画面；未返回即跳过，允许返回空数组。
         - anchor.usage=explicit 表示原文直接命中，context 用于识别复合词和否定语境；必须按完整
           context 判断，不能把“鸡蛋糕”当成“鸡蛋”，也不能把宽泛词替换成错误的具体素材。
+          若 text 是“三文鱼”但 context 是“植物三文鱼”“被叫做植物三文鱼”或类似比喻，必须跳过；
+          只有实际食材、餐食或烹饪语境中的三文鱼才可选择。
         - anchor.usage=enrichment 表示周期性空镜尝试，只能选择 context 中直接出现的具体对象、
           动作或场景；anchor.usage=seam_broll 表示分段连接处约 1 秒的短空镜尝试，context 以下一段
           开头语义为主。这两种 usage 都不表示 allowed_concepts 已自动匹配，必须再判断 concept 与

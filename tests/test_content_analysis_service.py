@@ -224,6 +224,7 @@ def test_ark_request_uses_self_contained_schema_and_explicit_root_contract() -> 
     assert "editorial.meal_daily" in system_prompt
     assert "绝不能为了填满频率或连接处强行填充" in system_prompt
     assert "不返回时间戳" in system_prompt
+    assert "植物三文鱼" in system_prompt
 
 
 def test_long_script_gets_full_safe_output_budget_in_one_request() -> None:
