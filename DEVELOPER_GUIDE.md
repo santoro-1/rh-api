@@ -596,7 +596,7 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
   合格结果才转换为公开 `subtitle_units`，所有新增边界均为 `prefer`。
 - `CONTENT_ANALYSIS_PROMPT_VERSION` 升为 `jyd.content-analysis.prompt.v20`。创建 v20 缓存时会
   从相同用户、脚本、模型和视觉上下文的旧缓存复用成功的音乐、视觉和标题分支，只重新请求字幕；
-  公开响应额外携带 `subtitle_prompt_version=jyd.subtitle-analysis.prompt.v20`。
+  公开响应额外携带 `subtitle_prompt_version=jyd.subtitle-analysis.prompt.v22`。
 
 ## 19. 工作台内容分析消费边界（2026-08-06）
 

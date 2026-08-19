@@ -313,6 +313,18 @@ def test_boundary_candidates_keep_bound_relative_suffixes_intact() -> None:
     assert locative + len("中的") in positions
 
 
+def test_boundary_candidates_keep_degree_adverbs_and_dynamic_particles_bound() -> None:
+    script = "这实在是太难得的一件事儿了，它的蛋白质达到了百分之十七"
+    positions = set(subtitle_break_candidate_positions(script))
+
+    degree_boundary = script.index("太难得") + len("太")
+    attributive_boundary = script.index("一件事")
+    particle_boundary = script.index("达到了") + len("达到")
+    assert degree_boundary not in positions
+    assert attributive_boundary not in positions
+    assert particle_boundary not in positions
+
+
 def test_break_plan_is_expanded_from_exact_source_slices() -> None:
     script = "百分之八十四是由呼吸的形式来离开我们身体的"
 

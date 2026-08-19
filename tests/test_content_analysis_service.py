@@ -161,7 +161,7 @@ def test_v20_reuses_prior_non_subtitle_branches_and_only_refreshes_subtitles() -
     assert refreshed["music_intent"] == first["music_intent"]
     assert refreshed["visual_plan"] == first["visual_plan"]
     assert refreshed["title"] == first["title"]
-    assert refreshed["subtitle_prompt_version"] == "jyd.subtitle-analysis.prompt.v20"
+    assert refreshed["subtitle_prompt_version"] == "jyd.subtitle-analysis.prompt.v22"
     assert len(subtitle_only_fake.calls) == 1
     assert subtitle_only_fake.calls[0].get("response_format") is None
 
@@ -550,7 +550,7 @@ def test_dedicated_full_text_expands_to_public_subtitle_units() -> None:
             {
                 "id": "subtitle-split",
                 "choices": [
-                    {"message": {"content": "减肥成功的人特别，不想跟你分享的"}}
+                    {"message": {"content": "减肥成功的人，特别不想跟你分享的"}}
                 ],
             }
         ],
@@ -567,13 +567,13 @@ def test_dedicated_full_text_expands_to_public_subtitle_units() -> None:
     assert result["overall_status"] == "SUCCESS"
     assert result["schema_version"] == "jyd.content-analysis.v1"
     assert [unit["text"] for unit in result["subtitle_units"]] == [
-        "减肥成功的人特别",
-        "不想跟你分享的",
+        "减肥成功的人",
+        "特别不想跟你分享的",
     ]
     assert [
         (unit["start"], unit["end"], unit["break_after"])
         for unit in result["subtitle_units"]
-    ] == [(0, 8, "prefer"), (8, 15, "prefer")]
+    ] == [(0, 6, "prefer"), (6, 15, "prefer")]
     assert len(fake.calls) == 2
 
 

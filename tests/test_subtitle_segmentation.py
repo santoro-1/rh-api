@@ -13,7 +13,7 @@ from app.services.content_analysis.subtitle_segmentation import (
 def test_v20_prompt_keeps_the_complete_hard_requirements() -> None:
     prompt = subtitle_system_prompt()
 
-    assert SUBTITLE_ANALYSIS_PROMPT_VERSION == "jyd.subtitle-analysis.prompt.v20"
+    assert SUBTITLE_ANALYSIS_PROMPT_VERSION == "jyd.subtitle-analysis.prompt.v22"
     assert "唯一目的" in prompt
     assert "必须100%原样保留" in prompt
     assert "新增逗号数量必须最少" in prompt
@@ -48,13 +48,43 @@ def test_validator_rejects_overflow_and_source_edits() -> None:
 
 def test_validator_accepts_minimal_safe_split_and_rejects_short_span_split() -> None:
     source = "减肥成功的人特别不想跟你分享的"
-    accepted = validate_subtitle_split(source, "减肥成功的人特别，不想跟你分享的")
+    accepted = validate_subtitle_split(source, "减肥成功的人，特别不想跟你分享的")
     unnecessary = validate_subtitle_split("每天喝2000ml水", "每天喝，2000ml水")
 
     assert accepted.valid is True
-    assert accepted.inserted_positions == (8,)
+    assert accepted.inserted_positions == (6,)
     assert unnecessary.valid is False
     assert "不允许新增逗号" in unnecessary.error
+
+
+def test_validator_rejects_breaks_after_degree_adverbs_and_before_dynamic_particles() -> None:
+    broken_degree_phrase = validate_subtitle_split(
+        "这实在是太难得的一件事儿了",
+        "这实在是太，难得的一件事儿了",
+    )
+    broken_dynamic_particle = validate_subtitle_split(
+        "它的蛋白质达到了百分之十七",
+        "它的蛋白质达到，了百分之十七",
+    )
+    broken_attributive_phrase = validate_subtitle_split(
+        "这实在是太难得的一件事儿了",
+        "这实在是太难得的，一件事儿了",
+    )
+
+    assert broken_degree_phrase.valid is False
+    assert "不安全断点" in broken_degree_phrase.error
+    assert broken_dynamic_particle.valid is False
+    assert "不安全断点" in broken_dynamic_particle.error
+    assert broken_attributive_phrase.valid is False
+    assert "不安全断点" in broken_attributive_phrase.error
+
+
+def test_deterministic_fallback_keeps_tight_grammar_units_intact() -> None:
+    degree_units = deterministic_subtitle_units("这实在是太难得的一件事儿了")
+    particle_units = deterministic_subtitle_units("它的蛋白质达到了百分之十七")
+
+    assert [unit.text for unit in degree_units] == ["这实在是", "太难得的一件事儿了"]
+    assert [unit.text for unit in particle_units] == ["它的蛋白质", "达到了百分之十七"]
 
 
 def test_deterministic_fallback_uses_minimal_safe_boundaries() -> None:

@@ -48,14 +48,42 @@ CONTENT_ANALYSIS_PROVIDER_SCHEMA_ID = (
 
 _LOCAL_PREFERRED_BREAK_CHARACTERS = frozenset("，。！？；：、,.!?;:\n\r")
 _STRUCTURAL_PARTICLES = frozenset("的地得")
+_DYNAMIC_PARTICLES = frozenset("了着过")
+_DEGREE_ADVERBS = ("非常", "特别", "十分", "极其", "比较", "很", "太", "更", "最")
 _BOUND_RELATIVE_SUFFIXES = ("类的", "中的", "里的", "内的", "上的", "下的")
+_BOUND_ATTRIBUTIVE_HEAD_PREFIXES = (
+    "一个",
+    "一种",
+    "一件",
+    "一些",
+    "一位",
+    "一条",
+    "一份",
+    "一项",
+    "一套",
+    "一名",
+    "一颗",
+    "一杯",
+    "一口",
+    "一碗",
+    "一盘",
+    "一群",
+    "一类",
+    "一次",
+    "一点",
+    "一部分",
+    "这个",
+    "那个",
+    "这些",
+    "那些",
+)
 
 jieba.setLogLevel(logging.ERROR)
 _JIEBA_TOKENIZER = jieba.Tokenizer()
 
 
 def _lexical_unsafe_break_positions(original_script: str) -> set[int]:
-    """Return boundaries inside Chinese tokens or bound relative suffixes."""
+    """Return boundaries that would split lexical or tightly bound grammar units."""
 
     unsafe: set[int] = set()
     for token, start, end in _JIEBA_TOKENIZER.tokenize(
@@ -78,6 +106,38 @@ def _lexical_unsafe_break_positions(original_script: str) -> set[int]:
             # Keep category/locative relative suffixes with their head phrase:
             # 快餐|类的、疲惫生活|中的 are never useful caption starts.
             unsafe.add(position)
+        if (
+            original_script[position - 1] == "的"
+            and any(
+                original_script.startswith(prefix, position)
+                for prefix in _BOUND_ATTRIBUTIVE_HEAD_PREFIXES
+            )
+        ):
+            # Keep an attributive phrase attached to its quantified head noun:
+            # 太难得的|一件事、适合的|一种方法 are broken grammar units.
+            unsafe.add(position)
+        if original_script[position] in _DYNAMIC_PARTICLES:
+            # Aspect particles stay attached to the preceding predicate:
+            # 达到|了、保持|着、吃|过 are never acceptable subtitle breaks.
+            unsafe.add(position)
+    for adverb in _DEGREE_ADVERBS:
+        search_start = 0
+        while True:
+            start = original_script.find(adverb, search_start)
+            if start < 0:
+                break
+            boundary = start + len(adverb)
+            if (
+                boundary < len(original_script)
+                and not original_script[boundary - 1].isspace()
+                and not original_script[boundary].isspace()
+                and original_script[boundary - 1] not in _LOCAL_PREFERRED_BREAK_CHARACTERS
+                and original_script[boundary] not in _LOCAL_PREFERRED_BREAK_CHARACTERS
+            ):
+                # Keep degree adverbs with the adjective or verb they modify:
+                # 太|难得、非常|丰富、特别|重要 are semantically broken.
+                unsafe.add(boundary)
+            search_start = start + len(adverb)
     return unsafe
 
 LevelScore = Field(ge=1, le=5, description="Integer level from 1 (low) to 5 (high).")
