@@ -34,6 +34,23 @@ class RecognizedToken:
 
 
 @dataclass(frozen=True)
+class AlignedScriptToken:
+    text: str
+    script_start: int
+    script_end: int
+    start_seconds: float
+    end_seconds: float
+    confidence: float | None = None
+
+
+@dataclass(frozen=True)
+class ScriptAlignment:
+    plans: tuple[SegmentPlan, ...]
+    tokens: tuple[AlignedScriptToken, ...]
+    match_ratio: float
+
+
+@dataclass(frozen=True)
 class _ScriptToken:
     key: str
     start_offset: int
@@ -194,6 +211,18 @@ def plan_script_aligned_segments(
 ) -> list[SegmentPlan]:
     """Align ASR timestamps to the original script and plan gap-free cuts."""
 
+    return list(
+        align_script_timeline(script, duration_seconds, recognized_tokens).plans
+    )
+
+
+def align_script_timeline(
+    script: str,
+    duration_seconds: float,
+    recognized_tokens: list[RecognizedToken] | tuple[RecognizedToken, ...],
+) -> ScriptAlignment:
+    """Return segment plans plus ASR timestamps bound to original-script offsets."""
+
     clean_script = script.strip()
     if not clean_script:
         raise MediaSegmentationError("原脚本不能为空")
@@ -206,7 +235,7 @@ def plan_script_aligned_segments(
         recognized_tokens,
         duration_seconds,
     )
-    mapping, _ratio = _script_to_asr_mapping(
+    mapping, ratio = _script_to_asr_mapping(
         script_tokens,
         ordered_recognized,
     )
@@ -295,7 +324,7 @@ def plan_script_aligned_segments(
 
     if previous[final_index] is None:
         raise MediaSegmentationError(
-            "ASR 时间轴中存在无法控制在 45 秒内的连续内容"
+            f"ASR 时间轴中存在无法控制在 {MAX_SEGMENT_SECONDS:g} 秒内的连续内容"
         )
 
     groups: list[tuple[int, int]] = []
@@ -308,7 +337,7 @@ def plan_script_aligned_segments(
         cursor = start
     groups.reverse()
 
-    return [
+    plans = [
         SegmentPlan(
             index=index,
             script_text=clean_script[
@@ -320,4 +349,22 @@ def plan_script_aligned_segments(
         )
         for index, (start, end) in enumerate(groups, start=1)
     ]
-
+    aligned_tokens = tuple(
+        AlignedScriptToken(
+            text=clean_script[
+                script_tokens[script_index].start_offset :
+                script_tokens[script_index].end_offset
+            ],
+            script_start=script_tokens[script_index].start_offset,
+            script_end=script_tokens[script_index].end_offset,
+            start_seconds=ordered_recognized[recognized_index].start_seconds,
+            end_seconds=ordered_recognized[recognized_index].end_seconds,
+            confidence=ordered_recognized[recognized_index].confidence,
+        )
+        for script_index, recognized_index in sorted(mapping.items())
+    )
+    return ScriptAlignment(
+        plans=tuple(plans),
+        tokens=aligned_tokens,
+        match_ratio=ratio,
+    )

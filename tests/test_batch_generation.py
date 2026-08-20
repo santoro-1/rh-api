@@ -662,7 +662,7 @@ def test_uploaded_batch_automatically_expands_only_long_audio_rows(
 
     def duration_for_file(path):
         content = Path(path).read_bytes()
-        return 65.0 if b"long-audio" in content else 30.0
+        return 31.0 if b"long-audio" in content else 30.0
 
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",
@@ -751,14 +751,14 @@ def test_uploaded_batch_automatically_expands_only_long_audio_rows(
                     index=1,
                     script_text="这是需要自动拆分的",
                     start_seconds=0.0,
-                    end_seconds=35.0,
+                    end_seconds=15.5,
                     alignment_method="test",
                 ),
                 SegmentPlan(
                     index=2,
                     script_text="完整长音频脚本。",
-                    start_seconds=35.0,
-                    end_seconds=65.0,
+                    start_seconds=15.5,
+                    end_seconds=31.0,
                     alignment_method="test",
                 ),
             ]
@@ -784,11 +784,11 @@ def test_uploaded_batch_automatically_expands_only_long_audio_rows(
         )
         monkeypatch.setattr(
             "app.services.long_audio.inspect_audio_duration",
-            lambda path: 35.0 if "001" in Path(path).name else 30.0,
+            lambda path: 15.5,
         )
         monkeypatch.setattr(
             "app.services.long_audio.inspect_media_duration",
-            lambda path: 35.0 if "001" in Path(path).name else 30.0,
+            lambda path: 15.5,
         )
         materialized = materialize_long_audio_project(
             db,

@@ -206,7 +206,7 @@ def test_pronunciation_tones_use_official_json_array_format():
     ]
 
 
-def test_timestamp_planner_uses_sentence_boundaries_and_45_second_limit():
+def test_timestamp_planner_uses_sentence_boundaries_and_30_second_limit():
     cues = [
         SubtitleCue("第一段。", 0.0, 27.0),
         SubtitleCue("第二段。", 27.4, 35.0),
@@ -218,10 +218,11 @@ def test_timestamp_planner_uses_sentence_boundaries_and_45_second_limit():
 
     assert [plan.script_text for plan in plans] == [
         "第一段。",
-        "第二段。第三段。",
+        "第二段。",
+        "第三段。",
         "第四段。",
     ]
-    assert all(plan.duration_seconds <= 45.0 for plan in plans)
+    assert all(plan.duration_seconds <= 30.0 for plan in plans)
     assert plans[0].end_seconds == 27.2
     assert plans[-1].end_seconds == 87.5
     assert all(
@@ -230,7 +231,7 @@ def test_timestamp_planner_uses_sentence_boundaries_and_45_second_limit():
     )
 
 
-def test_digital_human_timestamp_plan_splits_before_seedvr2_risk_window():
+def test_workflow_specific_timestamp_plans_honor_35_and_30_second_limits():
     cues = [
         SubtitleCue("第一句。", 0.0, 9.8),
         SubtitleCue("第二句。", 10.0, 19.6),
@@ -249,4 +250,5 @@ def test_digital_human_timestamp_plan_splits_before_seedvr2_risk_window():
     assert all(plan.duration_seconds <= 35.0 for plan in digital_plans)
     assert digital_plans[0].start_seconds == 0.0
     assert digital_plans[-1].end_seconds == 39.75
-    assert len(ltx_plans) == 1
+    assert len(ltx_plans) == 2
+    assert all(plan.duration_seconds <= 30.0 for plan in ltx_plans)

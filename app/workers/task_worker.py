@@ -86,6 +86,10 @@ from app.services.video_merge import (
     process_pending_video_merges,
     recover_interrupted_video_merges,
 )
+from app.services.video_enhancement import (
+    task_is_ltx_workbench,
+    task_uses_seedvr2_pipeline,
+)
 from app.workflows import get_workflow
 from app.workflows.base import WorkflowAdapter, resolve_asset_path
 from app.workflows.digital_human import generation_tail_padding_seconds
@@ -152,7 +156,7 @@ def _video_log_context(task: GenerationTask) -> dict[str, object]:
     remote_stage = (
         "seedvr2"
         if task.enhancement is not None
-        else "digital_human"
+        else task.workflow_type
     )
     remote_attempt_number = (
         enhancement_attempt.attempt_number
@@ -215,6 +219,26 @@ def _make_client(
 def _runninghub_failed_reason(result: dict) -> dict | None:
     failed_reason = result.get("failedReason")
     return failed_reason if isinstance(failed_reason, dict) and failed_reason else None
+
+
+def _is_ltx_workbench_task(task: GenerationTask) -> bool:
+    return task_is_ltx_workbench(task)
+
+
+def _is_oom_failure(
+    failed_reason: dict[str, Any] | None,
+    message: str,
+) -> bool:
+    reason = failed_reason or {}
+    combined = " ".join(
+        str(value or "")
+        for value in (
+            reason.get("exception_type"),
+            reason.get("exception_message"),
+            message,
+        )
+    ).upper()
+    return "OOM_KILLED" in combined or "OUT OF MEMORY" in combined
 
 
 def _runninghub_failure_message(result: dict) -> str:
@@ -769,6 +793,16 @@ def _handle_remote_status(
             error_message=failure_message,
             failed_reason=failed_reason,
         )
+        if _is_ltx_workbench_task(task) and _is_oom_failure(
+            failed_reason, failure_message
+        ):
+            _mark_failed(
+                task,
+                task.error_code or "RUNNINGHUB_OOM",
+                f"{failure_message}\nLTX 内存不足不会自动重复付费，请更换输入后人工重试。",
+            )
+            db.commit()
+            return
         scheduled = _schedule_runninghub_auto_retry(
             task,
             message=failure_message,
@@ -828,7 +862,7 @@ def _handle_remote_status(
         create_source_download_target(
             get_settings(), task.user_id, task.id, output.extension
         )
-        if task.workflow_type == "digital_human"
+        if task_uses_seedvr2_pipeline(task)
         else create_download_target(
             get_settings(), task.user_id, task.id, output.extension
         )
@@ -893,7 +927,7 @@ def _handle_remote_status(
             **_video_log_context(task),
         )
         return
-    if task.workflow_type == "digital_human":
+    if task_uses_seedvr2_pipeline(task):
         enhancement = task.enhancement
         if enhancement is None:
             enhancement = GenerationTaskEnhancement(
@@ -923,7 +957,7 @@ def _handle_remote_status(
         log_event(
             logger,
             "video.enhancement_queued",
-            "数字人源片段已保存，等待 SeedVR2 48G 清晰化",
+            "源视频片段已保存，等待 SeedVR2 48G 清晰化",
             runninghub_task_id=task.runninghub_task_id,
             source_result_path=enhancement.source_result_path,
             **_video_log_context(task),
@@ -1101,7 +1135,7 @@ def _handle_enhancement_remote_status(
                 task,
                 enhancement,
                 code="VIDEO_ENHANCEMENT_REMOTE_MISSING",
-                message="SeedVR2 任务不存在或已过期，可使用已保存的数字人源片段重试清晰化",
+                message="SeedVR2 任务不存在或已过期，可使用已保存的源视频片段重试清晰化",
             )
             db.commit()
             return
@@ -1334,7 +1368,7 @@ def _process_enhancement(
             task,
             enhancement,
             code="VIDEO_ENHANCEMENT_SOURCE_MISSING",
-            message="数字人源片段不存在，无法执行 SeedVR2 清晰化",
+            message="源视频片段不存在，无法执行 SeedVR2 清晰化",
         )
         db.commit()
         return
@@ -1748,8 +1782,10 @@ def process_task(db: Session, task_id: str) -> None:
         db.commit()
         return
 
-    if task.workflow_type == "digital_human" and task.enhancement is not None:
+    if task.enhancement is not None:
         if (
+            task.workflow_type == "digital_human"
+            and
             task.enhancement.execution_account_id
             != task.execution_account_id
         ):

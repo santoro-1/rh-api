@@ -47,7 +47,7 @@ def test_asr_alignment_keeps_next_sentence_first_word_out_of_previous_segment():
     plans = plan_script_aligned_segments(script, duration, tokens)
 
     assert "".join(plan.script_text for plan in plans) == script
-    assert all(plan.duration_seconds <= 45.01 for plan in plans)
+    assert all(plan.duration_seconds <= 30.01 for plan in plans)
     boundary_index = next(
         index
         for index, plan in enumerate(plans[:-1])
@@ -152,4 +152,3 @@ def test_funasr_http_provider_posts_audio_and_builds_plans(
     assert posted["headers"] == {"Authorization": "Bearer secret"}
     assert posted["timeout"] == (10, 321)
     assert "".join(plan.script_text for plan in result.plans) == script
-

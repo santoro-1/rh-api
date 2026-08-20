@@ -27,7 +27,12 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import Settings, get_settings
 from app.database import get_db
-from app.models import LongAudioProject, LongAudioProjectStatus
+from app.models import (
+    LongAudioProject,
+    LongAudioProjectStatus,
+    LtxPreparationJob,
+    LtxPreparationStatus,
+)
 from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import log_event
 from app.services.long_audio import (
@@ -167,6 +172,16 @@ def _claim_next(
                 + timedelta(seconds=settings.media_worker_lease_seconds),
                 remote_last_heartbeat_at=now,
             )
+        )
+        preparation_status = (
+            LtxPreparationStatus.ASR_RUNNING.value
+            if action == "analysis"
+            else LtxPreparationStatus.MATERIALIZING.value
+        )
+        db.execute(
+            update(LtxPreparationJob)
+            .where(LtxPreparationJob.long_audio_project_id == project_id)
+            .values(status=preparation_status, error_code=None, error_message=None)
         )
         db.commit()
         if result.rowcount != 1:
@@ -383,6 +398,116 @@ def _remote_plans(raw_segments: Any) -> list[SegmentPlan]:
     return plans
 
 
+def _alignment_timeline(
+    project: LongAudioProject,
+    raw_alignment: Any,
+    plans: list[SegmentPlan],
+    provider: str,
+) -> tuple[str, float]:
+    if not isinstance(raw_alignment, dict):
+        raise HTTPException(status_code=400, detail="alignment 格式错误")
+    raw_tokens = raw_alignment.get("tokens")
+    if not isinstance(raw_tokens, list) or not raw_tokens:
+        raise HTTPException(status_code=400, detail="alignment 缺少原稿时间轴")
+    try:
+        match_ratio = float(raw_alignment["matchRatio"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="alignment 匹配率格式错误") from exc
+    if not 0 <= match_ratio <= 1:
+        raise HTTPException(status_code=400, detail="alignment 匹配率超出范围")
+    tokens: list[dict[str, Any]] = []
+    previous_script_end = -1
+    previous_start = -0.1
+    for position, raw in enumerate(raw_tokens, start=1):
+        if not isinstance(raw, dict):
+            raise HTTPException(
+                status_code=400, detail=f"alignment 第 {position} 个 token 格式错误"
+            )
+        try:
+            text = str(raw["text"])
+            script_start = int(raw["scriptStart"])
+            script_end = int(raw["scriptEnd"])
+            start_seconds = float(raw["startSeconds"])
+            end_seconds = float(raw["endSeconds"])
+            confidence = (
+                float(raw["confidence"])
+                if raw.get("confidence") is not None
+                else None
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"alignment 第 {position} 个 token 格式错误"
+            ) from exc
+        if (
+            not text
+            or script_start < 0
+            or script_end <= script_start
+            or script_end > len(project.script_text)
+            or script_start < previous_script_end
+            or start_seconds < previous_start
+            or end_seconds <= start_seconds
+            or end_seconds > project.duration_seconds + 1.0
+        ):
+            raise HTTPException(
+                status_code=400, detail=f"alignment 第 {position} 个 token 时间轴无效"
+            )
+        if project.script_text[script_start:script_end] != text:
+            raise HTTPException(
+                status_code=400, detail=f"alignment 第 {position} 个 token 未绑定原稿"
+            )
+        tokens.append(
+            {
+                "text": text,
+                "script_start": script_start,
+                "script_end": script_end,
+                "start_ms": round(start_seconds * 1000),
+                "end_ms": round(end_seconds * 1000),
+                "confidence": confidence,
+            }
+        )
+        previous_script_end = script_end
+        previous_start = start_seconds
+    segment_rows: list[dict[str, Any]] = []
+    script_cursor = 0
+    for plan in plans:
+        script_start = project.script_text.find(plan.script_text, script_cursor)
+        if script_start < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"第 {plan.index} 段原稿无法映射回完整原稿",
+            )
+        script_end = script_start + len(plan.script_text)
+        segment_rows.append(
+            {
+                "index": plan.index,
+                "start_ms": round(plan.start_seconds * 1000),
+                "end_ms": round(plan.end_seconds * 1000),
+                "script_start": script_start,
+                "script_end": script_end,
+                "script_text": plan.script_text,
+            }
+        )
+        script_cursor = script_end
+    preparation = project.ltx_preparation_job
+    timeline = {
+        "schema": "ltx.aligned-script.v1",
+        "script_sha256": (
+            preparation.script_sha256 if preparation is not None else None
+        ),
+        "audio_sha256": (
+            preparation.source_audio_sha256 if preparation is not None else None
+        ),
+        "provider": provider,
+        "match_ratio": match_ratio,
+        "tokens": tokens,
+        "segments": segment_rows,
+    }
+    encoded = json.dumps(timeline, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > 4 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="alignment 原稿时间轴过大")
+    return encoded, match_ratio
+
+
 @router.post("/jobs/{project_id}/analysis")
 async def complete_analysis(
     project_id: str,
@@ -399,12 +524,43 @@ async def complete_analysis(
         expected_status=LongAudioProjectStatus.ANALYZING.value,
     )
     try:
+        plans = _remote_plans(body.get("segments"))
+        provider = str(body.get("provider") or "funasr_http")[:50]
         apply_alignment_plans(
             project,
             settings,
-            _remote_plans(body.get("segments")),
-            provider=str(body.get("provider") or "funasr_http")[:50],
+            plans,
+            provider=provider,
         )
+        preparation = project.ltx_preparation_job
+        if preparation is not None:
+            timeline_json, match_ratio = _alignment_timeline(
+                project,
+                body.get("alignment"),
+                plans,
+                provider,
+            )
+            preparation.alignment_provider = provider
+            preparation.alignment_score = match_ratio
+            preparation.alignment_timeline_json = timeline_json
+            preparation.segment_plan_json = project.plan_json
+            preparation.status = LtxPreparationStatus.READY_TO_MATERIALIZE.value
+            preparation.error_code = None
+            preparation.error_message = None
+            full_source_plan = (
+                len(plans) == 1
+                and plans[0].start_seconds <= 0.05
+                and abs(plans[0].end_seconds - project.duration_seconds) <= 0.75
+            )
+            if full_source_plan:
+                materialize_long_audio_project(
+                    db,
+                    project,
+                    settings,
+                    preserve_full_source=True,
+                )
+                preparation.status = LtxPreparationStatus.COMPLETED.value
+                preparation.completed_at = _now()
         metrics = _metrics_json(body.get("metrics"))
         if metrics is not None:
             project.remote_metrics_json = metrics
@@ -529,6 +685,13 @@ def complete_cut(
                 settings,
                 precut_directory=extracted,
             )
+        preparation = project.ltx_preparation_job
+        if preparation is not None:
+            preparation.status = LtxPreparationStatus.COMPLETED.value
+            preparation.segment_plan_json = project.plan_json
+            preparation.error_code = None
+            preparation.error_message = None
+            preparation.completed_at = _now()
         if parsed_metrics is not None:
             project.remote_metrics_json = _metrics_json(parsed_metrics)
         _clear_lease(project)
@@ -569,6 +732,11 @@ async def fail_job(
     project.error_message = str(
         body.get("error") or "远程媒体节点处理失败"
     )[:4000]
+    preparation = project.ltx_preparation_job
+    if preparation is not None:
+        preparation.status = LtxPreparationStatus.FAILED.value
+        preparation.error_code = project.error_code
+        preparation.error_message = project.error_message
     sync_linked_batch_item(project)
     metrics = _metrics_json(body.get("metrics"))
     if metrics is not None:

@@ -9,7 +9,7 @@ import requests
 from app.services.alignment.base import AlignmentResult
 from app.services.alignment.script_timestamps import (
     RecognizedToken,
-    plan_script_aligned_segments,
+    align_script_timeline,
 )
 from app.services.audio import inspect_audio_duration
 from app.services.media_segmentation import MediaSegmentationError
@@ -71,8 +71,13 @@ class FunASRHTTPProvider:
             raise MediaSegmentationError("ASR 服务返回的不是有效 JSON") from exc
         tokens = _parse_tokens(payload)
         duration = inspect_audio_duration(audio_path)
-        plans = plan_script_aligned_segments(script, duration, tokens)
-        return AlignmentResult(provider=self.name, plans=tuple(plans))
+        alignment = align_script_timeline(script, duration, tokens)
+        return AlignmentResult(
+            provider=self.name,
+            plans=alignment.plans,
+            tokens=alignment.tokens,
+            match_ratio=alignment.match_ratio,
+        )
 
 
 def _response_error(response: requests.Response) -> str:
@@ -114,4 +119,3 @@ def _parse_tokens(payload: Any) -> list[RecognizedToken]:
             )
         )
     return tokens
-

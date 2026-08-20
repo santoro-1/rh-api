@@ -15,7 +15,7 @@ from app.services.speech.async_outputs import SubtitleCue
 logger = logging.getLogger(__name__)
 
 TARGET_SEGMENT_SECONDS = 30.0
-MAX_SEGMENT_SECONDS = 45.0
+MAX_SEGMENT_SECONDS = 30.0
 DIGITAL_HUMAN_MAX_SEGMENT_SECONDS = 35.0
 _MIN_USEFUL_SEGMENT_SECONDS = 12.0
 _STRONG_BREAK_RE = re.compile(r".+?(?:[。！？!?；;]+|\n+)|.+$", re.DOTALL)
@@ -238,8 +238,6 @@ def plan_audio_segments(
             relative = estimated_end - time_start
             if relative < _MIN_USEFUL_SEGMENT_SECONDS:
                 continue
-            if relative > max_segment_seconds:
-                break
             nearby = [
                 point
                 for point in silences
@@ -248,11 +246,19 @@ def plan_audio_segments(
                 <= time_start + max_segment_seconds
                 and abs(point - estimated_end) <= 3.0
             ]
+            # A text-weight estimate can sit just beyond the hard limit while
+            # a real pause for that same script boundary is still safely
+            # inside it.  Keep that pause instead of prematurely falling back
+            # to the preceding, often much shorter sentence.
+            if relative > max_segment_seconds and not nearby:
+                break
             actual_end = min(
                 nearby,
                 key=lambda point: abs(point - estimated_end),
                 default=estimated_end,
             )
+            if actual_end - time_start > max_segment_seconds:
+                break
             used_silence = bool(nearby)
             score = abs((actual_end - time_start) - target_segment_seconds)
             preferred_lower = max(

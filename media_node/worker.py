@@ -223,6 +223,9 @@ class RemoteMediaClient:
         provider: str,
         plans: tuple[SegmentPlan, ...],
         metrics: dict[str, Any],
+        *,
+        tokens: tuple[Any, ...] = (),
+        match_ratio: float | None = None,
     ) -> None:
         response = requests.post(
             self._url(f"/api/media-worker/v1/jobs/{job_id}/analysis"),
@@ -240,6 +243,21 @@ class RemoteMediaClient:
                     }
                     for plan in plans
                 ],
+                "alignment": {
+                    "schema": "ltx.aligned-script.v1",
+                    "matchRatio": match_ratio,
+                    "tokens": [
+                        {
+                            "text": token.text,
+                            "scriptStart": token.script_start,
+                            "scriptEnd": token.script_end,
+                            "startSeconds": token.start_seconds,
+                            "endSeconds": token.end_seconds,
+                            "confidence": token.confidence,
+                        }
+                        for token in tokens
+                    ],
+                },
                 "metrics": metrics,
             },
             timeout=(10, 120),
@@ -464,6 +482,8 @@ def process_job(
             if action == "analysis":
                 if workflow_type == "digital_human":
                     result_provider = "vad_silence"
+                    result_tokens = ()
+                    result_match_ratio = None
                     result_plans = tuple(
                         plan_silence_segments(
                             float(job.get("durationSeconds") or 0),
@@ -486,6 +506,8 @@ def process_job(
                     )
                     result_provider = result.provider
                     result_plans = result.plans
+                    result_tokens = result.tokens
+                    result_match_ratio = result.match_ratio
                 metrics = _metrics(
                     phase="analysis_completed",
                     started=started,
@@ -505,6 +527,8 @@ def process_job(
                     result_provider,
                     result_plans,
                     metrics,
+                    tokens=result_tokens,
+                    match_ratio=result_match_ratio,
                 )
             else:
                 video_bytes = 0

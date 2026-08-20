@@ -26,6 +26,7 @@ from app.routes import (
     tasks,
     voices,
     workbench,
+    workbench_ltx,
 )
 from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import configure_logging, log_event
@@ -112,6 +113,7 @@ def create_app() -> FastAPI:
     app.include_router(media_worker_api.router)
     app.include_router(operations.router)
     app.include_router(workbench.router)
+    app.include_router(workbench_ltx.router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthcheck():

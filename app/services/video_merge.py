@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import Settings
 from app.models import (
+    BATCH_SOURCE_LTX_WORKBENCH,
     BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatchItem,
     GenerationSegment,
@@ -49,7 +50,10 @@ def merged_video_output_dir(settings: Settings, user_id: int, item_id: str) -> P
 def merge_status_after_handoff(source_channel: str, segment_count: int) -> str:
     """Choose the merge path without changing the legacy single-row flow."""
 
-    if source_channel == BATCH_SOURCE_NEW_WORKBENCH or segment_count > 1:
+    if source_channel in {
+        BATCH_SOURCE_NEW_WORKBENCH,
+        BATCH_SOURCE_LTX_WORKBENCH,
+    } or segment_count > 1:
         return MERGE_PENDING
     return MERGE_NOT_APPLICABLE
 
@@ -306,7 +310,10 @@ def merge_batch_item(
     is_new_workbench = (
         item.batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
     )
-    if len(item.segments) == 1 and not is_new_workbench:
+    is_ltx_workbench = (
+        item.batch.source_channel == BATCH_SOURCE_LTX_WORKBENCH
+    )
+    if len(item.segments) == 1 and not (is_new_workbench or is_ltx_workbench):
         return False
     if item.merged_video_status != MERGE_PENDING:
         return False
@@ -315,7 +322,25 @@ def merge_batch_item(
     if any(task is None or task.status != TaskStatus.SUCCESS.value for task in tasks):
         return False
 
+    if is_ltx_workbench and len(tasks) == 1:
+        task = tasks[0]
+        assert task is not None
+        if not task.result_path:
+            item.merged_video_status = MERGE_FAILED
+            item.merged_video_error = "LTX 分段任务成功但没有本地视频文件"
+        else:
+            item.merged_video_path = task.result_path
+            item.merged_video_status = MERGED_PREVIEW_READY
+            item.merged_video_error = None
+            item.merged_at = _now()
+            item.merged_reviewed_at = None
+        db.commit()
+        return True
+
     inputs: list[Path] = []
+    # LTX segments follow one source video's original cumulative timeline.
+    # Use a hard, order-preserving concat; the digital-human workbench keeps
+    # its existing duration-preserving dissolve behavior.
     target_durations: list[float] | None = [] if is_new_workbench else None
     for task in tasks:
         assert task is not None

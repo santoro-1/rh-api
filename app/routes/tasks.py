@@ -29,6 +29,7 @@ from app.services.audio import (
 from app.services.media_segmentation import (
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     MAX_SEGMENT_SECONDS,
+    inspect_media_duration,
 )
 from app.services.csrf import require_csrf
 from app.services.storage import (
@@ -454,7 +455,14 @@ def create_ltx_lip_sync_task(
         duration = inspect_audio_duration(audio_path)
         if duration > MAX_SEGMENT_SECONDS + 0.01:
             raise ValueError(
-                "音频不能超过 45 秒；请先拆分音频，或使用脚本完整流程自动切分"
+                f"音频不能超过 {MAX_SEGMENT_SECONDS:g} 秒；"
+                "请先拆分音频，或使用脚本完整流程自动切分"
+            )
+        video_duration = inspect_media_duration(video_path)
+        if video_duration + 0.05 < duration:
+            raise ValueError(
+                f"源视频时长不足：视频 {video_duration:.1f} 秒，"
+                f"音频 {duration:.1f} 秒"
             )
         assets.append(
             WorkflowAsset(

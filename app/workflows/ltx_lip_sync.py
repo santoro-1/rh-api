@@ -37,10 +37,13 @@ class LtxLipSyncWorkflow:
         ).strip()
         if requested_instance_type not in {"default", "plus"}:
             raise ValueError("实例类型只能为普通版 default 或 Plus")
-        return {
+        validated = {
             "prompt": prompt,
             "instance_type": requested_instance_type,
         }
+        if "seedvr2_enabled" in parameters:
+            validated["seedvr2_enabled"] = bool(parameters["seedvr2_enabled"])
+        return validated
 
     def serialize_input(
         self,

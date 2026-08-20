@@ -342,6 +342,10 @@ def test_ltx_task_creation_saves_custom_audio(client, monkeypatch):
         "app.routes.tasks.inspect_audio_duration",
         lambda path: 15.5,
     )
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_media_duration",
+        lambda path: 15.5,
+    )
     response = client.post(
         "/api/tasks/ltx-lip-sync",
         data={"prompt": "自定义配音", "instanceType": "default"},
@@ -364,3 +368,100 @@ def test_ltx_task_creation_saves_custom_audio(client, monkeypatch):
             "instance_type": "default",
         }
         assert task.audio_original_name == "voice.mp3"
+
+
+def test_ltx_task_creation_rejects_audio_over_30_seconds(client, monkeypatch):
+    create_user("ltx-over-limit-creator")
+    _enable_ltx_workflow("ltx-over-limit-creator")
+    login(client, "ltx-over-limit-creator")
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_audio_duration",
+        lambda path: 30.1,
+    )
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_media_duration",
+        lambda path: 30.1,
+    )
+
+    response = client.post(
+        "/api/tasks/ltx-lip-sync",
+        data={"prompt": "自定义配音", "instanceType": "default"},
+        files={
+            "sourceVideo": (
+                "source.mp4",
+                b"\x00\x00\x00\x18ftypisompayload",
+                "video/mp4",
+            ),
+            "customAudio": ("voice.mp3", b"ID3audio", "audio/mpeg"),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "音频不能超过 30 秒；请先拆分音频，或使用脚本完整流程自动切分"
+    )
+
+
+def test_ltx_task_creation_rejects_video_shorter_than_complete_audio(
+    client, monkeypatch
+):
+    create_user("ltx-short-video-creator")
+    _enable_ltx_workflow("ltx-short-video-creator")
+    login(client, "ltx-short-video-creator")
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_audio_duration",
+        lambda path: 30.0,
+    )
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_media_duration",
+        lambda path: 20.0,
+    )
+
+    response = client.post(
+        "/api/tasks/ltx-lip-sync",
+        data={"prompt": "自定义配音", "instanceType": "default"},
+        files={
+            "sourceVideo": (
+                "source.mp4",
+                b"\x00\x00\x00\x18ftypisompayload",
+                "video/mp4",
+            ),
+            "customAudio": ("voice.mp3", b"ID3audio", "audio/mpeg"),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "源视频时长不足：视频 20.0 秒，音频 30.0 秒"
+    )
+
+
+def test_ltx_task_creation_accepts_equal_video_and_audio_with_probe_tolerance(
+    client, monkeypatch
+):
+    create_user("ltx-equal-duration-creator")
+    _enable_ltx_workflow("ltx-equal-duration-creator")
+    login(client, "ltx-equal-duration-creator")
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_audio_duration",
+        lambda path: 30.0,
+    )
+    monkeypatch.setattr(
+        "app.routes.tasks.inspect_media_duration",
+        lambda path: 29.96,
+    )
+
+    response = client.post(
+        "/api/tasks/ltx-lip-sync",
+        data={"prompt": "自定义配音", "instanceType": "default"},
+        files={
+            "sourceVideo": (
+                "source.mp4",
+                b"\x00\x00\x00\x18ftypisompayload",
+                "video/mp4",
+            ),
+            "customAudio": ("voice.mp3", b"ID3audio", "audio/mpeg"),
+        },
+    )
+
+    assert response.status_code == 201

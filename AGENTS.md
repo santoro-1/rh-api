@@ -20,6 +20,9 @@
 
 - 修改任务生成、45 秒切分、状态机、取消、重试、数据库或 Worker：读 `MAINTENANCE.md`、`PROJECT_STATUS.md` 和 `CHANGELOG.md` 的最新日期。
 - 修改或增加 RunningHub 工作流：读 `WORKFLOW_EXTENSION.md`。
+- 修改 LTX 对口型、上传音视频、ASR 对齐原稿、LTX 独立工作台或其跨项目接口：同时读
+  `D:\工作内容\轻盈健\数字人\ltx_lip_sync_workbench\LTX对口型独立工作台开发文档.md`
+  和工作区根目录 `ltx2.3对口型api文档.md`。
 - 修改 SeedVR2 视频放大、数字人清晰化阶段、清晰片段输出或其重试/取消/费用保护：同时读
   `SeedVR2视频清晰化流程开发文档.md` 和工作区根目录 `SeedVr2放大api文档.md`。
 - 修改生产部署、服务器配置、备份或恢复：读 `deploy/README.md`。

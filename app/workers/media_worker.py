@@ -18,6 +18,7 @@ from app.services.logging_config import (
 )
 from app.services.long_audio import (
     analyze_long_audio_project,
+    load_plans,
     materialize_long_audio_project,
     sync_linked_batch_item,
 )
@@ -133,7 +134,19 @@ def process_next(db: Session) -> bool:
                 else "长音频分段分析完成，已自动进入切割队列"
             )
         else:
-            batch = materialize_long_audio_project(db, project, get_settings())
+            plans = load_plans(project)
+            preserve_full_source = (
+                project.ltx_preparation_job is not None
+                and len(plans) == 1
+                and plans[0].start_seconds <= 0.05
+                and abs(plans[0].end_seconds - project.duration_seconds) <= 0.75
+            )
+            batch = materialize_long_audio_project(
+                db,
+                project,
+                get_settings(),
+                preserve_full_source=preserve_full_source,
+            )
             event = "media.handoff_completed"
             message = "长音频切割完成，视频子任务已进入本地队列"
             log_event(

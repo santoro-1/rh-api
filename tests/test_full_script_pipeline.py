@@ -105,9 +105,9 @@ def test_local_segment_plan_preserves_script_and_hard_limit():
         silence_midpoints=[29.5, 56.4],
     )
 
-    assert len(plans) == 3
+    assert len(plans) == 4
     assert "".join(plan.script_text for plan in plans) == script
-    assert all(plan.duration_seconds <= 45.0 for plan in plans)
+    assert all(plan.duration_seconds <= 30.0 for plan in plans)
     assert plans[0].end_seconds == 29.5
     assert plans[-1].end_seconds == 82.0
 
@@ -115,7 +115,7 @@ def test_local_segment_plan_preserves_script_and_hard_limit():
 def test_silence_plan_avoids_tiny_tail_and_never_needs_transcript():
     plans = plan_silence_segments(91.0, silence_midpoints=[44.0])
     assert all(plan.script_text == "" for plan in plans)
-    assert all(12.0 <= plan.duration_seconds <= 45.0 for plan in plans)
+    assert all(12.0 <= plan.duration_seconds <= 30.0 for plan in plans)
     assert plans[0].start_seconds == 0
     assert plans[-1].end_seconds == 91.0
 

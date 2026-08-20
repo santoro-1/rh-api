@@ -56,7 +56,7 @@ def prepare_task_retry(
         )
     retry_time = now or datetime.now(timezone.utc)
     enhancement = task.enhancement
-    if task.workflow_type == "digital_human" and enhancement is not None:
+    if enhancement is not None:
         if enhancement_has_uncertain_submission(enhancement):
             raise TaskManagementError(
                 "SeedVR2 提交结果无法确认，禁止重新提交；请管理员先核对原执行账号"
@@ -67,11 +67,11 @@ def prepare_task_retry(
             )
         except ValueError as exc:
             raise TaskManagementError(
-                "数字人源片段路径不合法，无法重试清晰化"
+                "源视频片段路径不合法，无法重试清晰化"
             ) from exc
         if not source_path.is_file():
             raise TaskManagementError(
-                "数字人源片段已清理，无法只重试清晰化；请重新生成数字人"
+                "源视频片段已清理，无法只重试清晰化；请重新生成源视频阶段"
             )
         if (
             enhancement.status == EnhancementStatus.DOWNLOAD_FAILED.value

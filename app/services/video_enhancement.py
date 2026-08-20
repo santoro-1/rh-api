@@ -7,6 +7,7 @@ import uuid
 
 from app.config import Settings
 from app.models import (
+    BATCH_SOURCE_LTX_WORKBENCH,
     EnhancementStatus,
     GenerationTask,
     GenerationTaskEnhancement,
@@ -17,6 +18,28 @@ from app.services.storage import safe_relative_path
 
 class VideoEnhancementBackfillError(ValueError):
     """A historical digital-human result cannot enter SeedVR2 safely."""
+
+
+def task_is_ltx_workbench(task: GenerationTask) -> bool:
+    """Identify only the independent LTX workbench, never the legacy LTX page."""
+
+    item = task.batch_item or (
+        task.segment.batch_item if task.segment is not None else None
+    )
+    batch = item.batch if item is not None else None
+    return bool(
+        task.workflow_type == "ltx_lip_sync"
+        and batch is not None
+        and batch.source_channel == BATCH_SOURCE_LTX_WORKBENCH
+    )
+
+
+def task_uses_seedvr2_pipeline(task: GenerationTask) -> bool:
+    """Return whether source success must continue into a SeedVR2 stage."""
+
+    if not task.seedvr2_enabled:
+        return False
+    return task.workflow_type == "digital_human" or task_is_ltx_workbench(task)
 
 
 def _file_sha256(path: Path) -> str:
@@ -102,8 +125,6 @@ def queue_historical_seedvr2_enhancement(
 
 
 def task_processing_stage(task: GenerationTask) -> str | None:
-    if task.workflow_type != "digital_human":
-        return None
     enhancement = task.enhancement
     if enhancement is not None:
         if enhancement.status == EnhancementStatus.SUCCESS.value:
@@ -113,6 +134,16 @@ def task_processing_stage(task: GenerationTask) -> str | None:
         if enhancement.status == EnhancementStatus.CANCELLED.value:
             return "CANCELLED"
         return "VIDEO_ENHANCING"
+    if task_is_ltx_workbench(task):
+        if task.status == TaskStatus.SUCCESS.value:
+            return "BASE_VIDEO_READY"
+        if task.status in {TaskStatus.FAILED.value, TaskStatus.DOWNLOAD_FAILED.value}:
+            return "LTX_FAILED"
+        if task.status == TaskStatus.CANCELLED.value:
+            return "CANCELLED"
+        return "LTX_RUNNING"
+    if task.workflow_type != "digital_human":
+        return None
     if task.status == TaskStatus.SUCCESS.value:
         # Historical tasks completed before SeedVR2 was introduced.
         return "BASE_VIDEO_READY"
@@ -126,8 +157,7 @@ def task_processing_stage(task: GenerationTask) -> str | None:
 def task_quality_variant(task: GenerationTask) -> str | None:
     enhancement = task.enhancement
     if (
-        task.workflow_type == "digital_human"
-        and enhancement is not None
+        enhancement is not None
         and enhancement.status == EnhancementStatus.SUCCESS.value
     ):
         return "seedvr2_upscaled"

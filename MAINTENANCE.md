@@ -16,6 +16,7 @@ app/services/batch_lifecycle.py 批次失败重试、终态删除和文件清理
 app/services/audio_review.py 完整语音审核、整批通过和再次生成状态转换
 app/services/speech/         MiniMax 协议、异步结果和声音制作任务
 app/services/media_segmentation.py 音频/视频探测、分段计划和 FFmpeg 切割
+app/services/ltx_workbench.py 独立 LTX 工作台逐行预检、幂等创建、状态与失败合同
 app/services/video_merge.py 分段结果按顺序统一规格、拼接、失效和成片审核状态
 app/workers/audio_worker.py  领取脚本语音队列、生成整段音频、审核后切分和视频交接
 app/services/speech/voice_jobs.py 克隆/融合试听、付费保护和保存音色
@@ -57,6 +58,21 @@ scripts/local_services.py    本地一键启动、停止、子进程守护
          -> 每段 GenerationTask(PENDING) -> 数字人/SeedVR2 两阶段 FIFO Worker
 ```
 
+独立上传音频 LTX 工作台：
+
+```text
+工作台 staged 视频/音频 + 表格原稿
+  -> LtxPreparationJob(PENDING_ANALYSIS)
+  -> Windows 媒体节点 FunASR + 原稿时间轴
+  -> 单段保留原文件 / 多段同区间切音视频
+  -> GenerationSegment -> LTX RunningHub Worker
+  -> 原始结果保留 -> 基础视频 -> 本地剪映精确字幕交接
+```
+
+该入口的时长条件是同一行完整源视频覆盖同一行完整音频，允许 0.05 秒探测误差。不可改成
+“只覆盖单个切片”，也不可错误累加项目中其他行音频。新旧 LTX 入口统一使用 30 秒单段
+硬上限；正好 30 秒保留单段，超过上限进入 ASR/时间轴切分，旧单条入口则明确要求改用完整流程。
+
 `GenerationBatch` 是用户看到的总批次；`GenerationBatchItem` 是清单中的一行；
 `GenerationSegment` 是长音频切出的可见子任务；`GenerationTask` 是一个用户可见的逻辑
 分段。启用放大时，数字人逻辑分段包含数字人和 SeedVR2 两笔一对一 RunningHub 调用，后者由
@@ -78,6 +94,7 @@ scripts/local_services.py    本地一键启动、停止、子进程守护
 - MiniMax 异步语音的 `provider_task_id` 和原始结果包必须先持久化，再进入后续处理。
 - `AWAITING_REVIEW` 表示完整音频已生成但尚未切分，不应由重启恢复逻辑标记失败。
 - 重新生成语音和普通视频失败重试可能再次计费；仅视频下载失败应复用远程任务 ID。
+- 独立 LTX 工作台分段失败重试必须再次确认费用并提供幂等键；`OOM_KILLED` 不自动重提。
 - 用户上传的现成音频始终是独立入口，不能让视频生成强依赖 MiniMax。
 
 状态字符串当前仍跨模型、后端聚合和页面展示使用。新增状态时至少同时检查模型枚举、

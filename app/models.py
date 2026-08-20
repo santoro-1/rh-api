@@ -94,6 +94,18 @@ class LongAudioProjectStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class LtxPreparationStatus(str, Enum):
+    UPLOADED = "UPLOADED"
+    ASR_PENDING = "ASR_PENDING"
+    ASR_RUNNING = "ASR_RUNNING"
+    ALIGNING = "ALIGNING"
+    READY_TO_MATERIALIZE = "READY_TO_MATERIALIZE"
+    MATERIALIZING = "MATERIALIZING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -144,6 +156,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     long_audio_projects: Mapped[list["LongAudioProject"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    ltx_preparation_jobs: Mapped[list["LtxPreparationJob"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     runninghub_pool_memberships: Mapped[list["RunningHubPoolMembership"]] = relationship(
@@ -878,7 +893,7 @@ class GenerationTaskAttempt(Base):
 
 
 class GenerationTaskEnhancement(Base):
-    """Durable one-to-one SeedVR2 stage for one digital-human segment."""
+    """Durable one-to-one SeedVR2 stage for one generated video segment."""
 
     __tablename__ = "generation_task_enhancements"
 
@@ -1016,6 +1031,7 @@ class GenerationTaskEnhancementAttempt(Base):
 
 BATCH_SOURCE_LEGACY_WEB = "legacy_web"
 BATCH_SOURCE_NEW_WORKBENCH = "new_workbench"
+BATCH_SOURCE_LTX_WORKBENCH = "ltx_workbench"
 BATCH_EXECUTION_MODE_SAME_ACCOUNT_V1 = "same_account_v1"
 BATCH_EXECUTION_MODE_DUAL_POOL_V1 = "dual_pool_v1"
 
@@ -1137,6 +1153,11 @@ class GenerationBatchItem(Base):
         back_populates="batch_item",
         uselist=False,
     )
+    ltx_preparation_job: Mapped[Optional["LtxPreparationJob"]] = relationship(
+        back_populates="batch_item",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         UniqueConstraint("batch_id", "row_number", name="uq_batch_items_row_number"),
@@ -1247,6 +1268,85 @@ class LongAudioProject(Base):
     batch: Mapped[Optional["GenerationBatch"]] = relationship()
     batch_item: Mapped[Optional["GenerationBatchItem"]] = relationship(
         back_populates="long_audio_project"
+    )
+    ltx_preparation_job: Mapped[Optional["LtxPreparationJob"]] = relationship(
+        back_populates="long_audio_project",
+        uselist=False,
+    )
+
+
+class LtxPreparationJob(Base):
+    """Unified uploaded video/audio preparation for one LTX workbench row."""
+
+    __tablename__ = "ltx_preparation_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    batch_item_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batch_items.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    long_audio_project_id: Mapped[str] = mapped_column(
+        ForeignKey("long_audio_projects.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_video_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_video_original_name: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    source_video_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_audio_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_audio_original_name: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    source_audio_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    script_text: Mapped[str] = mapped_column(Text, nullable=False)
+    script_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    video_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    alignment_provider: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
+    alignment_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    alignment_timeline_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    segment_plan_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default=LtxPreparationStatus.ASR_PENDING.value,
+        index=True,
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped[User] = relationship(back_populates="ltx_preparation_jobs")
+    batch_item: Mapped[GenerationBatchItem] = relationship(
+        back_populates="ltx_preparation_job"
+    )
+    long_audio_project: Mapped[LongAudioProject] = relationship(
+        back_populates="ltx_preparation_job"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_ltx_preparation_user_idempotency",
+        ),
     )
 
 

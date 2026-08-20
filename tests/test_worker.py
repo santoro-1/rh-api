@@ -7,7 +7,11 @@ import pytest
 
 from app.database import SessionLocal
 from app.models import (
+    BATCH_SOURCE_LTX_WORKBENCH,
     EnhancementStatus,
+    GenerationBatch,
+    GenerationBatchItem,
+    GenerationSegment,
     GenerationTask,
     GenerationTaskEnhancement,
     TaskStatus,
@@ -729,17 +733,154 @@ def test_worker_submits_ltx_task_to_workflow_endpoint(monkeypatch):
         )
         db.commit()
 
-    fake = FakeRunningHub()
+    fake = FakeRunningHub(
+        query_result={
+            "taskId": "submitted-remote-id",
+            "status": "SUCCESS",
+            "results": [
+                {
+                    "nodeId": "260",
+                    "outputType": "mp4",
+                    "url": "https://x/ltx.mp4",
+                }
+            ],
+        }
+    )
     monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
     with SessionLocal() as db:
         task_worker.process_task(db, "ltx-worker-task")
         task = db.get(GenerationTask, "ltx-worker-task")
         assert task.runninghub_task_id == "submitted-remote-id"
+        task_worker.process_task(db, "ltx-worker-task")
+        db.expire_all()
+        task = db.get(GenerationTask, "ltx-worker-task")
+        assert task.status == TaskStatus.SUCCESS.value
+        assert task.enhancement is None
     assert fake.submissions == 1
+    assert fake.download_calls == 1
     assert fake.ai_app_id == "2080551073030434817"
     assert fake.submission_type == "workflow"
     assert fake.last_payload["instanceType"] == "plus"
     assert fake.last_payload["accessPassword"] == "private-workflow-password"
+
+
+def test_ltx_workbench_success_runs_seedvr2_before_final_success(monkeypatch):
+    user = create_user("ltx-seedvr2-workbench-user")
+    with SessionLocal() as db:
+        db.add(
+            WorkflowConfig(
+                user_id=user.id,
+                workflow_key="ltx_lip_sync",
+                ai_app_id="2080551073030434817",
+                instance_type="plus",
+                default_prompt="unused",
+                is_enabled=True,
+            )
+        )
+        batch = GenerationBatch(
+            id="ltx-seedvr2-batch",
+            user_id=user.id,
+            name="LTX SeedVR2 batch",
+            workflow_type="ltx_lip_sync",
+            source_channel=BATCH_SOURCE_LTX_WORKBENCH,
+            audio_mode="upload",
+            request_key="ltx-seedvr2-request",
+            total_items=1,
+        )
+        item = GenerationBatchItem(
+            id="ltx-seedvr2-item",
+            row_number=1,
+            row_key="ROW-001",
+            manifest_json="{}",
+            merged_video_status="MERGE_PENDING",
+        )
+        segment = GenerationSegment(
+            id="ltx-seedvr2-segment",
+            segment_index=1,
+            script_text="你好",
+            start_seconds=0,
+            end_seconds=10,
+            audio_path="uploads/ltx/audio.mp3",
+            video_path="uploads/ltx/video.mp4",
+            prompt="一个人用中文说：“你好”",
+            status="TASK_CREATED",
+        )
+        task = GenerationTask(
+            id="ltx-seedvr2-task",
+            user_id=user.id,
+            workflow_type="ltx_lip_sync",
+            seedvr2_enabled=True,
+            input_payload="{}",
+            image_path="uploads/ltx/video.mp4",
+            audio_path="uploads/ltx/audio.mp3",
+            image_original_name="video.mp4",
+            audio_original_name="audio.mp3",
+            audio_duration_seconds=10,
+            start_seconds=0,
+            end_seconds=10,
+            prompt="一个人用中文说：“你好”",
+            status=TaskStatus.RUNNING.value,
+            runninghub_task_id="ltx-source-remote-id",
+        )
+        task.segment = segment
+        item.segments.append(segment)
+        batch.items.append(item)
+        db.add(batch)
+        db.add(task)
+        db.commit()
+
+    fake = FakeRunningHub(
+        query_results={
+            "ltx-source-remote-id": {
+                "taskId": "ltx-source-remote-id",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "nodeId": "260",
+                        "outputType": "mp4",
+                        "url": "https://x/ltx-source.mp4",
+                    }
+                ],
+            },
+            "submitted-remote-id": {
+                "taskId": "submitted-remote-id",
+                "status": "SUCCESS",
+                "results": [
+                    {
+                        "outputType": "mp4",
+                        "url": "https://x/ltx-seedvr2.mp4",
+                    }
+                ],
+            },
+        }
+    )
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+
+    with SessionLocal() as db:
+        task_worker.process_task(db, "ltx-seedvr2-task")
+        task = db.get(GenerationTask, "ltx-seedvr2-task")
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.result_path is None
+        assert task.enhancement is not None
+        source_result_path = task.enhancement.source_result_path
+
+        task_worker.process_task(db, task.id)
+        db.expire_all()
+        task = db.get(GenerationTask, task.id)
+        assert task.enhancement.remote_task_id == "submitted-remote-id"
+        assert fake.last_submission_ai_app_id == "2064116518987845634"
+
+        task_worker.process_task(db, task.id)
+        db.expire_all()
+        task = db.get(GenerationTask, task.id)
+        assert task.status == TaskStatus.SUCCESS.value
+        assert task.result_path == task.enhancement.result_path
+        assert task.result_path != source_result_path
+        assert (get_settings().data_dir / source_result_path).is_file()
+        assert (get_settings().data_dir / task.result_path).is_file()
+
+    assert fake.submissions == 1
+    assert fake.download_calls == 2
 
 
 def test_digital_human_success_runs_one_seedvr2_48g_stage(monkeypatch):

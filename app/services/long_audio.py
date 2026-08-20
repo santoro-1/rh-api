@@ -14,11 +14,13 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import (
+    BATCH_SOURCE_LTX_WORKBENCH,
     GenerationBatch,
     GenerationBatchItem,
     GenerationSegment,
     LongAudioProject,
     LongAudioProjectStatus,
+    LtxPreparationStatus,
     User,
 )
 from app.services.alignment import get_alignment_provider
@@ -79,6 +81,24 @@ def sync_linked_batch_item(project: LongAudioProject) -> None:
     item = project.batch_item
     if item is None:
         return
+    preparation = project.ltx_preparation_job
+    if preparation is not None:
+        preparation_status = {
+            LongAudioProjectStatus.PENDING_ANALYSIS.value: LtxPreparationStatus.ASR_PENDING.value,
+            LongAudioProjectStatus.ANALYZING.value: LtxPreparationStatus.ASR_RUNNING.value,
+            LongAudioProjectStatus.REVIEW.value: LtxPreparationStatus.READY_TO_MATERIALIZE.value,
+            LongAudioProjectStatus.PENDING_CUT.value: LtxPreparationStatus.READY_TO_MATERIALIZE.value,
+            LongAudioProjectStatus.CUTTING.value: LtxPreparationStatus.MATERIALIZING.value,
+            LongAudioProjectStatus.COMPLETED.value: LtxPreparationStatus.COMPLETED.value,
+            LongAudioProjectStatus.FAILED.value: LtxPreparationStatus.FAILED.value,
+            LongAudioProjectStatus.CANCELLED.value: LtxPreparationStatus.CANCELLED.value,
+        }.get(project.status)
+        if preparation_status:
+            preparation.status = preparation_status
+        preparation.error_code = project.error_code
+        preparation.error_message = project.error_message
+        if project.status == LongAudioProjectStatus.COMPLETED.value:
+            preparation.completed_at = preparation.completed_at or _now()
     if project.status == LongAudioProjectStatus.REVIEW.value:
         item.status = "AWAITING_REVIEW"
         item.audio_status = "AWAITING_REVIEW"
@@ -259,7 +279,7 @@ def create_long_audio_project(
                 "seedvr2_enabled": (
                     bool(seedvr2_enabled)
                     if workflow_type == DIGITAL_HUMAN_WORKFLOW
-                    else True
+                    else False
                 ),
                 "digital_prompt": (
                     clean_digital_prompt
@@ -300,6 +320,57 @@ def analyze_long_audio_project(
     else:
         provider = get_alignment_provider(project.alignment_provider)
         result = provider.align(audio_path, project.script_text)
+        preparation = project.ltx_preparation_job
+        if preparation is not None:
+            if result.match_ratio is None or not result.tokens:
+                raise LongAudioError("ASR 没有返回可持久化的原稿时间轴")
+            segment_rows: list[dict[str, Any]] = []
+            script_cursor = 0
+            for plan in result.plans:
+                script_start = project.script_text.find(
+                    plan.script_text, script_cursor
+                )
+                if script_start < 0:
+                    raise LongAudioError(
+                        f"第 {plan.index} 段原稿无法映射回完整原稿"
+                    )
+                script_end = script_start + len(plan.script_text)
+                segment_rows.append(
+                    {
+                        "index": plan.index,
+                        "start_ms": round(plan.start_seconds * 1000),
+                        "end_ms": round(plan.end_seconds * 1000),
+                        "script_start": script_start,
+                        "script_end": script_end,
+                        "script_text": plan.script_text,
+                    }
+                )
+                script_cursor = script_end
+            preparation.alignment_provider = result.provider
+            preparation.alignment_score = result.match_ratio
+            preparation.alignment_timeline_json = json.dumps(
+                {
+                    "schema": "ltx.aligned-script.v1",
+                    "script_sha256": preparation.script_sha256,
+                    "audio_sha256": preparation.source_audio_sha256,
+                    "provider": result.provider,
+                    "match_ratio": result.match_ratio,
+                    "tokens": [
+                        {
+                            "text": token.text,
+                            "script_start": token.script_start,
+                            "script_end": token.script_end,
+                            "start_ms": round(token.start_seconds * 1000),
+                            "end_ms": round(token.end_seconds * 1000),
+                            "confidence": token.confidence,
+                        }
+                        for token in result.tokens
+                    ],
+                    "segments": segment_rows,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         apply_alignment_plans(
             project,
             settings,
@@ -346,6 +417,8 @@ def apply_alignment_plans(
         ) != _normalized_script(project.script_text):
             raise LongAudioError("对齐服务没有完整映射原始脚本")
     project.plan_json = serialize_plans(plans)
+    if project.ltx_preparation_job is not None:
+        project.ltx_preparation_job.segment_plan_json = project.plan_json
     project.alignment_provider = provider
     project.status = (
         LongAudioProjectStatus.REVIEW.value
@@ -465,6 +538,7 @@ def materialize_long_audio_project(
     settings: Settings,
     *,
     precut_directory: Path | None = None,
+    preserve_full_source: bool = False,
 ) -> GenerationBatch:
     if (
         project.status == LongAudioProjectStatus.COMPLETED.value
@@ -556,21 +630,48 @@ def materialize_long_audio_project(
         tuple[GenerationSegment, ValidatedTaskInput, str, datetime]
     ] = []
     base_time = _now()
+    reuse_original_sources = (
+        preserve_full_source
+        and precut_directory is None
+        and workflow_type == LTX_WORKFLOW
+        and len(plans) == 1
+        and plans[0].start_seconds <= 0.05
+        and abs(plans[0].end_seconds - project.duration_seconds) <= 0.75
+    )
+    if preserve_full_source and not reuse_original_sources:
+        raise LongAudioError("只有未切分的完整 LTX 素材可以保留原文件")
     try:
         for plan in plans:
             task_id = str(uuid.uuid4())
             upload_dir = task_upload_dir(settings, user.id, task_id)
             created_directories.append(upload_dir)
-            segment_audio = upload_dir / f"segment-{plan.index:03d}.mp3"
+            audio_suffix = (
+                (Path(project.audio_original_name).suffix or audio_source.suffix)
+                if reuse_original_sources
+                else ".mp3"
+            ) or ".mp3"
+            segment_audio = upload_dir / (
+                f"segment-{plan.index:03d}{audio_suffix.lower()}"
+            )
             visual_suffix = (
-                ".mp4"
+                (
+                    Path(project.video_original_name).suffix
+                    or visual_source.suffix
+                    or ".mp4"
+                )
+                if reuse_original_sources
+                else ".mp4"
                 if workflow_type == LTX_WORKFLOW
                 else (Path(project.video_original_name).suffix or ".png")
             )
             segment_visual = upload_dir / (
                 f"segment-{plan.index:03d}{visual_suffix}"
             )
-            if precut_directory is None:
+            if reuse_original_sources:
+                segment_audio.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(audio_source, segment_audio)
+                shutil.copyfile(visual_source, segment_visual)
+            elif precut_directory is None:
                 cut_audio_segment(
                     audio_source,
                     segment_audio,
@@ -606,7 +707,11 @@ def materialize_long_audio_project(
                 raise LongAudioError(
                     f"第 {plan.index} 段远程音频时长与分段方案不一致"
                 )
-            if workflow_type == LTX_WORKFLOW and precut_directory is None:
+            if reuse_original_sources:
+                video_duration = inspect_media_duration(segment_visual)
+                if video_duration + 0.05 < segment_duration:
+                    raise LongAudioError("完整源视频短于完整自定义音频")
+            elif workflow_type == LTX_WORKFLOW and precut_directory is None:
                 cut_video_segment(
                     visual_source,
                     segment_visual,
@@ -623,11 +728,15 @@ def materialize_long_audio_project(
                 shutil.copyfile(visual_source, segment_visual)
             audio_relative = to_relative_data_path(segment_audio, settings)
             visual_relative = to_relative_data_path(segment_visual, settings)
-            prompt = (
-                f"{prompt_prefix}：“{plan.script_text}”"
-                if workflow_type == LTX_WORKFLOW
-                else digital_prompt
-            )
+            if workflow_type == LTX_WORKFLOW:
+                fixed_prefix = (
+                    "一个人用中文说"
+                    if batch.source_channel == BATCH_SOURCE_LTX_WORKBENCH
+                    else prompt_prefix
+                )
+                prompt = f"{fixed_prefix}：“{plan.script_text}”"
+            else:
+                prompt = digital_prompt
             segment = GenerationSegment(
                 id=str(uuid.uuid4()),
                 batch_item_id=item.id,
@@ -668,7 +777,7 @@ def materialize_long_audio_project(
                     relative_path=audio_relative,
                     original_name=(
                         f"{Path(project.audio_original_name).stem}-"
-                        f"{plan.index:03d}.mp3"
+                        f"{plan.index:03d}{audio_suffix.lower()}"
                     ),
                 ),
             ]
@@ -692,6 +801,10 @@ def materialize_long_audio_project(
                             "seedvr2_enabled", False
                         ),
                     }
+                )
+            elif batch.source_channel == BATCH_SOURCE_LTX_WORKBENCH:
+                task_parameters["seedvr2_enabled"] = bool(
+                    parameters.get("seedvr2_enabled", True)
                 )
             validated = validate_task_input(
                 user,
