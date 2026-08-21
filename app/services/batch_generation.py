@@ -35,6 +35,7 @@ from app.services.batch_manifests import (
 )
 from app.services.long_audio import MAX_LONG_AUDIO_SECONDS
 from app.services.media_segmentation import (
+    DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     MAX_SEGMENT_SECONDS,
     inspect_media_duration,
@@ -662,6 +663,7 @@ def validate_batch(
                     "person_mode": batch_person_mode,
                     "instance_type": batch_instance_type,
                     "seedvr2_enabled": batch_seedvr2_enabled,
+                    "generation_tail_seconds": DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
                 }
                 metadata = {
                     "audio_duration_seconds": duration,

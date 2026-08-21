@@ -170,6 +170,9 @@ class User(Base):
     seedvr2_pool_memberships: Mapped[list["SeedVR2PoolMembership"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    multi_camera_access: Mapped[Optional["MultiCameraUserAccess"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
 
     __table_args__ = (UniqueConstraint("username"),)
 
@@ -1032,6 +1035,7 @@ class GenerationTaskEnhancementAttempt(Base):
 BATCH_SOURCE_LEGACY_WEB = "legacy_web"
 BATCH_SOURCE_NEW_WORKBENCH = "new_workbench"
 BATCH_SOURCE_LTX_WORKBENCH = "ltx_workbench"
+BATCH_SOURCE_MULTI_CAMERA_WEB = "multi_camera_web_v1"
 BATCH_EXECUTION_MODE_SAME_ACCOUNT_V1 = "same_account_v1"
 BATCH_EXECUTION_MODE_DUAL_POOL_V1 = "dual_pool_v1"
 
@@ -1082,6 +1086,14 @@ class GenerationBatch(Base):
         back_populates="batch",
         cascade="all, delete-orphan",
         order_by="GenerationBatchItem.row_number",
+    )
+    multi_camera_config: Mapped[Optional["MultiCameraBatchConfig"]] = relationship(
+        back_populates="batch", cascade="all, delete-orphan", uselist=False
+    )
+    multi_camera_groups: Mapped[list["MultiCameraImageGroup"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="MultiCameraImageGroup.position",
     )
 
     __table_args__ = (
@@ -1158,10 +1170,157 @@ class GenerationBatchItem(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    multi_camera_binding: Mapped[Optional["MultiCameraItemBinding"]] = relationship(
+        back_populates="batch_item", cascade="all, delete-orphan", uselist=False
+    )
 
     __table_args__ = (
         UniqueConstraint("batch_id", "row_number", name="uq_batch_items_row_number"),
         UniqueConstraint("batch_id", "row_key", name="uq_batch_items_row_key"),
+    )
+
+
+class MultiCameraUserAccess(Base):
+    """Immutable user-id grant for the controlled multi-camera web feature."""
+
+    __tablename__ = "multi_camera_user_access"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="multi_camera_access")
+
+
+class MultiCameraBatchConfig(Base):
+    """Idempotent batch-level snapshot for one multi-camera submission."""
+
+    __tablename__ = "multi_camera_batch_configs"
+
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batches.id", ondelete="CASCADE"), primary_key=True
+    )
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    resolution: Mapped[str] = mapped_column(String(20), nullable=False)
+    instance_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    seedvr2_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    segmentation_policy: Mapped[str] = mapped_column(String(50), nullable=False)
+    ordering_policy: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    batch: Mapped[GenerationBatch] = relationship(back_populates="multi_camera_config")
+
+
+class MultiCameraImageGroup(Base):
+    """Ordered camera-image collection reusable by many audio rows."""
+
+    __tablename__ = "multi_camera_image_groups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batches.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    client_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    batch: Mapped[GenerationBatch] = relationship(back_populates="multi_camera_groups")
+    assets: Mapped[list["MultiCameraImageGroupAsset"]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        order_by="MultiCameraImageGroupAsset.position",
+    )
+    item_bindings: Mapped[list["MultiCameraItemBinding"]] = relationship(
+        back_populates="image_group"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("batch_id", "position", name="uq_multi_camera_group_position"),
+        UniqueConstraint("batch_id", "client_key", name="uq_multi_camera_group_client_key"),
+    )
+
+
+class MultiCameraImageGroupAsset(Base):
+    """Immutable ordered camera snapshot; staged paths are intentionally omitted."""
+
+    __tablename__ = "multi_camera_image_group_assets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("multi_camera_image_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    image_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    group: Mapped[MultiCameraImageGroup] = relationship(back_populates="assets")
+    segment_bindings: Mapped[list["MultiCameraSegmentBinding"]] = relationship(
+        back_populates="image_asset"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("group_id", "position", name="uq_multi_camera_group_asset_position"),
+    )
+
+
+class MultiCameraItemBinding(Base):
+    """Bind one uploaded audio row to one image group."""
+
+    __tablename__ = "multi_camera_item_bindings"
+
+    batch_item_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batch_items.id", ondelete="CASCADE"), primary_key=True
+    )
+    image_group_id: Mapped[str] = mapped_column(
+        ForeignKey("multi_camera_image_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    audio_original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    audio_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+
+    batch_item: Mapped[GenerationBatchItem] = relationship(
+        back_populates="multi_camera_binding"
+    )
+    image_group: Mapped[MultiCameraImageGroup] = relationship(
+        back_populates="item_bindings"
+    )
+
+
+class MultiCameraSegmentBinding(Base):
+    """Snapshot the exact camera chosen for one generated segment."""
+
+    __tablename__ = "multi_camera_segment_bindings"
+
+    segment_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_segments.id", ondelete="CASCADE"), primary_key=True
+    )
+    image_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("multi_camera_image_group_assets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    camera_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    segment: Mapped["GenerationSegment"] = relationship(
+        back_populates="multi_camera_binding"
+    )
+    image_asset: Mapped[MultiCameraImageGroupAsset] = relationship(
+        back_populates="segment_bindings"
     )
 
 
@@ -1388,6 +1547,9 @@ class GenerationSegment(Base):
     )
     generation_task: Mapped[Optional[GenerationTask]] = relationship(
         back_populates="segment", uselist=False
+    )
+    multi_camera_binding: Mapped[Optional[MultiCameraSegmentBinding]] = relationship(
+        back_populates="segment", cascade="all, delete-orphan", uselist=False
     )
 
     __table_args__ = (

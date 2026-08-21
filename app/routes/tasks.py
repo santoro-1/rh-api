@@ -27,6 +27,7 @@ from app.services.audio import (
     validate_time_range,
 )
 from app.services.media_segmentation import (
+    DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     MAX_SEGMENT_SECONDS,
     inspect_media_duration,
@@ -274,7 +275,8 @@ def inspect_audio(
             raise AudioInspectionError("音频时长不足 1 秒，无法生成视频")
         if duration > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01:
             raise AudioInspectionError(
-                "数字人音频不能超过 35 秒；请先拆分音频，或使用脚本完整流程自动切分"
+                "数字人口播不能超过 32.8 秒；系统还会追加 2 秒静音用于自然收尾，"
+                "请先拆分音频，或使用脚本完整流程自动切分"
             )
         return {
             "durationSeconds": round(duration, 3),
@@ -326,18 +328,20 @@ def create_task(
         duration = inspect_audio_duration(audio_path)
         if duration > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01:
             raise ValueError(
-                "数字人音频不能超过 35 秒；请先拆分音频，或使用脚本完整流程自动切分"
+                "数字人口播不能超过 32.8 秒；系统还会追加 2 秒静音用于自然收尾，"
+                "请先拆分音频，或使用脚本完整流程自动切分"
             )
         selected_start, selected_end = validate_time_range(
             startTime,
             endTime,
             duration,
         )
-        if (
-            selected_end - selected_start
-            > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01
-        ):
-            raise ValueError("单次数字人生成使用的音频区间不能超过 35 秒")
+        # Public timecodes use whole seconds. The final value may equal the
+        # ceiling of a fractional file duration (32.4 -> 33), so validate the
+        # actual playable interval instead of treating encoder padding as speech.
+        selected_duration = min(selected_end, duration) - selected_start
+        if selected_duration > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01:
+            raise ValueError("单次数字人口播区间不能超过 32.8 秒")
         parameters = {
             "prompt": prompt,
             "start_time": startTime,
@@ -347,6 +351,7 @@ def create_task(
             # Digital-human compute is an administrator-owned user setting.
             "instance_type": digital_config.instance_type,
             "seedvr2_enabled": seedvr2Enabled,
+            "generation_tail_seconds": DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
         }
         assets = [
             WorkflowAsset(
@@ -373,7 +378,7 @@ def create_task(
                     > DIGITAL_HUMAN_MAX_SEGMENT_SECONDS + 0.01
                 ):
                     label = "左人物音频" if name == "left_audio" else "右人物音频"
-                    raise ValueError(f"{label}不能超过 35 秒，请先拆分音频")
+                    raise ValueError(f"{label}不能超过 32.8 秒，请先拆分音频")
                 assets.append(
                     WorkflowAsset(
                         name=name,

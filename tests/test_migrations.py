@@ -137,7 +137,14 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('ltx_preparation_jobs')"
             )
         }
-    assert revision == "0036_ltx_workbench_preparation"
+        multi_camera_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name LIKE 'multi_camera_%'"
+            )
+        }
+    assert revision == "0037_multi_camera_web"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -183,6 +190,14 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
         "segment_plan_json",
         "status",
     } <= ltx_preparation_columns
+    assert {
+        "multi_camera_user_access",
+        "multi_camera_batch_configs",
+        "multi_camera_image_groups",
+        "multi_camera_image_group_assets",
+        "multi_camera_item_bindings",
+        "multi_camera_segment_bindings",
+    } <= multi_camera_tables
     assert {
         "merged_video_status",
         "merged_video_path",
@@ -356,7 +371,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0036_ltx_workbench_preparation"
+        assert version == "0037_multi_camera_web"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -418,7 +433,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0036_ltx_workbench_preparation"
+        assert revision == "0037_multi_camera_web"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -591,7 +606,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0036_ltx_workbench_preparation"
+        assert revision == "0037_multi_camera_web"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -728,7 +743,7 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
             ).fetchall()
         connection.close()
 
-        assert revision == "0036_ltx_workbench_preparation"
+        assert revision == "0037_multi_camera_web"
         assert grant == (7, 1, 1)
         assert batch_snapshot == (None, None)
         assert foreign_key_errors == []
@@ -821,7 +836,7 @@ def test_item_execution_pool_migration_copies_legacy_batch_snapshots():
             ).fetchone()
         connection.close()
 
-        assert revision == "0036_ltx_workbench_preparation"
+        assert revision == "0037_multi_camera_web"
         assert snapshots == ("[3,5]", "[7]")
     finally:
         database.unlink(missing_ok=True)
@@ -869,4 +884,36 @@ def test_seedvr2_switch_migration_preserves_task_and_enhancement(tmp_path):
 
     assert task == ("task-1", 1)
     assert enhancement == ("enhancement-1", "task-1")
+    assert foreign_key_errors == []
+
+
+def test_multi_camera_migration_bootstraps_only_exact_active_accounts(tmp_path):
+    database = tmp_path / "multi-camera-access.db"
+    _run_alembic(database, "0036_ltx_workbench_preparation")
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            "INSERT INTO users "
+            "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+            "VALUES (?, ?, 'hash', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [
+                (1, "admin", 1, 1),
+                (2, "Cx_ceshi", 0, 1),
+                (3, "other-admin", 1, 1),
+                (4, "cx_ceshi", 0, 1),
+            ],
+        )
+        connection.commit()
+
+    _run_alembic(database, "head")
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        grants = connection.execute(
+            "SELECT user_id, is_enabled FROM multi_camera_user_access ORDER BY user_id"
+        ).fetchall()
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+    assert revision == "0037_multi_camera_web"
+    assert grants == [(1, 1), (2, 1)]
     assert foreign_key_errors == []

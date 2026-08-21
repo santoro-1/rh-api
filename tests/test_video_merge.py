@@ -94,6 +94,11 @@ def _segmented_batch(
                         "assets": [],
                         "parameters": {
                             **(
+                                {"generation_tail_seconds": 2.0}
+                                if source_channel == BATCH_SOURCE_NEW_WORKBENCH
+                                else {}
+                            ),
+                            **(
                                 {"workbench_final_segment_tail_seconds": 1.0}
                                 if source_channel == BATCH_SOURCE_NEW_WORKBENCH
                                 and index == len(sources)
@@ -125,7 +130,10 @@ def _fake_legacy_merge(inputs, target, *, target_durations=None):
 
 
 def _fake_workbench_merge(inputs, target, *, target_durations=None):
-    assert target_durations == [30.0] * len(inputs)
+    assert target_durations == [
+        *([30.0] * (len(inputs) - 1)),
+        32.0,
+    ]
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"|".join(path.read_bytes() for path in inputs))
 

@@ -197,6 +197,35 @@ def test_audio_duration_falls_back_to_mutagen_when_ffprobe_fails(monkeypatch):
     assert audio.inspect_audio_duration(sample) == pytest.approx(2.0)
 
 
+def test_provider_audio_tail_appends_exact_requested_silence(monkeypatch):
+    working_dir = get_settings().data_dir / "provider-tail"
+    working_dir.mkdir(parents=True, exist_ok=True)
+    source = working_dir / "speech.mp3"
+    target = working_dir / "speech-with-tail.mp3"
+    source.write_bytes(b"speech")
+    captured = {}
+
+    class SuccessfulProcess:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured["command"] = command
+        Path(command[-1]).write_bytes(b"speech-with-tail")
+        return SuccessfulProcess()
+
+    monkeypatch.setattr(audio, "inspect_audio_duration", lambda _path: 30.8)
+    monkeypatch.setattr(audio.subprocess, "run", fake_run)
+
+    audio.add_silence_tail(source, target, padding_seconds=2.0)
+
+    assert target.read_bytes() == b"speech-with-tail"
+    assert "apad=pad_dur=2.000" in captured["command"]
+    assert captured["command"][captured["command"].index("-t") + 1] == "32.800"
+
+
 def test_generated_speech_mastering_adds_three_db_and_caps_peak(
     monkeypatch,
 ):

@@ -264,7 +264,12 @@ def test_digital_human_adapter_uses_video_output_and_rejects_bad_parameters():
 def test_digital_human_batch_payload_adds_safe_silent_tail_window():
     workflow = get_workflow("digital_human")
     parameters = workflow.validate_parameters(
-        {"prompt": "完整口播", "start_time": "0:00", "end_time": "0:31"},
+        {
+            "prompt": "完整口播",
+            "start_time": "0:00",
+            "end_time": "0:31",
+            "generation_tail_seconds": 2,
+        },
         {"audio_duration_seconds": 30.9},
     )
     task = SimpleNamespace(
@@ -296,10 +301,11 @@ def test_digital_human_batch_payload_adds_safe_silent_tail_window():
         (node["nodeId"], node["fieldName"]): node["fieldValue"]
         for node in payload["nodeInfoList"]
     }
-    assert nodes[("341", "end_time")] == "0:32"
+    assert generation_tail_padding_seconds(task) == 2.0
+    assert nodes[("341", "end_time")] == "0:33"
 
 
-def test_timestamped_workbench_payload_uses_ceiling_without_silent_tail():
+def test_timestamped_workbench_payload_adds_provider_only_silent_tail():
     workflow = get_workflow("digital_human")
     parameters = workflow.validate_parameters(
         {
@@ -307,6 +313,7 @@ def test_timestamped_workbench_payload_uses_ceiling_without_silent_tail():
             "start_time": "0:00",
             "end_time": "0:25",
             "timing_mode": "exact_timestamps",
+            "generation_tail_seconds": 2,
         },
         {"audio_duration_seconds": 24.4},
     )
@@ -328,7 +335,7 @@ def test_timestamped_workbench_payload_uses_ceiling_without_silent_tail():
         segment_id="segment-1",
         batch_item_id=None,
     )
-    assert generation_tail_padding_seconds(task) == 0.0
+    assert generation_tail_padding_seconds(task) == 2.0
     payload = workflow.build_payload(
         task,
         {"image": "remote-image", "audio": "remote-audio"},
@@ -340,7 +347,7 @@ def test_timestamped_workbench_payload_uses_ceiling_without_silent_tail():
         (node["nodeId"], node["fieldName"]): node["fieldValue"]
         for node in payload["nodeInfoList"]
     }
-    assert nodes[("341", "end_time")] == "0:25"
+    assert nodes[("341", "end_time")] == "0:27"
 
 
 def test_historical_workbench_final_segment_tail_is_ignored():
@@ -351,6 +358,7 @@ def test_historical_workbench_final_segment_tail_is_ignored():
             "start_time": "0:00",
             "end_time": "0:25",
             "timing_mode": "exact_timestamps",
+            "generation_tail_seconds": 2,
             "workbench_final_segment_tail_seconds": 1,
         },
         {"audio_duration_seconds": 24.4},
@@ -373,7 +381,7 @@ def test_historical_workbench_final_segment_tail_is_ignored():
         segment_id="segment-final",
         batch_item_id=None,
     )
-    assert generation_tail_padding_seconds(task) == 0.0
+    assert generation_tail_padding_seconds(task) == 2.0
     payload = workflow.build_payload(
         task,
         {"image": "remote-image", "audio": "original-remote-audio"},
@@ -385,7 +393,7 @@ def test_historical_workbench_final_segment_tail_is_ignored():
         (node["nodeId"], node["fieldName"]): node["fieldValue"]
         for node in payload["nodeInfoList"]
     }
-    assert nodes[("341", "end_time")] == "0:25"
+    assert nodes[("341", "end_time")] == "0:27"
     assert nodes[("339", "audio")] == "original-remote-audio"
 
 

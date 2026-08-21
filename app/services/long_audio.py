@@ -26,6 +26,7 @@ from app.models import (
 from app.services.alignment import get_alignment_provider
 from app.services.audio import format_duration_timecode, inspect_audio_duration
 from app.services.media_segmentation import (
+    DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     MAX_SEGMENT_SECONDS,
     SegmentPlan,
@@ -800,6 +801,7 @@ def materialize_long_audio_project(
                         "seedvr2_enabled": parameters.get(
                             "seedvr2_enabled", False
                         ),
+                        "generation_tail_seconds": DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
                     }
                 )
             elif batch.source_channel == BATCH_SOURCE_LTX_WORKBENCH:

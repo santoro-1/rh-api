@@ -14,7 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import get_settings
-from app.database import engine
+from app.database import SessionLocal, engine
 from app.routes import (
     admin,
     auth,
@@ -27,9 +27,11 @@ from app.routes import (
     voices,
     workbench,
     workbench_ltx,
+    multi_camera,
 )
 from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import configure_logging, log_event
+from app.services.multi_camera_access import bootstrap_multi_camera_access
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,8 @@ def create_app() -> FastAPI:
         settings.long_audio_dir.mkdir(parents=True, exist_ok=True)
         settings.logs_dir.mkdir(parents=True, exist_ok=True)
         settings.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with SessionLocal() as db:
+            bootstrap_multi_camera_access(db)
         yield
 
     app = FastAPI(
@@ -114,6 +118,7 @@ def create_app() -> FastAPI:
     app.include_router(operations.router)
     app.include_router(workbench.router)
     app.include_router(workbench_ltx.router)
+    app.include_router(multi_camera.router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthcheck():

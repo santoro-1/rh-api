@@ -636,6 +636,7 @@ def test_workbench_audio_batch_stops_at_review_and_exposes_audio(client, monkeyp
         assert task.primary_sha256 == first_image_sha256
         video_parameters = json.loads(task.video_parameters_json)
         assert video_parameters["timing_mode"] == "exact_timestamps"
+        assert video_parameters["generation_tail_seconds"] == 2.0
         assert video_parameters["prompt"] == "测试提示词"
         base = get_settings().outputs_dir / "workbench-base.mp4"
         base.write_bytes(b"normalized-base-video")

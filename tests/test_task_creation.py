@@ -68,7 +68,7 @@ def test_audio_inspection_rounds_fractional_duration_up(client, monkeypatch):
     assert response.json()["suggestedEndTime"] == "0:29"
 
 
-def test_direct_audio_inspection_rejects_more_than_45_seconds(
+def test_direct_audio_inspection_rejects_more_than_speech_limit(
     client,
     monkeypatch,
 ):
@@ -89,7 +89,24 @@ def test_direct_audio_inspection_rejects_more_than_45_seconds(
         },
     )
     assert response.status_code == 400
-    assert "不能超过 35 秒" in response.json()["detail"]
+    assert "不能超过 32.8 秒" in response.json()["detail"]
+
+
+def test_fractional_speech_limit_accepts_whole_second_end_time(client, monkeypatch):
+    create_user("fractional-limit-user")
+    login(client, "fractional-limit-user")
+    monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda _path: 32.4)
+
+    response = client.post(
+        "/api/tasks",
+        data={"startTime": "0:00", "endTime": "0:33", "prompt": "边界测试"},
+        files={
+            "image": ("person.png", b"\x89PNG\r\n\x1a\npayload", "image/png"),
+            "audio": ("voice.mp3", b"ID3audio-payload", "audio/mpeg"),
+        },
+    )
+
+    assert response.status_code == 201, response.text
 
 
 def test_task_creation_returns_immediately_without_calling_runninghub(client, monkeypatch):

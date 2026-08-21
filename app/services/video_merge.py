@@ -20,6 +20,7 @@ from app.models import (
 )
 from app.services.processes import hidden_creation_flags
 from app.services.storage import remove_directory, safe_relative_path, to_relative_data_path
+from app.workflows.digital_human import generation_tail_padding_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -342,7 +343,7 @@ def merge_batch_item(
     # Use a hard, order-preserving concat; the digital-human workbench keeps
     # its existing duration-preserving dissolve behavior.
     target_durations: list[float] | None = [] if is_new_workbench else None
-    for task in tasks:
+    for task_index, task in enumerate(tasks):
         assert task is not None
         if not task.result_path:
             item.merged_video_status = MERGE_FAILED
@@ -360,7 +361,17 @@ def merge_batch_item(
             return True
         inputs.append(path)
         if target_durations is not None:
-            target_durations.append(float(task.audio_duration_seconds or 0))
+            speech_duration = float(task.audio_duration_seconds or 0)
+            # Remove provider-only tails at internal seams, but retain the
+            # final tail so Jianying can apply a fade-out to real motion.
+            target_durations.append(
+                speech_duration
+                + (
+                    generation_tail_padding_seconds(task)
+                    if task_index == len(tasks) - 1
+                    else 0.0
+                )
+            )
 
     item.merged_video_status = MERGING
     item.merged_video_error = None

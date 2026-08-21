@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import Settings
 from app.models import (
     BATCH_SOURCE_LTX_WORKBENCH,
+    BATCH_SOURCE_NEW_WORKBENCH,
+    AudioGenerationTask,
+    AudioTaskStatus,
     EnhancementStatus,
     GenerationBatch,
     GenerationBatchItem,
@@ -26,9 +29,17 @@ from app.models import (
     User,
 )
 from app.services.audio import inspect_audio_duration
+from app.services.audio_review import current_attempt
 from app.services.batch_assets import StagedAssetError, load_available_assets
-from app.services.long_audio import MAX_LONG_AUDIO_SECONDS
-from app.services.media_segmentation import inspect_media_duration
+from app.services.long_audio import (
+    MAX_LONG_AUDIO_SECONDS,
+    apply_alignment_plans,
+)
+from app.services.media_segmentation import (
+    inspect_media_duration,
+    plan_timestamped_segments,
+)
+from app.services.speech.async_outputs import load_subtitle_cues
 from app.services.storage import (
     long_audio_project_dir,
     materialize_staged_asset,
@@ -67,14 +78,14 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _clean_rows(raw_rows: Any, settings: Settings) -> list[dict[str, str]]:
+def _clean_rows(raw_rows: Any, settings: Settings) -> list[dict[str, Any]]:
     if not isinstance(raw_rows, list) or not raw_rows:
         raise LtxWorkbenchError("请至少提交一行 LTX 任务")
     if len(raw_rows) > settings.max_batch_items:
         raise LtxWorkbenchError(
             f"单批任务数量不能超过 {settings.max_batch_items}"
         )
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     seen_row_ids: set[str] = set()
     for position, raw in enumerate(raw_rows, start=1):
         if not isinstance(raw, dict):
@@ -91,9 +102,20 @@ def _clean_rows(raw_rows: Any, settings: Settings) -> list[dict[str, str]]:
         video_asset_id = str(
             raw.get("video_asset_id") or raw.get("videoAssetId") or ""
         ).strip()
-        audio_asset_id = str(
-            raw.get("audio_asset_id") or raw.get("audioAssetId") or ""
+        audio_batch_id = str(
+            raw.get("audio_batch_id") or raw.get("audioBatchId") or ""
         ).strip()
+        audio_item_id = str(
+            raw.get("audio_item_id") or raw.get("audioItemId") or ""
+        ).strip()
+        try:
+            audio_generation_version = int(
+                raw.get("audio_generation_version")
+                or raw.get("audioGenerationVersion")
+                or 0
+            )
+        except (TypeError, ValueError) as exc:
+            raise LtxWorkbenchError(f"第 {position} 行声音版本格式错误") from exc
         if not row_id or len(row_id) > 100:
             raise LtxWorkbenchError(f"第 {position} 行任务 ID 长度必须为 1–100")
         if row_id in seen_row_ids:
@@ -102,10 +124,10 @@ def _clean_rows(raw_rows: Any, settings: Settings) -> list[dict[str, str]]:
             raise LtxWorkbenchError(
                 f"第 {position} 行表格原稿长度必须为 1–100000"
             )
-        if not video_asset_id or not audio_asset_id:
-            raise LtxWorkbenchError(
-                f"第 {position} 行必须同时绑定源视频和自定义音频"
-            )
+        if not video_asset_id:
+            raise LtxWorkbenchError(f"第 {position} 行必须绑定源视频")
+        if not audio_batch_id or not audio_item_id or audio_generation_version < 1:
+            raise LtxWorkbenchError(f"第 {position} 行必须绑定已生成的 MiniMax 音频")
         compile_ltx_prompt(script_text)
         seen_row_ids.add(row_id)
         rows.append(
@@ -113,7 +135,9 @@ def _clean_rows(raw_rows: Any, settings: Settings) -> list[dict[str, str]]:
                 "row_id": row_id,
                 "script_text": script_text,
                 "video_asset_id": video_asset_id,
-                "audio_asset_id": audio_asset_id,
+                "audio_batch_id": audio_batch_id,
+                "audio_item_id": audio_item_id,
+                "audio_generation_version": audio_generation_version,
             }
         )
     return rows
@@ -122,38 +146,69 @@ def _clean_rows(raw_rows: Any, settings: Settings) -> list[dict[str, str]]:
 def _assets_for_rows(
     db: Session,
     user: User,
-    rows: list[dict[str, str]],
+    rows: list[dict[str, Any]],
 ) -> dict[str, StagedAsset]:
-    asset_ids = [
-        asset_id
-        for row in rows
-        for asset_id in (row["video_asset_id"], row["audio_asset_id"])
-    ]
+    asset_ids = [row["video_asset_id"] for row in rows]
     assets = load_available_assets(db, user, asset_ids)
     result = {asset.id: asset for asset in assets}
     for position, row in enumerate(rows, start=1):
         video = result[row["video_asset_id"]]
-        audio = result[row["audio_asset_id"]]
         if video.kind != "video":
             raise LtxWorkbenchError(f"第 {position} 行源视频素材类型错误")
-        if audio.kind != "audio":
-            raise LtxWorkbenchError(f"第 {position} 行自定义音频素材类型错误")
     return result
+
+
+def _audio_task_for_row(
+    db: Session,
+    user: User,
+    row: dict[str, Any],
+) -> AudioGenerationTask:
+    item = db.scalar(
+        select(GenerationBatchItem)
+        .join(GenerationBatch, GenerationBatchItem.batch_id == GenerationBatch.id)
+        .options(selectinload(GenerationBatchItem.audio_task))
+        .where(
+            GenerationBatchItem.id == row["audio_item_id"],
+            GenerationBatch.id == row["audio_batch_id"],
+            GenerationBatch.user_id == user.id,
+            GenerationBatch.source_channel == BATCH_SOURCE_NEW_WORKBENCH,
+        )
+    )
+    task = item.audio_task if item is not None else None
+    if task is None:
+        raise LtxWorkbenchError("MiniMax 声音任务不存在或不属于当前账号")
+    if task.generation_version != row["audio_generation_version"]:
+        raise LtxWorkbenchError("MiniMax 声音版本已经变化，请刷新后重新提交")
+    if task.status != AudioTaskStatus.AWAITING_REVIEW.value:
+        raise LtxWorkbenchError("MiniMax 声音尚未进入可试听确认状态")
+    if not task.output_path or not task.subtitle_path:
+        raise LtxWorkbenchError("MiniMax 声音或句级时间戳尚未准备完成")
+    return task
+
+
+def _lock_audio_for_ltx(task: AudioGenerationTask, reviewed_at: datetime) -> None:
+    """Lock the reviewed MiniMax version without starting the old DH handoff."""
+
+    current_attempt(task).status = "APPROVED"
+    task.reviewed_at = reviewed_at
+    task.status = AudioTaskStatus.SUCCESS.value
+    task.batch_item.audio_status = "AUDIO_APPROVED_LTX"
+    task.batch_item.status = "AUDIO_APPROVED_LTX"
 
 
 def _inspect_pair(
     settings: Settings,
     video: StagedAsset,
-    audio: StagedAsset,
+    audio_task: AudioGenerationTask,
 ) -> tuple[float, float]:
     video_path = safe_relative_path(video.relative_path, settings.data_dir)
-    audio_path = safe_relative_path(audio.relative_path, settings.data_dir)
+    audio_path = safe_relative_path(str(audio_task.output_path), settings.data_dir)
     if not video_path.is_file() or not audio_path.is_file():
-        raise LtxWorkbenchError("暂存的源视频或自定义音频文件不存在")
+        raise LtxWorkbenchError("暂存的源视频或 MiniMax 音频文件不存在")
     audio_duration = inspect_audio_duration(audio_path)
     video_duration = inspect_media_duration(video_path)
     if audio_duration > MAX_LONG_AUDIO_SECONDS:
-        raise LtxWorkbenchError("单行上传音频最多支持 60 分钟")
+        raise LtxWorkbenchError("单行 MiniMax 音频最多支持 60 分钟")
     if video_duration + 0.05 < audio_duration:
         raise LtxWorkbenchError(
             f"源视频时长不足：视频 {video_duration:.1f} 秒，"
@@ -174,9 +229,9 @@ def validate_ltx_workbench_rows(
     summaries: list[dict[str, Any]] = []
     for row in rows:
         video = assets[row["video_asset_id"]]
-        audio = assets[row["audio_asset_id"]]
+        audio_task = _audio_task_for_row(db, user, row)
         video_duration, audio_duration = _inspect_pair(
-            settings, video, audio
+            settings, video, audio_task
         )
         summaries.append(
             {
@@ -189,9 +244,9 @@ def validate_ltx_workbench_rows(
                     "duration_seconds": round(video_duration, 3),
                 },
                 "audio": {
-                    "asset_id": audio.id,
-                    "original_name": audio.original_name,
-                    "size_bytes": audio.size_bytes,
+                    "batch_id": row["audio_batch_id"],
+                    "item_id": row["audio_item_id"],
+                    "generation_version": audio_task.generation_version,
                     "duration_seconds": round(audio_duration, 3),
                 },
             }
@@ -296,7 +351,7 @@ def create_ltx_workbench_batch(
         workflow_type=LTX_WORKFLOW,
         source_channel=BATCH_SOURCE_LTX_WORKBENCH,
         correlation_id=clean_correlation_id,
-        audio_mode="upload",
+        audio_mode="minimax",
         review_required=False,
         video_review_required=False,
         request_key=clean_request_key,
@@ -307,9 +362,9 @@ def create_ltx_workbench_batch(
     try:
         for position, row in enumerate(rows, start=1):
             video_asset = assets[row["video_asset_id"]]
-            audio_asset = assets[row["audio_asset_id"]]
+            audio_task = _audio_task_for_row(db, user, row)
             video_duration, audio_duration = _inspect_pair(
-                settings, video_asset, audio_asset
+                settings, video_asset, audio_task
             )
             project_id = str(uuid.uuid4())
             project_directory = long_audio_project_dir(
@@ -320,7 +375,17 @@ def create_ltx_workbench_batch(
                 video_asset.relative_path, settings.data_dir
             )
             audio_source = safe_relative_path(
-                audio_asset.relative_path, settings.data_dir
+                str(audio_task.output_path), settings.data_dir
+            )
+            subtitle_source = safe_relative_path(
+                str(audio_task.subtitle_path), settings.data_dir
+            )
+            cues = load_subtitle_cues(subtitle_source.read_text(encoding="utf-8"))
+            plans = plan_timestamped_segments(
+                cues,
+                audio_duration,
+                target_segment_seconds=27.0,
+                max_segment_seconds=30.0,
             )
             video_path = materialize_staged_asset(
                 video_source, project_directory, kind="video"
@@ -341,12 +406,14 @@ def create_ltx_workbench_batch(
                         "speech_script": row["script_text"],
                         "source_video_asset_id": video_asset.id,
                         "source_video_file": video_asset.original_name,
-                        "audio_asset_id": audio_asset.id,
-                        "audio_file": audio_asset.original_name,
+                        "audio_batch_id": row["audio_batch_id"],
+                        "audio_item_id": row["audio_item_id"],
+                        "audio_generation_version": audio_task.generation_version,
+                        "audio_file": Path(audio_source).name,
                     },
                     ensure_ascii=False,
                 ),
-                audio_status="ASR_PENDING",
+                audio_status="SEGMENTING",
                 status="PREPARING_LTX",
                 merged_video_status="NOT_APPLICABLE",
             )
@@ -359,7 +426,7 @@ def create_ltx_workbench_batch(
                 review_required=False,
                 script_text=row["script_text"],
                 audio_path=audio_relative,
-                audio_original_name=audio_asset.original_name,
+                audio_original_name=Path(audio_source).name,
                 video_path=video_relative,
                 video_original_name=video_asset.original_name,
                 duration_seconds=audio_duration,
@@ -371,8 +438,8 @@ def create_ltx_workbench_batch(
                     },
                     ensure_ascii=False,
                 ),
-                alignment_provider="funasr_http",
-                status=LongAudioProjectStatus.PENDING_ANALYSIS.value,
+                alignment_provider="minimax_sentence_timestamp",
+                status=LongAudioProjectStatus.PENDING_CUT.value,
                 expires_at=now + timedelta(days=settings.upload_retention_days),
             )
             preparation = LtxPreparationJob(
@@ -385,14 +452,50 @@ def create_ltx_workbench_batch(
                 source_video_original_name=video_asset.original_name,
                 source_video_sha256=_sha256_file(video_path),
                 source_audio_path=audio_relative,
-                source_audio_original_name=audio_asset.original_name,
+                source_audio_original_name=Path(audio_source).name,
                 source_audio_sha256=_sha256_file(audio_path),
                 script_text=row["script_text"],
                 script_sha256=_sha256_text(row["script_text"]),
                 duration_seconds=audio_duration,
                 video_duration_seconds=video_duration,
-                status=LtxPreparationStatus.ASR_PENDING.value,
+                alignment_provider="minimax_sentence_timestamp",
+                alignment_score=1.0,
+                status=LtxPreparationStatus.READY_TO_MATERIALIZE.value,
             )
+            apply_alignment_plans(
+                project,
+                settings,
+                plans,
+                provider="minimax_sentence_timestamp",
+            )
+            preparation.alignment_timeline_json = json.dumps(
+                {
+                    "schema": "ltx.aligned-script.v1",
+                    "script_sha256": preparation.script_sha256,
+                    "audio_sha256": preparation.source_audio_sha256,
+                    "provider": "minimax_sentence_timestamp",
+                    "match_ratio": 1.0,
+                    "tokens": [
+                        {
+                            "text": cue.text,
+                            "start_ms": round(cue.start_seconds * 1000),
+                            "end_ms": round(cue.end_seconds * 1000),
+                        }
+                        for cue in cues
+                    ],
+                    "segments": [
+                        {
+                            "index": plan.index,
+                            "start_ms": round(plan.start_seconds * 1000),
+                            "end_ms": round(plan.end_seconds * 1000),
+                            "script_text": plan.script_text,
+                        }
+                        for plan in plans
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            _lock_audio_for_ltx(audio_task, now)
             db.add_all([item, project, preparation])
         for asset in assets.values():
             asset.consumed_at = now

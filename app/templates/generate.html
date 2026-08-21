@@ -62,7 +62,7 @@
     <label>参考音频（MP3 / WAV / M4A / AAC / FLAC）
       <input id="audio" name="audio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,audio/*" required {% if not has_api_key %}disabled{% endif %}>
     </label>
-    <p id="audio-info" class="muted">请选择音频文件以检测时长；数字人单次使用区间不能超过 35 秒。</p>
+    <p id="audio-info" class="muted">请选择音频文件以检测时长；数字人口播单段不能超过 32.8 秒，提交模型时另加 2 秒静音收尾。</p>
 
     <div class="two-columns">
       <label>开始时间<input id="startTime" name="startTime" value="0:00" pattern="\d+:[0-5]\d" required {% if not has_api_key %}disabled{% endif %}></label>

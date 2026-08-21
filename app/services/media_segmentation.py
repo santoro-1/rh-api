@@ -16,7 +16,12 @@ logger = logging.getLogger(__name__)
 
 TARGET_SEGMENT_SECONDS = 30.0
 MAX_SEGMENT_SECONDS = 30.0
-DIGITAL_HUMAN_MAX_SEGMENT_SECONDS = 35.0
+# RunningHub's digital-human workflow accepts at most 35 seconds of provider
+# input. Every speech segment receives a two-second silent generation tail,
+# so keep 0.2 seconds for MP3/container rounding and cap spoken content here.
+DIGITAL_HUMAN_PROVIDER_MAX_INPUT_SECONDS = 35.0
+DIGITAL_HUMAN_GENERATION_TAIL_SECONDS = 2.0
+DIGITAL_HUMAN_MAX_SEGMENT_SECONDS = 32.8
 _MIN_USEFUL_SEGMENT_SECONDS = 12.0
 _STRONG_BREAK_RE = re.compile(r".+?(?:[。！？!?；;]+|\n+)|.+$", re.DOTALL)
 _WEAK_BREAK_RE = re.compile(r".+?(?:[，,、：:]+)|.+$", re.DOTALL)

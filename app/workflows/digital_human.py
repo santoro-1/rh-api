@@ -9,14 +9,18 @@ from app.services.audio import (
     format_timecode,
     validate_time_range,
 )
-from app.services.media_segmentation import DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
+from app.services.media_segmentation import (
+    DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
+    DIGITAL_HUMAN_PROVIDER_MAX_INPUT_SECONDS,
+)
 from app.workflows.base import WorkflowAsset, WorkflowOutput
 
 
-DIGITAL_HUMAN_MAX_SECONDS = DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
-DIGITAL_HUMAN_TAIL_PADDING_SECONDS = 0.5
+DIGITAL_HUMAN_MAX_SECONDS = DIGITAL_HUMAN_PROVIDER_MAX_INPUT_SECONDS
+DIGITAL_HUMAN_TAIL_PADDING_SECONDS = DIGITAL_HUMAN_GENERATION_TAIL_SECONDS
 DIGITAL_HUMAN_DEFAULT_INSTANCE_TYPE = "plus"
 EXACT_TIMESTAMP_TIMING_MODE = "exact_timestamps"
+GENERATION_TAIL_PARAMETER = "generation_tail_seconds"
 WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS = 1.0
 WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER = "workbench_final_segment_tail_seconds"
 
@@ -51,8 +55,27 @@ def _uses_exact_timestamp_timing(task: GenerationTask) -> bool:
 
 
 def generation_tail_padding_seconds(task: GenerationTask) -> float:
-    """Return safe padding for full-range batch inputs without crossing 45 s."""
+    """Return a safe provider-only tail without changing the speech asset."""
 
+    if task.start_seconds > 0.001:
+        return 0.0
+    if task.end_seconds + 0.01 < task.audio_duration_seconds:
+        return 0.0
+    task_input = DigitalHumanWorkflow()._input(task)
+    parameters = task_input.get("parameters")
+    if isinstance(parameters, dict) and parameters.get(GENERATION_TAIL_PARAMETER) is not None:
+        try:
+            requested_padding = float(parameters[GENERATION_TAIL_PARAMETER])
+        except (TypeError, ValueError):
+            requested_padding = 0.0
+        return max(
+            0.0,
+            min(
+                requested_padding,
+                DIGITAL_HUMAN_MAX_SECONDS - task.audio_duration_seconds,
+            ),
+        )
+    # Compatibility for tasks frozen before generation_tail_seconds existed.
     if _uses_exact_timestamp_timing(task):
         return 0.0
     if not (
@@ -60,14 +83,10 @@ def generation_tail_padding_seconds(task: GenerationTask) -> float:
         or getattr(task, "segment_id", None)
     ):
         return 0.0
-    if task.start_seconds > 0.001:
-        return 0.0
-    if task.end_seconds + 0.01 < task.audio_duration_seconds:
-        return 0.0
     return max(
         0.0,
         min(
-            DIGITAL_HUMAN_TAIL_PADDING_SECONDS,
+            0.5,
             DIGITAL_HUMAN_MAX_SECONDS - task.audio_duration_seconds,
         ),
     )
@@ -128,6 +147,17 @@ class DigitalHumanWorkflow:
             if parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
             else None
         )
+        raw_generation_tail = parameters.get(GENERATION_TAIL_PARAMETER)
+        try:
+            generation_tail_seconds = (
+                None if raw_generation_tail is None else float(raw_generation_tail)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("数字人生成静音尾时长不合法") from exc
+        if generation_tail_seconds is not None and not (
+            0.0 <= generation_tail_seconds <= DIGITAL_HUMAN_TAIL_PADDING_SECONDS
+        ):
+            raise ValueError("数字人生成静音尾时长不合法")
         try:
             final_segment_tail_seconds = float(
                 parameters.get(WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER) or 0.0
@@ -154,6 +184,7 @@ class DigitalHumanWorkflow:
                 parameters.get("seedvr2_enabled"), default=False
             ),
             "timing_mode": timing_mode,
+            GENERATION_TAIL_PARAMETER: generation_tail_seconds,
             WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER: final_segment_tail_seconds,
         }
 

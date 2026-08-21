@@ -1,21 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import io
 import json
 from pathlib import Path
+import uuid
+import zipfile
 
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     BATCH_SOURCE_LTX_WORKBENCH,
+    AudioGenerationAttempt,
+    AudioGenerationTask,
+    AudioTaskStatus,
     GenerationBatch,
     GenerationTask,
     LongAudioProject,
     LtxPreparationJob,
+    MiniMaxConfig,
+    MiniMaxVoiceAsset,
     TaskStatus,
     User,
+    VoiceAssetStatus,
 )
 from app.services.ltx_workbench import compile_ltx_prompt
+from app.services.security import encrypt_secret
+from app.services.speech.accounts import credential_fingerprint
+from app.services.storage import to_relative_data_path
 from app.services.workflow_configs import save_workflow_config
 from tests.conftest import create_user
 from app.workers import task_worker
@@ -66,12 +78,101 @@ def _stage(client, token: str, kind: str, name: str, content_type: str) -> str:
     return response.json()["asset_id"]
 
 
-def _row(video_asset_id: str, audio_asset_id: str) -> dict[str, str]:
+def _configure_minimax(username: str) -> str:
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(username=username).one()
+        secret = f"ltx-minimax-{username}"
+        config = MiniMaxConfig(
+            user=user,
+            api_key_encrypted=encrypt_secret(secret),
+            credential_fingerprint=credential_fingerprint(secret),
+            base_url="https://api.minimax.io",
+            requests_per_minute=20,
+        )
+        db.add(config)
+        db.flush()
+        voice = MiniMaxVoiceAsset(
+            id=f"voice-{username}",
+            user_id=user.id,
+            config_id=config.id,
+            name="LTX 测试音色",
+            voice_id=f"provider-{username}",
+            account_binding_id=config.account_binding_id,
+            credential_fingerprint=config.credential_fingerprint,
+            status=VoiceAssetStatus.ACTIVE.value,
+            method="clone",
+            is_saved=True,
+        )
+        db.add(voice)
+        db.commit()
+        return voice.id
+
+
+def _finished_audio(client, token: str, username: str) -> tuple[str, str]:
+    voice_id = _configure_minimax(username)
+    created = client.post(
+        "/api/workbench/audio-batches",
+        json={
+            "access_token": token,
+            "name": "LTX MiniMax 声音",
+            "request_key": f"ltx-audio-{username}",
+            "correlation_id": f"ltx-{username}",
+            "rows": [{"row_id": "ROW-001", "speech_script": SCRIPT}],
+            "speech_options": {
+                "voiceAssetId": voice_id,
+                "model": "speech-2.8-hd",
+                "speed": 1,
+                "volume": 1,
+                "pitch": 0,
+                "languageBoost": "Chinese",
+                "outputFormat": "mp3",
+                "costConfirmed": True,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    batch_id = created.json()["batch_id"]
+    item_id = created.json()["items"][0]["item_id"]
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).filter_by(batch_item_id=item_id).one()
+        output = get_settings().outputs_dir / f"{username}-ltx-audio.mp3"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"ID3generated-audio")
+        subtitles = get_settings().outputs_dir / f"{username}-ltx-cues.json"
+        subtitles.write_text(
+            json.dumps(
+                [{"text": SCRIPT, "start_seconds": 0, "end_seconds": 30}],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        task.output_path = to_relative_data_path(output, get_settings())
+        task.subtitle_path = to_relative_data_path(subtitles, get_settings())
+        task.status = AudioTaskStatus.AWAITING_REVIEW.value
+        task.batch_item.audio_status = "AWAITING_REVIEW"
+        task.batch_item.status = "AWAITING_AUDIO_REVIEW"
+        db.add(
+            AudioGenerationAttempt(
+                id=str(uuid.uuid4()),
+                audio_task_id=task.id,
+                version=task.generation_version,
+                output_path=task.output_path,
+                subtitle_path=task.subtitle_path,
+                status="READY",
+            )
+        )
+        db.commit()
+    return batch_id, item_id
+
+
+def _row(video_asset_id: str, audio_batch_id: str, audio_item_id: str) -> dict[str, object]:
     return {
         "row_id": "ROW-001",
         "script_text": SCRIPT,
         "video_asset_id": video_asset_id,
-        "audio_asset_id": audio_asset_id,
+        "audio_batch_id": audio_batch_id,
+        "audio_item_id": audio_item_id,
+        "audio_generation_version": 1,
     }
 
 
@@ -80,7 +181,7 @@ def _create_batch(client, monkeypatch, username: str = "ltx-workbench-user"):
     _enable_ltx(username)
     token = _token(client, username)
     video_id = _stage(client, token, "video", "source.mov", "video/quicktime")
-    audio_id = _stage(client, token, "audio", "speech.wav", "audio/wav")
+    audio_batch_id, audio_item_id = _finished_audio(client, token, username)
     monkeypatch.setattr(
         "app.services.ltx_workbench.inspect_audio_duration", lambda path: 30.0
     )
@@ -94,11 +195,21 @@ def _create_batch(client, monkeypatch, username: str = "ltx-workbench-user"):
             "name": "独立对口型批次",
             "request_key": "ltx-request-001",
             "cost_confirmed": True,
-            "rows": [_row(video_id, audio_id)],
+            "rows": [_row(video_id, audio_batch_id, audio_item_id)],
         },
     )
     assert response.status_code == 201, response.text
     return token, response.json()
+
+
+def _single_segment_archive() -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as bundle:
+        bundle.writestr("audio/segment-001.mp3", b"ID3segment")
+        bundle.writestr(
+            "video/segment-001.mp4", b"\x00\x00\x00\x18ftypisomsegment"
+        )
+    return output.getvalue()
 
 
 def test_fixed_prompt_is_compiled_only_from_original_script() -> None:
@@ -112,7 +223,9 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
     _enable_ltx("ltx-row-user")
     token = _token(client, "ltx-row-user")
     video_id = _stage(client, token, "video", "source.mp4", "video/mp4")
-    audio_id = _stage(client, token, "audio", "speech.mp3", "audio/mpeg")
+    audio_batch_id, audio_item_id = _finished_audio(
+        client, token, "ltx-row-user"
+    )
     monkeypatch.setattr(
         "app.services.ltx_workbench.inspect_audio_duration", lambda path: 30.0
     )
@@ -121,7 +234,10 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
     )
     rejected = client.post(
         "/api/workbench/ltx-batches/validate",
-        json={"access_token": token, "rows": [_row(video_id, audio_id)]},
+        json={
+            "access_token": token,
+            "rows": [_row(video_id, audio_batch_id, audio_item_id)],
+        },
     )
     assert rejected.status_code == 400
     assert "源视频时长不足" in rejected.json()["detail"]
@@ -129,7 +245,7 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
     monkeypatch.setattr(
         "app.services.ltx_workbench.inspect_media_duration", lambda path: 30.0
     )
-    custom_prompt = _row(video_id, audio_id)
+    custom_prompt = _row(video_id, audio_batch_id, audio_item_id)
     custom_prompt["prompt"] = "允许用户改提示词"
     prompt_rejected = client.post(
         "/api/workbench/ltx-batches/validate",
@@ -143,7 +259,7 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
         "name": "完整行时长测试",
         "request_key": "ltx-idempotent-row",
         "cost_confirmed": True,
-        "rows": [_row(video_id, audio_id)],
+        "rows": [_row(video_id, audio_batch_id, audio_item_id)],
     }
     created = client.post("/api/workbench/ltx-batches", json=payload)
     assert created.status_code == 201, created.text
@@ -156,13 +272,22 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
     with SessionLocal() as db:
         batch = db.get(GenerationBatch, created.json()["batch_id"])
         preparation = db.query(LtxPreparationJob).one()
+        source_audio = db.query(AudioGenerationTask).one()
         assert batch is not None
         assert preparation.duration_seconds == 30.0
         assert preparation.video_duration_seconds == 30.0
         assert preparation.script_text == SCRIPT
+        assert preparation.alignment_provider == "minimax_sentence_timestamp"
+        assert source_audio.status == AudioTaskStatus.SUCCESS.value
+        assert source_audio.batch_item.segments == []
+        assert source_audio.batch_item.generation_task is None
+        assert max(
+            segment["endSeconds"] - segment["startSeconds"]
+            for segment in json.loads(preparation.segment_plan_json)
+        ) <= 30
 
 
-def test_short_unsegmented_ltx_analysis_preserves_uploaded_media_and_timeline(
+def test_minimax_timestamp_ltx_skips_asr_and_preserves_video_timeline(
     client, monkeypatch
 ) -> None:
     token, created = _create_batch(client, monkeypatch)
@@ -186,35 +311,18 @@ def test_short_unsegmented_ltx_analysis_preserves_uploaded_media_and_timeline(
     )
     assert claim.status_code == 200, claim.text
     job = claim.json()
-    assert job["action"] == "analysis"
+    assert job["action"] == "cut"
+    assert len(job["segments"]) == 1
     completed = client.post(
-        f"/api/media-worker/v1/jobs/{job['jobId']}/analysis",
+        f"/api/media-worker/v1/jobs/{job['jobId']}/cut",
         headers={"Authorization": f"Bearer {WORKER_TOKEN}"},
-        json={
-            "leaseId": job["leaseId"],
-            "provider": "funasr_http",
-            "segments": [
-                {
-                    "index": 1,
-                    "startSeconds": 0,
-                    "endSeconds": 30,
-                    "scriptText": SCRIPT,
-                    "alignmentMethod": "asr_timestamp",
-                }
-            ],
-            "alignment": {
-                "matchRatio": 1.0,
-                "tokens": [
-                    {
-                        "text": SCRIPT,
-                        "scriptStart": 0,
-                        "scriptEnd": len(SCRIPT),
-                        "startSeconds": 0,
-                        "endSeconds": 30,
-                        "confidence": 0.99,
-                    }
-                ],
-            },
+        data={"leaseId": job["leaseId"]},
+        files={
+            "archive": (
+                "segments.zip",
+                _single_segment_archive(),
+                "application/zip",
+            )
         },
     )
     assert completed.status_code == 200, completed.text
@@ -239,8 +347,8 @@ def test_short_unsegmented_ltx_analysis_preserves_uploaded_media_and_timeline(
         assert task.status == TaskStatus.PENDING.value
         assert task.seedvr2_enabled is True
         assert task.prompt == f"一个人用中文说：“{SCRIPT}”"
-        assert Path(task.image_path).suffix == ".mov"
-        assert Path(task.audio_path).suffix == ".wav"
+        assert Path(task.image_path).suffix == ".mp4"
+        assert Path(task.audio_path).suffix == ".mp3"
         assert "prompt_prefix" not in item["preparation"]["aligned_script"]
 
         task.status = TaskStatus.RUNNING.value

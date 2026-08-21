@@ -57,6 +57,10 @@ from app.services.visual_analysis import (
     VisualAnalysisUnavailable,
     analyze_visual_context,
 )
+from app.workflows.digital_human import (
+    DIGITAL_HUMAN_TAIL_PADDING_SECONDS,
+    GENERATION_TAIL_PARAMETER,
+)
 from app.services.postproduction import postproduction_manifest
 from app.services.logging_config import log_event
 from app.services.runninghub_pool import (
@@ -1364,10 +1368,11 @@ def start_workbench_composition(
             or item.generation_task
         )
         resolution_changed = requested_resolution != current_resolution
-        # The new workbench hands MiniMax timestamped audio to 4A.  Preserve
-        # the existing whole-second ceiling (24.4 -> 25), but do not apply the
-        # legacy 0.5-second silent tail used by upload-audio batch workflows.
+        # The new workbench hands MiniMax timestamped audio to 4A. Keep the
+        # authoritative speech duration and raw cues unchanged. The video
+        # worker creates a temporary two-second provider input tail later.
         video_parameters["timing_mode"] = "exact_timestamps"
+        video_parameters[GENERATION_TAIL_PARAMETER] = DIGITAL_HUMAN_TAIL_PADDING_SECONDS
         # Older local workbench builds injected this short placeholder into
         # every row, which accidentally overrode the user's complete server
         # configuration. Refresh only that exact legacy value at the paid 4A

@@ -7,6 +7,7 @@ from app.config import Settings
 from app.models import GenerationBatchItem, GenerationTask, TaskStatus
 from app.services.speech.async_outputs import load_subtitle_cues
 from app.services.storage import safe_relative_path
+from app.workflows.digital_human import generation_tail_padding_seconds
 from app.services.video_enhancement import (
     task_processing_stage,
     task_quality_variant,
@@ -153,6 +154,12 @@ def postproduction_manifest(
                     segment.end_seconds
                     if segment is not None
                     else task.audio_duration_seconds
+                ),
+                "speech_duration_seconds": task.audio_duration_seconds,
+                "generation_tail_seconds": (
+                    generation_tail_padding_seconds(task)
+                    if task.workflow_type == "digital_human"
+                    else 0.0
                 ),
             }
         )
