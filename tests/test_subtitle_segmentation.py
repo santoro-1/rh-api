@@ -10,18 +10,21 @@ from app.services.content_analysis.subtitle_segmentation import (
 )
 
 
-def test_v20_prompt_keeps_the_complete_hard_requirements() -> None:
+def test_v23_prompt_keeps_hard_limits_and_adds_narrow_semantic_exceptions() -> None:
     prompt = subtitle_system_prompt()
 
-    assert SUBTITLE_ANALYSIS_PROMPT_VERSION == "jyd.subtitle-analysis.prompt.v22"
+    assert SUBTITLE_ANALYSIS_PROMPT_VERSION == "jyd.subtitle-analysis.prompt.v23"
     assert "唯一目的" in prompt
     assert "必须100%原样保留" in prompt
-    assert "新增逗号数量必须最少" in prompt
+    assert "新增逗号数量默认必须最少" in prompt
     assert "10个有效字符是上限，不是建议长度" in prompt
     assert "原文完全不变 ＞ 每段不超过10个有效字符" in prompt
     assert "只要仍有任何一段超过10个有效字符" in prompt
     assert "每个阿拉伯数字计1个有效字符" in prompt
     assert "每个英文字母计1个有效字符" in prompt
+    assert "连续并列结构例外" in prompt
+    assert "到八十岁｜到九十岁｜到一百岁" in prompt
+    assert "八十几岁很多人｜已经在坐轮椅" in prompt
     assert "只输出切分后的完整文案" in prompt
 
     messages = build_subtitle_messages("每天喝2000ml水")
@@ -77,6 +80,36 @@ def test_validator_rejects_breaks_after_degree_adverbs_and_before_dynamic_partic
     assert "不安全断点" in broken_dynamic_particle.error
     assert broken_attributive_phrase.valid is False
     assert "不安全断点" in broken_attributive_phrase.error
+
+
+def test_parallel_age_items_allow_one_semantic_extra_break() -> None:
+    source = "到八十岁到九十岁到一百岁"
+
+    accepted = validate_subtitle_split(source, "到八十岁，到九十岁，到一百岁")
+    overly_compact = validate_subtitle_split(source, "到八十岁到九十岁，到一百岁")
+    stranded_introducer = validate_subtitle_split(
+        source, "到八十岁到，九十岁到一百岁"
+    )
+    units = deterministic_subtitle_units(source)
+
+    assert accepted.valid is True
+    assert accepted.inserted_positions == (4, 8)
+    assert overly_compact.valid is False
+    assert "同构并列项" in overly_compact.error
+    assert stranded_introducer.valid is False
+    assert "不安全断点" in stranded_introducer.error
+    assert [unit.text for unit in units] == ["到八十岁", "到九十岁", "到一百岁"]
+
+
+def test_subject_predicate_boundary_rejects_split_inside_many_people() -> None:
+    source = "八十几岁很多人已经在坐轮椅"
+
+    accepted = validate_subtitle_split(source, "八十几岁很多人，已经在坐轮椅")
+    broken_subject = validate_subtitle_split(source, "八十几岁很多，人已经在坐轮椅")
+
+    assert accepted.valid is True
+    assert broken_subject.valid is False
+    assert "不安全断点" in broken_subject.error
 
 
 def test_deterministic_fallback_keeps_tight_grammar_units_intact() -> None:

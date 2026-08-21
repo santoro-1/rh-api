@@ -161,7 +161,7 @@ def test_v20_reuses_prior_non_subtitle_branches_and_only_refreshes_subtitles() -
     assert refreshed["music_intent"] == first["music_intent"]
     assert refreshed["visual_plan"] == first["visual_plan"]
     assert refreshed["title"] == first["title"]
-    assert refreshed["subtitle_prompt_version"] == "jyd.subtitle-analysis.prompt.v22"
+    assert refreshed["subtitle_prompt_version"] == "jyd.subtitle-analysis.prompt.v23"
     assert len(subtitle_only_fake.calls) == 1
     assert subtitle_only_fake.calls[0].get("response_format") is None
 

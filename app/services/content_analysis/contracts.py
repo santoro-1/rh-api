@@ -11,6 +11,7 @@ import logging
 from typing import Any, Literal
 
 import jieba
+import jieba.posseg as pseg
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -80,6 +81,46 @@ _BOUND_ATTRIBUTIVE_HEAD_PREFIXES = (
 
 jieba.setLogLevel(logging.ERROR)
 _JIEBA_TOKENIZER = jieba.Tokenizer()
+_JIEBA_POS_TOKENIZER = pseg.POSTokenizer(_JIEBA_TOKENIZER)
+
+
+def _grammatical_unsafe_break_positions(original_script: str) -> set[int]:
+    """Protect only clear cross-token dependencies; semantic choice remains remote."""
+
+    tagged: list[tuple[str, str, int, int]] = []
+    cursor = 0
+    for token in _JIEBA_POS_TOKENIZER.cut(original_script, HMM=False):
+        word = str(token.word)
+        start = cursor
+        end = start + len(word)
+        tagged.append((word, str(token.flag), start, end))
+        cursor = end
+    unsafe: set[int] = set()
+    for left, right in zip(tagged, tagged[1:]):
+        left_word, left_flag, _left_start, boundary = left
+        right_word, right_flag, _right_start, _right_end = right
+        if not left_word or not right_word:
+            continue
+        if (
+            left_word[-1] in _LOCAL_PREFERRED_BREAK_CHARACTERS
+            or right_word[0] in _LOCAL_PREFERRED_BREAK_CHARACTERS
+            or left_word[-1].isspace()
+            or right_word[0].isspace()
+        ):
+            continue
+        right_is_head = right_flag.startswith(("m", "n", "q", "r")) or right_flag == "j"
+        if left_flag.startswith(("p", "c")):
+            # A preposition/conjunction introduces what follows; it must not be
+            # stranded at the end of the previous subtitle.
+            unsafe.add(boundary)
+        elif left_word in {"到", "给", "对", "向", "往", "从"} and right_is_head:
+            # Jieba often tags these contextual introducers as verbs. Protect
+            # only when they actually introduce a numeric/nominal phrase.
+            unsafe.add(boundary)
+        elif left_flag.startswith("m") and right_flag.startswith(("n", "q")):
+            # Quantifier/number + nominal head: 很多人、三次活动。
+            unsafe.add(boundary)
+    return unsafe
 
 
 def _lexical_unsafe_break_positions(original_script: str) -> set[int]:
@@ -138,6 +179,7 @@ def _lexical_unsafe_break_positions(original_script: str) -> set[int]:
                 # 太|难得、非常|丰富、特别|重要 are semantically broken.
                 unsafe.add(boundary)
             search_start = start + len(adverb)
+    unsafe.update(_grammatical_unsafe_break_positions(original_script))
     return unsafe
 
 LevelScore = Field(ge=1, le=5, description="Integer level from 1 (low) to 5 (high).")
