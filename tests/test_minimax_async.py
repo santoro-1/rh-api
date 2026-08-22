@@ -206,15 +206,15 @@ def test_pronunciation_tones_use_official_json_array_format():
     ]
 
 
-def test_timestamp_planner_uses_sentence_boundaries_and_30_second_limit():
+def test_timestamp_planner_uses_sentence_boundaries_and_20_second_limit():
     cues = [
-        SubtitleCue("第一段。", 0.0, 27.0),
-        SubtitleCue("第二段。", 27.4, 35.0),
-        SubtitleCue("第三段。", 35.3, 62.0),
-        SubtitleCue("第四段。", 62.4, 87.0),
+        SubtitleCue("第一段。", 0.0, 17.0),
+        SubtitleCue("第二段。", 17.4, 35.0),
+        SubtitleCue("第三段。", 35.3, 52.0),
+        SubtitleCue("第四段。", 52.4, 69.0),
     ]
 
-    plans = plan_timestamped_segments(cues, 87.5)
+    plans = plan_timestamped_segments(cues, 69.5)
 
     assert [plan.script_text for plan in plans] == [
         "第一段。",
@@ -222,16 +222,16 @@ def test_timestamp_planner_uses_sentence_boundaries_and_30_second_limit():
         "第三段。",
         "第四段。",
     ]
-    assert all(plan.duration_seconds <= 30.0 for plan in plans)
-    assert plans[0].end_seconds == 27.2
-    assert plans[-1].end_seconds == 87.5
+    assert all(plan.duration_seconds <= 20.0 for plan in plans)
+    assert plans[0].end_seconds == 17.2
+    assert plans[-1].end_seconds == 69.5
     assert all(
         plan.alignment_method == "minimax_sentence_timestamp"
         for plan in plans
     )
 
 
-def test_workflow_specific_timestamp_plans_honor_35_and_30_second_limits():
+def test_workflow_specific_timestamp_plans_honor_35_and_20_second_limits():
     cues = [
         SubtitleCue("第一句。", 0.0, 9.8),
         SubtitleCue("第二句。", 10.0, 19.6),
@@ -241,14 +241,15 @@ def test_workflow_specific_timestamp_plans_honor_35_and_30_second_limits():
 
     digital_plans = plan_timestamped_segments(
         cues,
-        39.75,
+        39.7,
+        target_segment_seconds=30.0,
         max_segment_seconds=35.0,
     )
-    ltx_plans = plan_timestamped_segments(cues, 39.75)
+    ltx_plans = plan_timestamped_segments(cues, 39.7)
 
     assert len(digital_plans) == 2
     assert all(plan.duration_seconds <= 35.0 for plan in digital_plans)
     assert digital_plans[0].start_seconds == 0.0
-    assert digital_plans[-1].end_seconds == 39.75
+    assert digital_plans[-1].end_seconds == 39.7
     assert len(ltx_plans) == 2
-    assert all(plan.duration_seconds <= 30.0 for plan in ltx_plans)
+    assert all(plan.duration_seconds <= 20.0 for plan in ltx_plans)

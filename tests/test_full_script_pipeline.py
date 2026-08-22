@@ -105,17 +105,16 @@ def test_local_segment_plan_preserves_script_and_hard_limit():
         silence_midpoints=[29.5, 56.4],
     )
 
-    assert len(plans) == 4
+    assert len(plans) == 5
     assert "".join(plan.script_text for plan in plans) == script
-    assert all(plan.duration_seconds <= 30.0 for plan in plans)
-    assert plans[0].end_seconds == 29.5
+    assert all(plan.duration_seconds <= 20.0 for plan in plans)
     assert plans[-1].end_seconds == 82.0
 
 
 def test_silence_plan_avoids_tiny_tail_and_never_needs_transcript():
     plans = plan_silence_segments(91.0, silence_midpoints=[44.0])
     assert all(plan.script_text == "" for plan in plans)
-    assert all(12.0 <= plan.duration_seconds <= 30.0 for plan in plans)
+    assert all(12.0 <= plan.duration_seconds <= 20.0 for plan in plans)
     assert plans[0].start_seconds == 0
     assert plans[-1].end_seconds == 91.0
 
@@ -124,6 +123,7 @@ def test_digital_human_silence_plan_hard_limits_segments_to_35_seconds():
     plans = plan_silence_segments(
         70.0,
         silence_midpoints=[29.8, 59.9],
+        target_segment_seconds=30.0,
         max_segment_seconds=35.0,
     )
 
@@ -233,8 +233,8 @@ def test_ltx_full_flow_calls_tts_once_and_creates_sequential_children(
     fake_client.bundle = make_async_speech_bundle(
         b"ID3full-audio",
         [
-            (0.0, 30.0, first_script),
-            (30.0, 55.0, second_script),
+            (0.0, 18.0, first_script),
+            (18.0, 36.0, second_script),
         ],
     )
     video_cuts: list[tuple[float, float]] = []
@@ -246,14 +246,14 @@ def test_ltx_full_flow_calls_tts_once_and_creates_sequential_children(
         audio_worker,
         "inspect_audio_duration",
         lambda path: (
-            30.0
+            18.0
             if "segment-001" in path.name
-            else 25.0
+            else 18.0
             if "segment-002" in path.name
-            else 55.0
+            else 36.0
         ),
     )
-    monkeypatch.setattr(audio_worker, "inspect_media_duration", lambda path: 65.0)
+    monkeypatch.setattr(audio_worker, "inspect_media_duration", lambda path: 45.0)
     monkeypatch.setattr(audio_worker, "cut_audio_segment", _write_audio_segment)
 
     def fake_video_cut(source, target, *, start_seconds, duration_seconds):
@@ -294,7 +294,7 @@ def test_ltx_full_flow_calls_tts_once_and_creates_sequential_children(
         ]
         first_segment_id = segments[0].id
     assert fake_client.texts == [complete_script]
-    assert video_cuts == [(0.0, 30.0), (30.0, 25.0)]
+    assert video_cuts == [(0.0, 18.0), (18.0, 18.0)]
 
     status = client.get(f"/api/batches/{batch_id}")
     assert status.status_code == 200

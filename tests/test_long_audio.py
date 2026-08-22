@@ -34,21 +34,21 @@ class FakeAlignmentProvider:
                     index=1,
                     script_text="今天是星期四。",
                     start_seconds=0,
-                    end_seconds=30,
+                    end_seconds=20,
                     alignment_method="punctuation_silence",
                 ),
                 SegmentPlan(
                     index=2,
                     script_text="我要吃肯德基。",
-                    start_seconds=30,
-                    end_seconds=60,
+                    start_seconds=20,
+                    end_seconds=40,
                     alignment_method="punctuation_silence",
                 ),
                 SegmentPlan(
                     index=3,
                     script_text="但是我下班很晚。",
-                    start_seconds=60,
-                    end_seconds=90,
+                    start_seconds=40,
+                    end_seconds=60,
                     alignment_method="punctuation_estimate",
                 ),
             ),
@@ -102,7 +102,7 @@ def test_long_audio_review_and_handoff_flow(client, monkeypatch):
     )
     monkeypatch.setattr(
         "app.services.long_audio.inspect_audio_duration",
-        lambda path: 30.0 if "segment-" in Path(path).name else 90.0,
+        lambda path: 20.0 if "segment-" in Path(path).name else 60.0,
     )
     monkeypatch.setattr(
         "app.services.long_audio.inspect_media_duration",
@@ -156,17 +156,17 @@ def test_long_audio_review_and_handoff_flow(client, monkeypatch):
             "segments": [
                 {
                     "startSeconds": 0,
-                    "endSeconds": 30,
+                    "endSeconds": 20,
                     "scriptText": "今天是星期四。",
                 },
                 {
-                    "startSeconds": 30,
-                    "endSeconds": 60,
+                    "startSeconds": 20,
+                    "endSeconds": 40,
                     "scriptText": "我要吃肯德基。",
                 },
                 {
-                    "startSeconds": 60,
-                    "endSeconds": 90,
+                    "startSeconds": 40,
+                    "endSeconds": 60,
                     "scriptText": "但是我下班很晚。",
                 },
             ]
@@ -201,7 +201,7 @@ def test_long_audio_review_and_handoff_flow(client, monkeypatch):
         assert batch.total_items == 1
         assert len(tasks) == 3
         assert tasks[0].prompt.endswith("“今天是星期四。”")
-        assert tasks[1].audio_duration_seconds == 30
+        assert tasks[1].audio_duration_seconds == 20
 
     duplicate = client.post(
         f"/api/long-audio-projects/{project_id}/confirm"
@@ -220,7 +220,7 @@ def test_review_plan_rejects_gaps_and_missing_original_script(client, monkeypatc
     )
     monkeypatch.setattr(
         "app.services.long_audio.inspect_audio_duration",
-        lambda _path: 90.0,
+        lambda _path: 60.0,
     )
     monkeypatch.setattr(
         "app.services.long_audio.inspect_media_duration",
@@ -254,17 +254,17 @@ def test_review_plan_rejects_gaps_and_missing_original_script(client, monkeypatc
             "segments": [
                 {
                     "startSeconds": 0,
-                    "endSeconds": 30,
+                    "endSeconds": 20,
                     "scriptText": "今天是星期四。",
                 },
                 {
-                    "startSeconds": 31,
-                    "endSeconds": 60,
+                    "startSeconds": 21,
+                    "endSeconds": 40,
                     "scriptText": "漏掉内容。",
                 },
                 {
-                    "startSeconds": 60,
-                    "endSeconds": 90,
+                    "startSeconds": 40,
+                    "endSeconds": 60,
                     "scriptText": "但是我下班很晚。",
                 },
             ]
@@ -365,7 +365,7 @@ def test_long_audio_ltx_defaults_to_plus_instance(client, monkeypatch):
     )
     monkeypatch.setattr(
         "app.services.long_audio.inspect_audio_duration",
-        lambda _path: 90.0,
+        lambda _path: 60.0,
     )
     monkeypatch.setattr(
         "app.services.long_audio.inspect_media_duration",

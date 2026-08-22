@@ -384,8 +384,8 @@ def create_ltx_workbench_batch(
             plans = plan_timestamped_segments(
                 cues,
                 audio_duration,
-                target_segment_seconds=27.0,
-                max_segment_seconds=30.0,
+                target_segment_seconds=18.0,
+                max_segment_seconds=20.0,
             )
             video_path = materialize_staged_asset(
                 video_source, project_directory, kind="video"

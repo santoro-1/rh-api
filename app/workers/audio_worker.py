@@ -39,6 +39,7 @@ from app.services.logging_config import (
 )
 from app.services.media_segmentation import (
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
+    DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS,
     MediaSegmentationError,
     build_segment_plan,
     cut_audio_segment,
@@ -567,6 +568,11 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
         if workflow_type == "digital_human"
         else None
     )
+    segment_target_seconds = (
+        DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS
+        if workflow_type == "digital_human"
+        else None
+    )
     if task.subtitle_path:
         subtitle_path = safe_relative_path(
             task.subtitle_path, get_settings().data_dir
@@ -580,6 +586,7 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
             plan_timestamped_segments(
                 cues,
                 full_duration,
+                target_segment_seconds=segment_target_seconds,
                 max_segment_seconds=segment_max_seconds,
             )
             if segment_max_seconds is not None
@@ -593,6 +600,7 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
             build_segment_plan(
                 audio_path,
                 task.speech_script,
+                target_segment_seconds=segment_target_seconds,
                 max_segment_seconds=segment_max_seconds,
             )
             if segment_max_seconds is not None

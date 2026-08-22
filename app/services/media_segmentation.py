@@ -14,13 +14,14 @@ from app.services.speech.async_outputs import SubtitleCue
 
 logger = logging.getLogger(__name__)
 
-TARGET_SEGMENT_SECONDS = 30.0
-MAX_SEGMENT_SECONDS = 30.0
+TARGET_SEGMENT_SECONDS = 20.0
+MAX_SEGMENT_SECONDS = 20.0
 # RunningHub's digital-human workflow accepts at most 35 seconds of provider
 # input. Every speech segment receives a two-second silent generation tail,
 # so keep 0.2 seconds for MP3/container rounding and cap spoken content here.
 DIGITAL_HUMAN_PROVIDER_MAX_INPUT_SECONDS = 35.0
 DIGITAL_HUMAN_GENERATION_TAIL_SECONDS = 2.0
+DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS = 30.0
 DIGITAL_HUMAN_MAX_SEGMENT_SECONDS = 32.8
 _MIN_USEFUL_SEGMENT_SECONDS = 12.0
 _STRONG_BREAK_RE = re.compile(r".+?(?:[。！？!?；;]+|\n+)|.+$", re.DOTALL)
@@ -393,7 +394,7 @@ def plan_timestamped_segments(
     target_segment_seconds: float = TARGET_SEGMENT_SECONDS,
     max_segment_seconds: float = MAX_SEGMENT_SECONDS,
 ) -> list[SegmentPlan]:
-    """Group official sentence timestamps into roughly 30-second segments."""
+    """Group official sentence timestamps within the requested hard limit."""
 
     if duration_seconds <= 0:
         raise MediaSegmentationError("生成音频时长必须大于 0")

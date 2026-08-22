@@ -387,13 +387,13 @@ def test_ltx_task_creation_saves_custom_audio(client, monkeypatch):
         assert task.audio_original_name == "voice.mp3"
 
 
-def test_ltx_task_creation_rejects_audio_over_30_seconds(client, monkeypatch):
+def test_ltx_task_creation_rejects_audio_over_20_seconds(client, monkeypatch):
     create_user("ltx-over-limit-creator")
     _enable_ltx_workflow("ltx-over-limit-creator")
     login(client, "ltx-over-limit-creator")
     monkeypatch.setattr(
         "app.routes.tasks.inspect_audio_duration",
-        lambda path: 30.1,
+        lambda path: 20.1,
     )
     monkeypatch.setattr(
         "app.routes.tasks.inspect_media_duration",
@@ -415,7 +415,7 @@ def test_ltx_task_creation_rejects_audio_over_30_seconds(client, monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"] == (
-        "音频不能超过 30 秒；请先拆分音频，或使用脚本完整流程自动切分"
+        "音频不能超过 20 秒；请先拆分音频，或使用脚本完整流程自动切分"
     )
 
 
@@ -427,11 +427,11 @@ def test_ltx_task_creation_rejects_video_shorter_than_complete_audio(
     login(client, "ltx-short-video-creator")
     monkeypatch.setattr(
         "app.routes.tasks.inspect_audio_duration",
-        lambda path: 30.0,
+        lambda path: 20.0,
     )
     monkeypatch.setattr(
         "app.routes.tasks.inspect_media_duration",
-        lambda path: 20.0,
+        lambda path: 10.0,
     )
 
     response = client.post(
@@ -449,7 +449,7 @@ def test_ltx_task_creation_rejects_video_shorter_than_complete_audio(
 
     assert response.status_code == 400
     assert response.json()["detail"] == (
-        "源视频时长不足：视频 20.0 秒，音频 30.0 秒"
+        "源视频时长不足：视频 10.0 秒，音频 20.0 秒"
     )
 
 
@@ -461,11 +461,11 @@ def test_ltx_task_creation_accepts_equal_video_and_audio_with_probe_tolerance(
     login(client, "ltx-equal-duration-creator")
     monkeypatch.setattr(
         "app.routes.tasks.inspect_audio_duration",
-        lambda path: 30.0,
+        lambda path: 20.0,
     )
     monkeypatch.setattr(
         "app.routes.tasks.inspect_media_duration",
-        lambda path: 29.96,
+        lambda path: 19.96,
     )
 
     response = client.post(

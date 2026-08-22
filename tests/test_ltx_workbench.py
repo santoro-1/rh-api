@@ -141,7 +141,7 @@ def _finished_audio(client, token: str, username: str) -> tuple[str, str]:
         subtitles = get_settings().outputs_dir / f"{username}-ltx-cues.json"
         subtitles.write_text(
             json.dumps(
-                [{"text": SCRIPT, "start_seconds": 0, "end_seconds": 30}],
+                [{"text": SCRIPT, "start_seconds": 0, "end_seconds": 20}],
                 ensure_ascii=False,
             ),
             encoding="utf-8",
@@ -183,10 +183,10 @@ def _create_batch(client, monkeypatch, username: str = "ltx-workbench-user"):
     video_id = _stage(client, token, "video", "source.mov", "video/quicktime")
     audio_batch_id, audio_item_id = _finished_audio(client, token, username)
     monkeypatch.setattr(
-        "app.services.ltx_workbench.inspect_audio_duration", lambda path: 30.0
+        "app.services.ltx_workbench.inspect_audio_duration", lambda path: 20.0
     )
     monkeypatch.setattr(
-        "app.services.ltx_workbench.inspect_media_duration", lambda path: 32.0
+        "app.services.ltx_workbench.inspect_media_duration", lambda path: 22.0
     )
     response = client.post(
         "/api/workbench/ltx-batches",
@@ -227,10 +227,10 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
         client, token, "ltx-row-user"
     )
     monkeypatch.setattr(
-        "app.services.ltx_workbench.inspect_audio_duration", lambda path: 30.0
+        "app.services.ltx_workbench.inspect_audio_duration", lambda path: 20.0
     )
     monkeypatch.setattr(
-        "app.services.ltx_workbench.inspect_media_duration", lambda path: 29.0
+        "app.services.ltx_workbench.inspect_media_duration", lambda path: 19.0
     )
     rejected = client.post(
         "/api/workbench/ltx-batches/validate",
@@ -243,7 +243,7 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
     assert "源视频时长不足" in rejected.json()["detail"]
 
     monkeypatch.setattr(
-        "app.services.ltx_workbench.inspect_media_duration", lambda path: 30.0
+        "app.services.ltx_workbench.inspect_media_duration", lambda path: 20.0
     )
     custom_prompt = _row(video_id, audio_batch_id, audio_item_id)
     custom_prompt["prompt"] = "允许用户改提示词"
@@ -274,8 +274,8 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
         preparation = db.query(LtxPreparationJob).one()
         source_audio = db.query(AudioGenerationTask).one()
         assert batch is not None
-        assert preparation.duration_seconds == 30.0
-        assert preparation.video_duration_seconds == 30.0
+        assert preparation.duration_seconds == 20.0
+        assert preparation.video_duration_seconds == 20.0
         assert preparation.script_text == SCRIPT
         assert preparation.alignment_provider == "minimax_sentence_timestamp"
         assert source_audio.status == AudioTaskStatus.SUCCESS.value
@@ -284,7 +284,7 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
         assert max(
             segment["endSeconds"] - segment["startSeconds"]
             for segment in json.loads(preparation.segment_plan_json)
-        ) <= 30
+        ) <= 20
 
 
 def test_minimax_timestamp_ltx_skips_asr_and_preserves_video_timeline(
@@ -299,10 +299,10 @@ def test_minimax_timestamp_ltx_skips_asr_and_preserves_video_timeline(
     )
     monkeypatch.setattr("app.routes.media_worker_api.get_settings", lambda: settings)
     monkeypatch.setattr(
-        "app.services.long_audio.inspect_audio_duration", lambda path: 30.0
+        "app.services.long_audio.inspect_audio_duration", lambda path: 20.0
     )
     monkeypatch.setattr(
-        "app.services.long_audio.inspect_media_duration", lambda path: 32.0
+        "app.services.long_audio.inspect_media_duration", lambda path: 22.0
     )
     claim = client.post(
         "/api/media-worker/v1/jobs/claim",

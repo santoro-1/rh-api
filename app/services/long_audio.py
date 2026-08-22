@@ -28,6 +28,7 @@ from app.services.audio import format_duration_timecode, inspect_audio_duration
 from app.services.media_segmentation import (
     DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
+    DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS,
     MAX_SEGMENT_SECONDS,
     SegmentPlan,
     cut_audio_segment,
@@ -315,6 +316,7 @@ def analyze_long_audio_project(
         plans = plan_silence_segments(
             project.duration_seconds,
             detect_silence_midpoints(audio_path),
+            target_segment_seconds=DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS,
             max_segment_seconds=DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
         )
         apply_alignment_plans(project, settings, plans, provider="vad_silence")

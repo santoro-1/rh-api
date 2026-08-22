@@ -57,11 +57,11 @@ def _create_project(client, monkeypatch) -> str:
     login(client, "remote-media-user")
     monkeypatch.setattr(
         "app.services.long_audio.inspect_audio_duration",
-        lambda path: 30.0 if "segment-" in Path(path).name else 90.0,
+        lambda path: 20.0 if "segment-" in Path(path).name else 60.0,
     )
     monkeypatch.setattr(
         "app.services.long_audio.inspect_media_duration",
-        lambda path: 30.0 if "segment-" in Path(path).name else 100.0,
+        lambda path: 20.0 if "segment-" in Path(path).name else 100.0,
     )
     response = client.post(
         "/api/long-audio-projects",
@@ -95,21 +95,21 @@ def _segments() -> list[dict[str, object]]:
         {
             "index": 1,
             "startSeconds": 0,
-            "endSeconds": 30,
+            "endSeconds": 20,
             "scriptText": "今天是星期四。",
             "alignmentMethod": "asr_timestamp",
         },
         {
             "index": 2,
-            "startSeconds": 30,
-            "endSeconds": 60,
+            "startSeconds": 20,
+            "endSeconds": 40,
             "scriptText": "我要吃肯德基。",
             "alignmentMethod": "asr_timestamp",
         },
         {
             "index": 3,
-            "startSeconds": 60,
-            "endSeconds": 90,
+            "startSeconds": 40,
+            "endSeconds": 60,
             "scriptText": "但是我下班很晚。",
             "alignmentMethod": "asr_timestamp",
         },
