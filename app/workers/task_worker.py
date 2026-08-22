@@ -38,6 +38,7 @@ from app.services.runninghub_balance import (
     persist_client_account_status,
     save_balance_error,
 )
+from app.services.runninghub_uploads import prepare_runninghub_retry_upload
 from app.services.deployment_drain import is_deployment_draining
 from app.services.runninghub_dispatch import (
     DispatchReservation,
@@ -1854,7 +1855,20 @@ def process_task(db: Session, task_id: str) -> None:
         with tempfile.TemporaryDirectory(prefix="runninghub-upload-") as work_dir:
             for asset in workflow.assets_for_task(task):
                 asset_path = resolve_asset_path(asset, settings)
-                upload_path = asset_path
+                upload_path = prepare_runninghub_retry_upload(
+                    task,
+                    asset,
+                    asset_path,
+                    Path(work_dir),
+                )
+                if upload_path != asset_path:
+                    log_event(
+                        logger,
+                        "video.remote_asset_refreshed",
+                        "RunningHub 远端视频素材丢失，已生成无损重封装副本后重传",
+                        asset_slot=asset.name,
+                        **_video_log_context(task),
+                    )
                 if task.workflow_type == "digital_human" and asset.name == "audio":
                     padding_seconds = generation_tail_padding_seconds(task)
                     if padding_seconds > 0:
