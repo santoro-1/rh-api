@@ -249,6 +249,71 @@ def test_query_preserves_usage_null():
     assert client.query_task("x")["usage"] is None
 
 
+def test_raw_workflow_query_falls_back_to_advanced_outputs_and_normalizes_shape():
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {"taskId": "h3-1", "status": "SUCCESS", "results": []},
+            ),
+            FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "msg": "success",
+                    "data": [
+                        {
+                            "fileUrl": "https://files.example/h3.mp4",
+                            "fileType": "mp4",
+                            "nodeId": "387",
+                            "consumeCoins": "160",
+                        }
+                    ],
+                },
+            ),
+        ]
+    )
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "published-h3-workflow",
+        session,
+        submission_type="raw-workflow",
+    )
+
+    result = client.query_task("h3-1")
+
+    assert result["results"][0]["url"] == "https://files.example/h3.mp4"
+    assert result["results"][0]["outputType"] == "mp4"
+    assert result["results"][0]["nodeId"] == "387"
+    assert session.calls[1][0][0] == "https://rh.example/task/openapi/outputs"
+    assert session.calls[1][1]["json"] == {"apiKey": "secret", "taskId": "h3-1"}
+
+
+def test_raw_workflow_query_keeps_success_pending_until_outputs_are_ready():
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {"taskId": "h3-1", "status": "SUCCESS", "results": []},
+            ),
+            FakeResponse(200, {"code": 0, "msg": "success", "data": []}),
+        ]
+    )
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "published-h3-workflow",
+        session,
+        submission_type="raw-workflow",
+    )
+
+    with pytest.raises(RunningHubError, match="尚未返回文件") as error:
+        client.query_task("h3-1")
+
+    assert error.value.retry_safe is True
+
+
 def test_workflow_submission_uses_workflow_v2_endpoint():
     session = FakeSession(
         [FakeResponse(200, {"taskId": "workflow-task", "status": "RUNNING"})]
@@ -265,6 +330,90 @@ def test_workflow_submission_uses_workflow_v2_endpoint():
         session.calls[0][0][0]
         == "https://rh.example/openapi/v2/run/workflow/2080551073030434817"
     )
+
+
+def test_raw_workflow_submission_uses_advanced_endpoint_without_mutating_payload():
+    session = FakeSession(
+        [FakeResponse(200, {"code": 0, "msg": "success", "data": {"taskId": "h3-1"}})]
+    )
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "published-h3-workflow",
+        session,
+        submission_type="raw-workflow",
+    )
+    payload = {
+        "workflow": '{"83":{"class_type":"Text","inputs":{"text":"x"}}}',
+        "addMetadata": True,
+        "instanceType": "plus",
+        "usePersonalQueue": False,
+    }
+
+    assert client.submit_task(payload) == "h3-1"
+    assert "apiKey" not in payload
+    assert "workflowId" not in payload
+    args, kwargs = session.calls[0]
+    assert args[0] == "https://rh.example/task/openapi/create"
+    assert kwargs["json"] == {
+        **payload,
+        "apiKey": "secret",
+        "workflowId": "published-h3-workflow",
+    }
+
+
+def test_raw_workflow_submission_injects_access_password_only_server_side():
+    session = FakeSession(
+        [FakeResponse(200, {"code": 0, "msg": "success", "data": {"taskId": "h3-2"}})]
+    )
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "private-h3-workflow",
+        session,
+        submission_type="raw-workflow",
+        access_password="private-workflow-password",
+    )
+    payload = {"workflow": "{}", "instanceType": "plus"}
+
+    assert client.submit_task(payload) == "h3-2"
+    assert "accessPassword" not in payload
+    assert session.calls[0][1]["json"]["accessPassword"] == "private-workflow-password"
+
+    client.set_access_password("rotated-password")
+    session.responses.append(
+        FakeResponse(200, {"code": 0, "msg": "success", "data": {"taskId": "h3-3"}})
+    )
+    assert client.submit_task(payload) == "h3-3"
+    assert session.calls[1][1]["json"]["accessPassword"] == "rotated-password"
+
+
+def test_raw_workflow_submission_surfaces_legacy_business_error():
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "published-h3-workflow",
+        FakeSession([FakeResponse(200, {"code": 421, "msg": "API 并发数已达上限"})]),
+        submission_type="raw-workflow",
+    )
+
+    with pytest.raises(RunningHubError, match="API 并发数已达上限") as error:
+        client.submit_task({"workflow": "{}"})
+    assert error.value.is_capacity_limited is True
+    assert error.value.submission_outcome_unknown is False
+
+
+def test_raw_workflow_submission_requires_workflow_json():
+    client = RunningHubClient(
+        "secret",
+        "https://rh.example",
+        "published-h3-workflow",
+        FakeSession([]),
+        submission_type="raw-workflow",
+    )
+
+    with pytest.raises(RunningHubError, match="缺少 workflow JSON"):
+        client.submit_task({"workflow": ""})
 
 
 def test_cancel_task_uses_official_endpoint_and_requires_success():

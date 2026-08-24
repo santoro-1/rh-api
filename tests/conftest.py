@@ -49,6 +49,7 @@ def create_user(
     *,
     is_admin: bool = False,
     with_config: bool = True,
+    h3_access_enabled: bool = False,
 ) -> User:
     with SessionLocal() as db:
         user = User(
@@ -56,6 +57,7 @@ def create_user(
             password_hash=hash_password(password),
             is_admin=is_admin,
             is_active=True,
+            h3_access_enabled=h3_access_enabled,
         )
         if with_config:
             RunningHubConfig(

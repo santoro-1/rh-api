@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
+    BATCH_SOURCE_H3_WORKBENCH,
     BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
     GenerationTask,
@@ -15,6 +16,7 @@ from app.models import (
     RunningHubExecutionAccount,
     TaskStatus,
 )
+from app.services.h3_pool import h3_capability_ready
 from app.services.runninghub_pool import (
     backfill_runninghub_config_fingerprints,
     credential_active_count_subquery,
@@ -59,12 +61,32 @@ def task_uses_execution_pool(task: GenerationTask) -> bool:
 
     item = task.batch_item or (task.segment.batch_item if task.segment else None)
     batch = item.batch if item else None
+    if not batch or not item_execution_account_snapshot(item):
+        return False
     return bool(
-        batch
-        and batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
-        and task.workflow_type == "digital_human"
-        and item_execution_account_snapshot(item)
+        (
+            batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
+            and task.workflow_type == "digital_human"
+        )
+        or (
+            batch.source_channel == BATCH_SOURCE_H3_WORKBENCH
+            and task.workflow_type == "minimax_h3_ref2va"
+        )
     )
+
+
+def task_account_limit(
+    task: GenerationTask,
+    account: RunningHubExecutionAccount,
+) -> int | None:
+    if task.workflow_type == "minimax_h3_ref2va":
+        if not h3_capability_ready(account):
+            return None
+        assert account.h3_capability is not None
+        return max(int(account.h3_capability.max_concurrent_tasks), 1)
+    if not execution_account_configuration_ready(account):
+        return None
+    return max(int(account.max_concurrent_tasks), 1)
 
 
 def prepare_legacy_credential_fingerprints(db: Session) -> None:
@@ -117,12 +139,12 @@ def reserve_pool_task(
     candidates: list[tuple[float, datetime, int, int, RunningHubExecutionAccount]] = []
     observed = remote_active_counts or {}
     for account in accounts:
-        if not execution_account_configuration_ready(account):
+        limit = task_account_limit(task, account)
+        if limit is None:
             continue
         if account.cooldown_until and _as_utc(account.cooldown_until) > now:
             continue
         occupied = credential_active_task_count(db, account.credential_fingerprint)
-        limit = max(int(account.max_concurrent_tasks), 1)
         effective_load = max(occupied, int(observed.get(account.id, 0)))
         last_used = (
             _as_utc(account.last_used_at)
@@ -135,7 +157,9 @@ def reserve_pool_task(
     candidates.sort(key=lambda value: (value[0], value[1], value[2]))
 
     for _, _, _, occupied, account in candidates:
-        limit = max(int(account.max_concurrent_tasks), 1)
+        limit = task_account_limit(task, account)
+        if limit is None:
+            continue
         result = db.execute(
             update(GenerationTask)
             .where(

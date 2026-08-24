@@ -14,6 +14,7 @@ from app.models import RunningHubDualPoolGrant, User
 from app.routes.dependencies import get_page_admin
 from app.services.csrf import require_csrf
 from app.services.logging_config import log_event
+from app.services.h3_pool import H3PoolValidationError, configure_h3_capability
 from app.services.runninghub_pool import (
     DuplicateRunningHubCredentialError,
     RunningHubPoolValidationError,
@@ -124,6 +125,12 @@ def create_runninghub_pool_account(
     digital_human_ai_app_id: str = Form(...),
     max_concurrent_tasks: int = Form(5),
     is_enabled: bool = Form(False),
+    h3_workflow_id: str = Form(""),
+    h3_instance_type: str = Form("plus"),
+    h3_max_concurrent_tasks: int = Form(3),
+    h3_safe_note: str = Form(""),
+    h3_access_password: str = Form(""),
+    h3_enabled: bool = Form(False),
     admin_user_ids: list[int] | None = Form(None),
     csrf_ok: None = Depends(require_csrf),
     current_user: User = Depends(get_page_admin),
@@ -140,9 +147,19 @@ def create_runninghub_pool_account(
             is_enabled=is_enabled,
             admin_user_ids=admin_user_ids or [],
         )
+        capability = configure_h3_capability(
+            account,
+            workflow_id=h3_workflow_id,
+            instance_type=h3_instance_type,
+            max_concurrent_tasks=h3_max_concurrent_tasks,
+            safe_note=h3_safe_note,
+            access_password=h3_access_password,
+            is_enabled=h3_enabled,
+        )
+        db.add(capability)
         db.commit()
         db.refresh(account)
-    except (RunningHubPoolValidationError, IntegrityError) as exc:
+    except (RunningHubPoolValidationError, H3PoolValidationError, IntegrityError) as exc:
         db.rollback()
         raise _pool_error(exc) from exc
     log_event(
@@ -154,6 +171,8 @@ def create_runninghub_pool_account(
         execution_account_label=account.label,
         max_concurrent_tasks=account.max_concurrent_tasks,
         is_enabled=account.is_enabled,
+        h3_enabled=capability.is_enabled,
+        h3_has_access_password=bool(capability.access_password_encrypted),
         admin_user_ids=sorted(admin_user_ids or []),
     )
     return RedirectResponse("/admin/runninghub-pool?created=1", status_code=303)
@@ -168,6 +187,13 @@ def update_runninghub_pool_account(
     digital_human_ai_app_id: str = Form(...),
     max_concurrent_tasks: int = Form(5),
     is_enabled: bool = Form(False),
+    h3_workflow_id: str = Form(""),
+    h3_instance_type: str = Form("plus"),
+    h3_max_concurrent_tasks: int = Form(3),
+    h3_safe_note: str = Form(""),
+    h3_access_password: str = Form(""),
+    h3_clear_access_password: bool = Form(False),
+    h3_enabled: bool = Form(False),
     admin_user_ids: list[int] | None = Form(None),
     csrf_ok: None = Depends(require_csrf),
     current_user: User = Depends(get_page_admin),
@@ -188,8 +214,48 @@ def update_runninghub_pool_account(
             is_enabled=is_enabled,
             admin_user_ids=admin_user_ids or [],
         )
+        password_update: str | None
+        if h3_clear_access_password:
+            password_update = ""
+        elif h3_access_password.strip():
+            password_update = h3_access_password
+        else:
+            password_update = None
+        previous_capability = account.h3_capability
+        previous_h3 = (
+            {
+                "workflow_id": previous_capability.workflow_id,
+                "instance_type": previous_capability.instance_type,
+                "max_concurrent_tasks": previous_capability.max_concurrent_tasks,
+                "safe_note": previous_capability.safe_note,
+                "is_enabled": previous_capability.is_enabled,
+            }
+            if previous_capability is not None
+            else None
+        )
+        capability = configure_h3_capability(
+            account,
+            workflow_id=h3_workflow_id,
+            instance_type=h3_instance_type,
+            max_concurrent_tasks=h3_max_concurrent_tasks,
+            safe_note=h3_safe_note,
+            access_password=password_update,
+            is_enabled=h3_enabled,
+        )
+        db.add(capability)
+        current_h3 = {
+            "workflow_id": capability.workflow_id,
+            "instance_type": capability.instance_type,
+            "max_concurrent_tasks": capability.max_concurrent_tasks,
+            "safe_note": capability.safe_note,
+            "is_enabled": capability.is_enabled,
+        }
+        if previous_h3 != current_h3:
+            changed_fields.add("h3_capability")
+        if password_update is not None:
+            changed_fields.add("h3_access_password")
         db.commit()
-    except (RunningHubPoolValidationError, IntegrityError) as exc:
+    except (RunningHubPoolValidationError, H3PoolValidationError, IntegrityError) as exc:
         db.rollback()
         raise _pool_error(exc) from exc
     log_event(
@@ -201,6 +267,8 @@ def update_runninghub_pool_account(
         execution_account_label=account.label,
         max_concurrent_tasks=account.max_concurrent_tasks,
         is_enabled=account.is_enabled,
+        h3_enabled=capability.is_enabled,
+        h3_has_access_password=bool(capability.access_password_encrypted),
         admin_user_ids=sorted(admin_user_ids or []),
         changed_fields=sorted(changed_fields),
     )

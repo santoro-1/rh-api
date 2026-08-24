@@ -20,6 +20,9 @@
 
 - 修改任务生成、45 秒切分、状态机、取消、重试、数据库或 Worker：读 `MAINTENANCE.md`、`PROJECT_STATUS.md` 和 `CHANGELOG.md` 的最新日期。
 - 修改或增加 RunningHub 工作流：读 `WORKFLOW_EXTENSION.md`。
+- 修改或增加 MiniMax H3、多参考素材、H3 Prompt、raw-workflow 动态图、H3 自动分段、尾帧连续
+  或 H3 到剪映工作台的接口：同时读工作区根目录 `MiniMax H3多参考工作台开发文档.md`，以及
+  `../.agents/skills/h3-prompt-writing/SKILL.md` 和该 skill 为当前模式指定的参考文件。
 - 修改 LTX 对口型、上传音视频、ASR 对齐原稿、LTX 独立工作台或其跨项目接口：同时读
   `D:\工作内容\轻盈健\数字人\ltx_lip_sync_workbench\LTX对口型独立工作台开发文档.md`
   和工作区根目录 `ltx2.3对口型api文档.md`。

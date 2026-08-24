@@ -19,6 +19,8 @@ import requests
 from app.services.alignment.funasr_http import FunASRHTTPProvider
 from app.services.audio import inspect_audio_duration
 from app.services.media_segmentation import (
+    DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
+    DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS,
     SegmentPlan,
     cut_audio_segment,
     cut_video_segment,
@@ -28,7 +30,7 @@ from app.services.media_segmentation import (
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NODE_ROOT = Path(__file__).resolve().parent
-WORKER_VERSION = "1"
+WORKER_VERSION = "2"
 
 
 class RemoteWorkerError(RuntimeError):
@@ -488,6 +490,12 @@ def process_job(
                         plan_silence_segments(
                             float(job.get("durationSeconds") or 0),
                             detect_silence_midpoints(audio_path),
+                            target_segment_seconds=(
+                                DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS
+                            ),
+                            max_segment_seconds=(
+                                DIGITAL_HUMAN_MAX_SEGMENT_SECONDS
+                            ),
                         )
                     )
                 else:

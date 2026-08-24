@@ -72,6 +72,10 @@
       ["row_id", "任务编号"],
       ["speech_script", "口播脚本"],
     ],
+    minimax_h3_ref2va: [
+      ["row_id", "任务编号"],
+      ["speech_script", "口播脚本"],
+    ],
   };
 
   function isSpeechMode() {
@@ -761,9 +765,24 @@
 
   function updateWorkflowUi(resetData = true) {
     const digital = workflowSelect.value === "digital_human";
+    const h3 = workflowSelect.value === "minimax_h3_ref2va";
+    if (h3) audioModeSelect.value = "upload";
+    audioModeSelect.disabled = h3;
+    document.getElementById("batch-audio-mode-field").classList.toggle("hidden", h3);
     document.getElementById("batch-seedvr2-row").classList.toggle("hidden", !digital);
     document.getElementById("digital-batch-settings").classList.toggle("hidden", !digital);
-    document.getElementById("ltx-batch-settings").classList.toggle("hidden", digital);
+    document.getElementById("ltx-batch-settings").classList.toggle("hidden", digital || h3);
+    document.getElementById("h3-batch-settings").classList.toggle("hidden", !h3);
+    document.getElementById("h3-entry-panel").classList.toggle("hidden", !h3);
+    document.querySelector(".batch-entry-switch").classList.toggle("hidden", h3);
+    document.getElementById("quick-entry-panel").classList.toggle("hidden", h3 || activeEntry !== "quick");
+    document.getElementById("manifest-entry-panel").classList.toggle("hidden", h3 || activeEntry !== "manifest");
+    document.getElementById("batch-workflow-help").textContent = h3
+      ? "H3 只使用上传的成品音频；系统按原稿自动对齐并切成 4～15 秒分段。计算费用不会创建付费任务，确认费用后才开始生成。"
+      : "文本语音最终只形成一个视频子任务时可自动进入本地包装；数字人口播分段最长 32.8 秒，提交模型时另加 2 秒静音收尾；视频对口型最长 20 秒。多分段任务在画面生成后等待人工处理，拼接仅作为检查预览。";
+    document.getElementById("batch-name-help").textContent = h3
+      ? "上传参考视频后自动使用首个视频文件名，也可以手动修改；多条任务会自动附带数量。"
+      : "上传音频时默认使用首个音频文件名；文案生成时默认使用首个任务编号或画面文件名。多条任务会附带数量，手动修改后不再自动覆盖。";
     document.getElementById("primary-upload-title").textContent = digital ? "参考图片" : "源视频";
     document.getElementById("main-audio-upload-title").textContent = digital ? "总参考音频" : "音频";
     document.getElementById("advanced-primary-upload-title").textContent = digital ? "全部参考图片" : "全部源视频";
@@ -786,6 +805,7 @@
           : "口播脚本会自动写入视频正向提示词；音频直接使用上传文件。"
       );
     updateAudioModeUi();
+    document.getElementById("long-audio-review-row").classList.toggle("hidden", h3 || isSpeechMode());
     updateDualAudioUi();
     if (resetData) resetWorkflowData();
   }

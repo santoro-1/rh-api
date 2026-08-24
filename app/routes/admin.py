@@ -353,6 +353,7 @@ def create_user(
     password: str = Form(...),
     is_admin: bool = Form(False),
     is_active: bool = Form(False),
+    h3_access_enabled: bool = Form(False),
     api_key: str = Form(""),
     base_url: str = Form(...),
     ai_app_id: str = Form(...),
@@ -391,6 +392,7 @@ def create_user(
             password_hash=hash_password(password),
             is_admin=is_admin,
             is_active=is_active,
+            h3_access_enabled=h3_access_enabled,
         )
         db.add(user)
         _save_config(
@@ -488,6 +490,7 @@ def update_user(
     password: str = Form(""),
     is_admin: bool = Form(False),
     is_active: bool = Form(False),
+    h3_access_enabled: bool = Form(False),
     api_key: str = Form(""),
     base_url: str = Form(...),
     ai_app_id: str = Form(...),
@@ -536,6 +539,7 @@ def update_user(
         user.username = username
         user.is_admin = is_admin
         user.is_active = is_active
+        user.h3_access_enabled = h3_access_enabled
         if password:
             user.password_hash = hash_password(password)
         _save_config(

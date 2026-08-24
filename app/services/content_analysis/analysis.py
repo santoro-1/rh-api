@@ -57,8 +57,8 @@ from app.services.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
-CONTENT_PLANNING_PROMPT_VERSION = "jyd.content-planning.prompt.v19"
-CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v21"
+CONTENT_PLANNING_PROMPT_VERSION = "jyd.content-planning.prompt.v20"
+CONTENT_ANALYSIS_PROMPT_VERSION = "jyd.content-analysis.prompt.v22"
 BRANCH_SUCCESS = "SUCCESS"
 BRANCH_FAILED = "FAILED"
 OVERALL_SUCCESS = "SUCCESS"
@@ -174,16 +174,17 @@ def _system_prompt() -> str:
           开头语义为主。这两种 usage 都不表示 allowed_concepts 已自动匹配，必须再判断 concept 与
           context 的关联。
         - concept_id 以 editorial. 开头的是编辑型空镜池，不表示脚本字面提到了具体对象。
-          editorial 空镜只允许用于 seam_broll，不能用于 enrichment。只有接缝前后出现与素材一致的
-          具体对象、动作或明确生活场景，并且不会误导时才可选择；仅有健康、坚持、变好、生活、
-          心态或相近情绪不算高相关。合格的 editorial 接缝必须返回 priority=2，否则不要返回。
+          editorial 空镜不再自动使用：enrichment 不得选择，seam_broll 最多返回 priority=0 供人工
+          审核，绝不能返回 priority=2。仅有健康、坚持、变好、生活、心态或相近情绪不算强相关。
         - seam_broll 的 context 可能同时包含上一段结尾和下一段开头；优先匹配下一段，若上一段
           的具体对象或场景能形成自然转场也可以选择。连接处不是必填项，必须达到明确对象、同一
           动作、同一具体生活场景或自然且不会误导的编辑型陪衬之一才返回。
         - editorial.meal_daily 只能用于三餐、买菜、做饭、饮食习惯等自然语境，不能因为脚本
           提到蛋白质、营养或某种健康功效，就把普通饭菜画面当成该观点或功效的证据。
-        - 直接、强相关且是当前重点的画面可返回 priority=2；普通明确对象可返回 priority=1，
-          但 enrichment、seam_broll 只有 priority=2 才会自动使用。只有宽泛大类相同、一个多义词、健康主题相同、勉强沾边、
+        - 直接、强相关且是当前重点的画面可返回 priority=2；普通明确对象可返回 priority=1。
+          enrichment、seam_broll 只有脚本文字或上下文直接出现同一具体对象、同一动作或同一明确
+          场景时才可返回 priority=2；同类、近义、氛围和编辑型陪衬最多 priority=0，不能自动使用。
+          只有宽泛大类相同、一个多义词、健康主题相同、勉强沾边、
           容易误解、与下一段无关或仅因为它是唯一可选项时不要返回。素材画面自带网络文字不是
           语义拒绝条件。没有合格画面就跳过，
           绝不能为了填满频率或连接处强行填充。

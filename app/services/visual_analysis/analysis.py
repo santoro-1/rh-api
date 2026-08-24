@@ -35,7 +35,7 @@ from app.services.visual_analysis.contracts import (
 
 
 logger = logging.getLogger(__name__)
-VISUAL_ANALYSIS_PROMPT_VERSION = "jyd.visual-analysis.prompt.v2"
+VISUAL_ANALYSIS_PROMPT_VERSION = "jyd.visual-analysis.prompt.v3"
 
 
 class VisualAnalysisInputError(ValueError):
@@ -63,11 +63,13 @@ def _system_prompt() -> str:
         例如“每天吃一个鸡蛋”应 SHOW；“鸡蛋里挑骨头”“这不是鸡蛋”“‘鸡蛋’这个词”应 SKIP。
         usage=seam_broll 表示数字人分段连接处，主要依据候选 text 中下一段开头的语义判断。
         direct_concept_ids 是脚本中直接命中的概念，可优先考虑，但仍须结合完整上下文。
-        对 seam_broll/enrichment 可以接受同一动作、同一具体场景或自然的 editorial 陪衬；仅有宽泛
-        大类相同、一个多义词、健康主题相同、或因为它是唯一候选，都不足以 SHOW。找不到就 SKIP，
-        不要为了填连接处或频率强行选择。素材画面本身可能带网络文字，这不是语义拒绝条件。
-        SHOW 使用 MATCH_EXACT_OBJECT、MATCH_SAME_ACTION、MATCH_SAME_SCENE、
-        MATCH_EDITORIAL_CONTEXT（旧式明确物体也可用 LITERAL_CONCRETE_OBJECT）；不相关用
+        对 seam_broll/enrichment 只允许选择 direct_concept_ids 中由脚本直接召回的概念，并且必须
+        是同一具体对象、同一动作或同一明确场景。编辑型陪衬、相近氛围、宽泛大类、一个多义词、
+        健康主题相同、或因为它是唯一候选，都必须 SKIP；找不到就不插空镜，不要为了填连接处或
+        频率强行选择。素材画面本身可能带网络文字，这不是语义拒绝条件。
+        seam_broll/enrichment 的 SHOW 只使用 MATCH_EXACT_OBJECT、MATCH_SAME_ACTION、
+        MATCH_SAME_SCENE（旧式明确物体也可用 LITERAL_CONCRETE_OBJECT），不得使用
+        MATCH_EDITORIAL_CONTEXT；不相关用
         SKIP_UNRELATED，其他 SKIP 使用对应 SKIP_* 原因码。
         """
     ).strip()

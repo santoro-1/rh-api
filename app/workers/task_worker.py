@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
-import tempfile
+import shutil
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session, selectinload
@@ -17,6 +18,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     EnhancementStatus,
+    GenerationBatch,
     GenerationBatchItem,
     GenerationSegment,
     GenerationTask,
@@ -48,6 +50,7 @@ from app.services.runninghub_dispatch import (
     release_unsubmitted_pool_reservation,
     reserve_legacy_task,
     reserve_pool_task,
+    task_account_limit,
     task_uses_execution_pool,
 )
 from app.services.runninghub_attempts import (
@@ -67,6 +70,18 @@ from app.services.logging_config import (
     write_heartbeat,
 )
 from app.services.audio import add_silence_tail
+from app.services.alignment import get_alignment_provider
+from app.services.h3.postprocess import (
+    H3_HEAD_TRIM_FALLBACK_SECONDS,
+    H3_HEAD_TRIM_PREROLL_SECONDS,
+    H3_OUTPUT_CONTRACT_VERSION,
+    H3PostprocessError,
+    postprocess_h3_result,
+)
+from app.services.h3_workbench import (
+    activate_next_h3_soft_chain_segment,
+    sync_h3_task_hierarchy,
+)
 from app.services.security import decrypt_secret
 from app.services.seedvr2_dispatch import (
     cool_seedvr2_account,
@@ -113,6 +128,32 @@ SLOT_OCCUPYING_TASK_STATUSES = (
     TaskStatus.SUBMITTED.value,
     TaskStatus.RUNNING.value,
 )
+
+
+@contextmanager
+def _upload_scratch_directory(root: Path) -> Iterator[Path]:
+    """Create Windows-friendly upload scratch space without blocking submission on cleanup."""
+
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"runninghub-upload-{uuid.uuid4().hex}"
+    # tempfile.mkdtemp uses mode 0o700. Under a managed Windows parent process
+    # that can produce a child ACL which the same worker cannot subsequently
+    # traverse. A normal inheriting directory avoids that Windows-only trap.
+    path.mkdir(mode=0o777)
+    try:
+        yield path
+    finally:
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            log_event(
+                logger,
+                "video.upload_scratch_cleanup_failed",
+                "RunningHub 上传临时目录清理失败，已忽略且不阻断任务提交",
+                level=logging.WARNING,
+                scratch_path=str(path),
+                error=str(exc),
+            )
 
 
 def _now() -> datetime:
@@ -414,6 +455,7 @@ def _mark_failed(
     task.error_message = message
     task.runninghub_auto_retry_after = None
     task.completed_at = _now()
+    sync_h3_task_hierarchy(task)
     log_event(
         logger,
         "video.failed",
@@ -435,6 +477,7 @@ def _mark_remote_cancelled(task: GenerationTask, message: str) -> None:
     task.error_code = "REMOTE_TASK_NOT_FOUND"
     task.error_message = message
     task.completed_at = _now()
+    sync_h3_task_hierarchy(task)
     finish_task_attempt(
         task,
         status="CANCELLED",
@@ -660,7 +703,9 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
         .options(
             selectinload(GenerationTask.user).selectinload(User.runninghub_config),
             selectinload(GenerationTask.user).selectinload(User.workflow_configs),
-            selectinload(GenerationTask.execution_account),
+            selectinload(GenerationTask.execution_account).selectinload(
+                RunningHubExecutionAccount.h3_capability
+            ),
             selectinload(GenerationTask.runninghub_attempts).selectinload(
                 GenerationTaskAttempt.execution_account
             ),
@@ -676,6 +721,20 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
             selectinload(GenerationTask.segment)
             .selectinload(GenerationSegment.batch_item)
             .selectinload(GenerationBatchItem.batch),
+            selectinload(GenerationTask.segment).selectinload(
+                GenerationSegment.h3_config
+            ),
+            selectinload(GenerationTask.segment)
+            .selectinload(GenerationSegment.batch_item)
+            .selectinload(GenerationBatchItem.h3_config),
+            selectinload(GenerationTask.segment)
+            .selectinload(GenerationSegment.batch_item)
+            .selectinload(GenerationBatchItem.segments)
+            .selectinload(GenerationSegment.h3_config),
+            selectinload(GenerationTask.segment)
+            .selectinload(GenerationSegment.batch_item)
+            .selectinload(GenerationBatchItem.batch)
+            .selectinload(GenerationBatch.h3_config),
         )
         .where(GenerationTask.id == task_id)
     )
@@ -804,6 +863,14 @@ def _handle_remote_status(
             )
             db.commit()
             return
+        if task.workflow_type == "minimax_h3_ref2va":
+            _mark_failed(
+                task,
+                task.error_code or "RUNNINGHUB_FAILED",
+                f"{failure_message}\nH3 远端失败不会自动重复付费，请人工检查后再决定是否重试。",
+            )
+            db.commit()
+            return
         scheduled = _schedule_runninghub_auto_retry(
             task,
             message=failure_message,
@@ -882,6 +949,7 @@ def _handle_remote_status(
         task.error_code = "DOWNLOAD_FAILED"
         task.error_message = str(exc)
         task.completed_at = _now()
+        sync_h3_task_hierarchy(task)
         finish_task_attempt(
             task,
             status="DOWNLOAD_FAILED",
@@ -899,6 +967,114 @@ def _handle_remote_status(
             **exc.log_details(),
             **_video_log_context(task),
         )
+        return
+    if task.workflow_type == "minimax_h3_ref2va":
+        segment = task.segment
+        if segment is None or segment.h3_config is None:
+            _mark_failed(task, "H3_POSTPROCESS_FAILED", "H3 分段审计快照缺失")
+            finish_task_attempt(
+                task,
+                status="POSTPROCESS_FAILED",
+                error_code=task.error_code,
+                error_message=task.error_message,
+            )
+            db.commit()
+            return
+        item = segment.batch_item
+        needs_anchor = bool(
+            segment.h3_config.continuity_mode == "soft_chain"
+            and segment.segment_index < item.h3_config.segment_count - 1
+        )
+        try:
+            normalized = postprocess_h3_result(
+                destination,
+                script_text=segment.script_text,
+                alignment_provider=get_alignment_provider("funasr_http"),
+                needs_continuity_anchor=needs_anchor,
+            )
+            normalized_relative = to_relative_data_path(normalized.video_path, get_settings())
+            segment.h3_config.normalized_video_path = normalized_relative
+            segment.h3_config.normalized_video_sha256 = normalized.video_sha256
+            segment.h3_config.invalidated_at = None
+            segment.video_path = normalized_relative
+            task.result_path = normalized_relative
+            task.output_metadata = json.dumps(
+                {
+                    "quality_variant": "h3_generated_av_head_trimmed",
+                    "output_contract_version": H3_OUTPUT_CONTRACT_VERSION,
+                    "source": output.metadata,
+                    "input_audio_duration_seconds": task.audio_duration_seconds,
+                    "provider_audio_preserved": True,
+                    "provider_audio_head_trimmed": (
+                        normalized.head_trim.trim_seconds > 0
+                    ),
+                    "provider_duration_preserved": (
+                        normalized.head_trim.trim_seconds <= 0
+                    ),
+                    "speech_timeline_duration_seconds": max(
+                        0.1,
+                        float(task.audio_duration_seconds or 0)
+                        - normalized.head_trim.trim_seconds,
+                    ),
+                    "normalized_timeline_duration_seconds": (
+                        normalized.normalized_duration_seconds
+                    ),
+                    "head_trim": {
+                        "mode": normalized.head_trim.mode,
+                        "trim_seconds": normalized.head_trim.trim_seconds,
+                        "first_script_token_start_seconds": (
+                            normalized.head_trim.first_script_token_start_seconds
+                        ),
+                        "preroll_seconds": H3_HEAD_TRIM_PREROLL_SECONDS,
+                        "fallback_seconds": H3_HEAD_TRIM_FALLBACK_SECONDS,
+                        "alignment_provider": normalized.head_trim.alignment_provider,
+                        "alignment_match_ratio": (
+                            normalized.head_trim.alignment_match_ratio
+                        ),
+                        "matched_prefix_tokens": (
+                            normalized.head_trim.matched_prefix_tokens
+                        ),
+                        "fallback_reason": normalized.head_trim.fallback_reason,
+                    },
+                },
+                ensure_ascii=False,
+            )
+            task.status = TaskStatus.SUCCESS.value
+            task.error_code = None
+            task.error_message = None
+            task.runninghub_failed_reason = None
+            task.runninghub_auto_retry_after = None
+            task.completed_at = _now()
+            segment.status = TaskStatus.SUCCESS.value
+            finish_task_attempt(task, status="SUCCESS")
+            if needs_anchor:
+                assert normalized.anchor_path is not None
+                assert normalized.anchor_sha256 is not None
+                activate_next_h3_soft_chain_segment(
+                    db,
+                    task,
+                    anchor_path=to_relative_data_path(
+                        normalized.anchor_path,
+                        get_settings(),
+                    ),
+                    anchor_sha256=normalized.anchor_sha256,
+                )
+            sync_h3_task_hierarchy(task)
+            db.commit()
+        except (H3PostprocessError, OSError, ValueError) as exc:
+            task.status = TaskStatus.DOWNLOAD_FAILED.value
+            task.error_code = "H3_POSTPROCESS_FAILED"
+            task.error_message = str(exc)
+            task.completed_at = _now()
+            segment.status = TaskStatus.DOWNLOAD_FAILED.value
+            sync_h3_task_hierarchy(task)
+            finish_task_attempt(
+                task,
+                status="POSTPROCESS_FAILED",
+                error_code=task.error_code,
+                error_message=task.error_message,
+            )
+            db.commit()
         return
     if task.workflow_type == "digital_human" and not task.seedvr2_enabled:
         task.result_path = to_relative_data_path(destination, get_settings())
@@ -1623,10 +1799,22 @@ def _remote_capacity_is_available(
     client: RunningHubClient,
     config: RunningHubConfig | RunningHubExecutionAccount,
 ) -> bool:
-    limit = max(int(config.max_concurrent_tasks), 1)
     pool_account = (
         config if isinstance(config, RunningHubExecutionAccount) else None
     )
+    if pool_account is not None:
+        pool_limit = task_account_limit(task, pool_account)
+        if pool_limit is None:
+            _mark_failed(
+                task,
+                "CONFIGURATION_ERROR",
+                "当前 RunningHub 执行账号缺少该工作流所需的能力配置",
+            )
+            db.commit()
+            return False
+        limit = pool_limit
+    else:
+        limit = max(int(config.max_concurrent_tasks), 1)
     try:
         current_tasks = client.get_account_current_task_count()
     except RunningHubError as exc:
@@ -1768,12 +1956,26 @@ def process_task(db: Session, task_id: str) -> None:
         return
     try:
         client = _make_client(execution_config)
-        effective_ai_app_id = (
-            execution_config.digital_human_ai_app_id
-            if uses_pool
-            and isinstance(execution_config, RunningHubExecutionAccount)
-            else workflow_config.ai_app_id
-        )
+        effective_instance_type = workflow_config.instance_type
+        if uses_pool and isinstance(execution_config, RunningHubExecutionAccount):
+            if task.workflow_type == "minimax_h3_ref2va":
+                capability = execution_config.h3_capability
+                if capability is None or not capability.is_enabled:
+                    raise ValueError("H3 执行账号能力未启用")
+                effective_ai_app_id = capability.workflow_id
+                effective_instance_type = capability.instance_type
+                if capability.access_password_encrypted:
+                    client.set_access_password(
+                        decrypt_secret(
+                            capability.access_password_encrypted,
+                            label="H3 工作流访问密码",
+                        )
+                    )
+            else:
+                effective_ai_app_id = execution_config.digital_human_ai_app_id
+                effective_instance_type = "default"
+        else:
+            effective_ai_app_id = workflow_config.ai_app_id
         # RunningHubClient is generic.  The workflow config determines only
         # which AI App the generic submit endpoint targets.
         client.ai_app_id = effective_ai_app_id
@@ -1852,14 +2054,23 @@ def process_task(db: Session, task_id: str) -> None:
             **_video_log_context(task),
         )
         uploaded_files = {}
-        with tempfile.TemporaryDirectory(prefix="runninghub-upload-") as work_dir:
+        # Keep upload scratch space beside the application's other runtime data.
+        # On Windows, long-lived workers launched from a managed/sandboxed parent
+        # can read the user's system TEMP but still be denied when Python removes
+        # a TemporaryDirectory there.  A cleanup failure happens before
+        # submit_task(), which incorrectly turns an otherwise valid task into a
+        # local SUBMIT_FAILED result.  The application runtime directory has the
+        # same ownership and write policy as the persisted assets it processes.
+        upload_temp_root = settings.runtime_dir / "runninghub-uploads"
+        upload_temp_root.mkdir(parents=True, exist_ok=True)
+        with _upload_scratch_directory(upload_temp_root) as work_dir:
             for asset in workflow.assets_for_task(task):
                 asset_path = resolve_asset_path(asset, settings)
                 upload_path = prepare_runninghub_retry_upload(
                     task,
                     asset,
                     asset_path,
-                    Path(work_dir),
+                    work_dir,
                 )
                 if upload_path != asset_path:
                     log_event(
@@ -1872,7 +2083,7 @@ def process_task(db: Session, task_id: str) -> None:
                 if task.workflow_type == "digital_human" and asset.name == "audio":
                     padding_seconds = generation_tail_padding_seconds(task)
                     if padding_seconds > 0:
-                        upload_path = Path(work_dir) / "audio-with-tail.mp3"
+                        upload_path = work_dir / "audio-with-tail.mp3"
                         add_silence_tail(
                             asset_path,
                             upload_path,
@@ -1896,9 +2107,19 @@ def process_task(db: Session, task_id: str) -> None:
             task,
             uploaded_files,
             ai_app_id=effective_ai_app_id,
-            instance_type=("default" if uses_pool else workflow_config.instance_type),
+            instance_type=effective_instance_type,
             settings=({} if uses_pool else workflow_config.settings),
         )
+        if task.workflow_type == "minimax_h3_ref2va":
+            workflow_json = payload.get("workflow")
+            if not isinstance(workflow_json, str) or not workflow_json:
+                raise ValueError("H3 动态工作流载荷缺失")
+            if task.segment is None or task.segment.h3_config is None:
+                raise ValueError("H3 分段审计快照缺失")
+            task.segment.h3_config.dynamic_workflow_sha256 = hashlib.sha256(
+                workflow_json.encode("utf-8")
+            ).hexdigest()
+            db.commit()
         remote_task_id = client.submit_task(payload)
         # Persist as soon as submission returns. Every later run only queries this ID.
         task.runninghub_task_id = remote_task_id

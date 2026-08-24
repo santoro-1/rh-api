@@ -190,6 +190,7 @@ class RunningHubClient:
         ai_app_id: str,
         session: requests.Session | None = None,
         submission_type: str = "ai-app",
+        access_password: str = "",
     ) -> None:
         if not api_key.strip():
             raise ValueError("RunningHub API Key 不能为空")
@@ -197,12 +198,18 @@ class RunningHubClient:
             raise ValueError("RunningHub AI App ID 不能为空")
         self.base_url = base_url.rstrip("/")
         self.ai_app_id = ai_app_id.strip()
-        if submission_type not in {"ai-app", "workflow"}:
+        if submission_type not in {"ai-app", "workflow", "raw-workflow"}:
             raise ValueError("RunningHub 提交类型不合法")
         self.submission_type = submission_type
         self.session = session or requests.Session()
         self._api_key = api_key.strip()
+        self._access_password = str(access_password or "").strip()
         self.headers = {"Authorization": f"Bearer {self._api_key}"}
+
+    def set_access_password(self, value: str) -> None:
+        """Set a server-side workflow password without exposing it in payload snapshots."""
+
+        self._access_password = str(value or "").strip()
 
     def _parse_json(self, response: requests.Response, action: str) -> dict[str, Any]:
         if response.status_code != 200:
@@ -359,6 +366,8 @@ class RunningHubClient:
         return str(filename)
 
     def submit_task(self, payload: dict[str, Any]) -> str:
+        if self.submission_type == "raw-workflow":
+            return self._submit_raw_workflow(payload)
         resource_path = (
             "workflow" if self.submission_type == "workflow" else "ai-app"
         )
@@ -405,6 +414,74 @@ class RunningHubClient:
             )
         return str(task_id)
 
+    def _submit_raw_workflow(self, payload: dict[str, Any]) -> str:
+        """Submit a full audited API-format graph through RunningHub's advanced API.
+
+        Credentials and the configured workflow ID are injected here so they never
+        enter adapter payload snapshots or user-visible task input JSON.
+        """
+
+        workflow = payload.get("workflow")
+        if not isinstance(workflow, str) or not workflow.strip():
+            raise RunningHubError("提交 H3 动态工作流失败：缺少 workflow JSON")
+        request_payload = dict(payload)
+        request_payload.update(
+            {
+                "apiKey": self._api_key,
+                "workflowId": self.ai_app_id,
+            }
+        )
+        if self._access_password:
+            request_payload["accessPassword"] = self._access_password
+        endpoint = f"{self.base_url}/task/openapi/create"
+        started_at = time.perf_counter()
+        try:
+            response = self.session.post(
+                endpoint,
+                headers={**self.headers, "Content-Type": "application/json"},
+                json=request_payload,
+                timeout=(15, 120),
+            )
+        except requests.RequestException as exc:
+            raise RunningHubError.from_network_error(
+                "提交 RunningHub H3 动态工作流时网络请求失败",
+                operation="raw_workflow_submit",
+                endpoint=endpoint,
+                exc=exc,
+                started_at=started_at,
+                submission_outcome_unknown=True,
+            ) from exc
+        try:
+            result = self._parse_json(response, "提交 H3 动态工作流")
+        except RunningHubError as exc:
+            if response.status_code >= 500 or response.status_code == 200:
+                exc.submission_outcome_unknown = True
+            raise
+
+        code, message = self._error_details(result)
+        if code not in {None, "0", "200"}:
+            self._raise_business_error(
+                result,
+                "提交 H3 动态工作流",
+                default_message="未知业务错误",
+            )
+        data = result.get("data")
+        task_id = data.get("taskId") if isinstance(data, dict) else None
+        if not task_id:
+            task_id = result.get("taskId")
+        if not task_id:
+            if code or message:
+                self._raise_business_error(
+                    result,
+                    "提交 H3 动态工作流",
+                    default_message="响应中缺少 data.taskId",
+                )
+            raise RunningHubError(
+                "提交 H3 动态工作流响应中缺少 data.taskId，远程结果无法确认",
+                submission_outcome_unknown=True,
+            )
+        return str(task_id)
+
     def query_task(self, task_id: str) -> dict[str, Any]:
         endpoint = f"{self.base_url}/openapi/v2/query"
         started_at = time.perf_counter()
@@ -432,7 +509,69 @@ class RunningHubClient:
                     "查询任务",
                     default_message="响应中缺少任务状态",
                 )
+        if (
+            self.submission_type == "raw-workflow"
+            and str(result.get("status") or "").upper() == "SUCCESS"
+            and not result.get("results")
+        ):
+            result["results"] = self._query_raw_workflow_outputs(task_id)
         return result
+
+    def _query_raw_workflow_outputs(self, task_id: str) -> list[dict[str, Any]]:
+        """Read outputs for the advanced raw-workflow API and normalize them to v2."""
+
+        endpoint = f"{self.base_url}/task/openapi/outputs"
+        started_at = time.perf_counter()
+        try:
+            response = self.session.post(
+                endpoint,
+                headers={**self.headers, "Content-Type": "application/json"},
+                json={"apiKey": self._api_key, "taskId": str(task_id)},
+                timeout=(15, 120),
+            )
+        except requests.RequestException as exc:
+            raise RunningHubError.from_network_error(
+                "读取 RunningHub H3 动态工作流输出时网络请求失败",
+                operation="raw_workflow_outputs",
+                endpoint=endpoint,
+                exc=exc,
+                started_at=started_at,
+                retry_safe=True,
+            ) from exc
+        result = self._parse_json(response, "读取 H3 动态工作流输出")
+        code, _ = self._error_details(result)
+        if code not in {None, "0", "200"}:
+            self._raise_business_error(
+                result,
+                "读取 H3 动态工作流输出",
+                default_message="未知业务错误",
+                retry_safe=True,
+            )
+        data = result.get("data")
+        if not isinstance(data, list) or not data:
+            raise RunningHubError(
+                "H3 动态工作流已成功，但 RunningHub 输出接口尚未返回文件",
+                retry_safe=True,
+            )
+        outputs = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            outputs.append(
+                {
+                    "url": item.get("fileUrl"),
+                    "nodeId": item.get("nodeId"),
+                    "outputType": item.get("fileType"),
+                    "text": item.get("text"),
+                    "rawOutput": item,
+                }
+            )
+        if not any(output.get("url") or output.get("text") for output in outputs):
+            raise RunningHubError(
+                "H3 动态工作流已成功，但 RunningHub 输出接口没有可下载结果",
+                retry_safe=True,
+            )
+        return outputs
 
     def cancel_task(self, task_id: str) -> None:
         """Cancel a submitted ComfyUI task and require business success."""

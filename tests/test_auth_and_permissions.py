@@ -223,6 +223,7 @@ def test_admin_can_create_a_user_with_legacy_default_instance(client):
             "username": "created-user",
             "password": "password123",
             "is_active": "true",
+            "h3_access_enabled": "true",
             "api_key": "new-test-key",
             "base_url": "https://www.runninghub.cn",
             "ai_app_id": "2062251097452007426",
@@ -239,6 +240,7 @@ def test_admin_can_create_a_user_with_legacy_default_instance(client):
     with SessionLocal() as db:
         user = db.query(User).filter_by(username="created-user").one()
         assert user.runninghub_config is not None
+        assert user.h3_access_enabled is True
         assert user.runninghub_config.instance_type == "default"
         assert len(user.runninghub_config.credential_fingerprint or "") == 64
         workflow_config = db.query(WorkflowConfig).filter_by(

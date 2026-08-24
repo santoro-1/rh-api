@@ -91,6 +91,112 @@ def _seedvr2_pool_form(
     return payload
 
 
+def _with_h3(
+    payload: dict[str, object],
+    *,
+    workflow_id: str = "h3-workflow-id",
+    access_password: str | None = None,
+    enabled: bool = True,
+) -> dict[str, object]:
+    updated = dict(payload)
+    updated.update(
+        {
+            "h3_workflow_id": workflow_id,
+            "h3_instance_type": "plus",
+            "h3_max_concurrent_tasks": "3",
+            "h3_safe_note": "仅运行审核后的 Ref2VA 模板",
+        }
+    )
+    if access_password is not None:
+        updated["h3_access_password"] = access_password
+    if enabled:
+        updated["h3_enabled"] = "true"
+    return updated
+
+
+def test_admin_manages_h3_capability_password_without_exposing_it(client, caplog):
+    administrator = create_user("h3-pool-admin", is_admin=True)
+    login(client, administrator.username)
+    password = "h3-private-workflow-password"
+
+    with caplog.at_level(logging.INFO):
+        created = client.post(
+            "/admin/runninghub-pool/accounts",
+            data=_with_h3(
+                _pool_form([administrator.id], api_key="h3-pool-api-key"),
+                access_password=password,
+            ),
+            follow_redirects=False,
+        )
+    assert created.status_code == 303
+    assert password not in caplog.text
+
+    with SessionLocal() as db:
+        account = db.query(RunningHubExecutionAccount).one()
+        account_id = account.id
+        capability = account.h3_capability
+        assert capability is not None
+        original_ciphertext = capability.access_password_encrypted
+        assert capability.workflow_id == "h3-workflow-id"
+        assert capability.instance_type == "plus"
+        assert capability.max_concurrent_tasks == 3
+        assert capability.is_enabled is True
+        assert original_ciphertext != password
+        assert decrypt_secret(original_ciphertext) == password
+
+    page = client.get("/admin/runninghub-pool")
+    assert page.status_code == 200
+    assert "访问密码：已加密配置" in page.text
+    assert password not in page.text
+    assert original_ciphertext not in page.text
+
+    preserved = client.post(
+        f"/admin/runninghub-pool/accounts/{account_id}",
+        data=_with_h3(
+            _pool_form([administrator.id], api_key=""),
+            access_password=None,
+        ),
+        follow_redirects=False,
+    )
+    assert preserved.status_code == 303
+    with SessionLocal() as db:
+        capability = db.get(RunningHubExecutionAccount, account_id).h3_capability
+        assert capability.access_password_encrypted == original_ciphertext
+
+    clear_payload = _with_h3(
+        _pool_form([administrator.id], api_key=""),
+        access_password=None,
+    )
+    clear_payload["h3_clear_access_password"] = "true"
+    cleared = client.post(
+        f"/admin/runninghub-pool/accounts/{account_id}",
+        data=clear_payload,
+        follow_redirects=False,
+    )
+    assert cleared.status_code == 303
+    with SessionLocal() as db:
+        capability = db.get(RunningHubExecutionAccount, account_id).h3_capability
+        assert capability.access_password_encrypted is None
+
+
+def test_h3_capability_validation_rolls_back_new_pool_account(client):
+    administrator = create_user("invalid-h3-pool-admin", is_admin=True)
+    login(client, administrator.username)
+    response = client.post(
+        "/admin/runninghub-pool/accounts",
+        data=_with_h3(
+            _pool_form([administrator.id], api_key="invalid-h3-pool-key"),
+            workflow_id="",
+        ),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+    assert "必须配置 workflowId" in response.text
+    with SessionLocal() as db:
+        assert db.query(RunningHubExecutionAccount).count() == 0
+
+
 def test_admin_refreshes_pool_account_rh_coins_without_exposing_key(
     client, monkeypatch, caplog
 ):

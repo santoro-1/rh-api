@@ -73,6 +73,7 @@ from app.services.batch_status import (
     summarize_batch,
 )
 from app.services.csrf import require_csrf
+from app.services.h3_workbench import H3_WORKFLOW
 from app.services.speech.accounts import synchronize_shared_custom_voices
 from app.services.speech.system_voices import group_system_voice_assets
 from app.services.storage import (
@@ -182,7 +183,10 @@ def batch_generate_page(
     current_user: User = Depends(get_page_user),
     db: Session = Depends(get_db),
 ):
-    if workflow not in {DIGITAL_HUMAN_WORKFLOW, LTX_LIP_SYNC_WORKFLOW}:
+    allowed_workflows = {DIGITAL_HUMAN_WORKFLOW, LTX_LIP_SYNC_WORKFLOW}
+    if current_user.h3_access_enabled:
+        allowed_workflows.add(H3_WORKFLOW)
+    if workflow not in allowed_workflows:
         workflow = DIGITAL_HUMAN_WORKFLOW
     digital_config = get_user_workflow_config(current_user, DIGITAL_HUMAN_WORKFLOW)
     ltx_config = get_user_workflow_config(current_user, LTX_LIP_SYNC_WORKFLOW)
@@ -222,6 +226,7 @@ def batch_generate_page(
             "initial_workflow": workflow,
             "digital_config": digital_config,
             "ltx_config": ltx_config,
+            "h3_access_enabled": current_user.h3_access_enabled,
             "max_batch_items": get_settings().max_batch_items,
             "minimax_configured": bool(
                 current_user.minimax_config

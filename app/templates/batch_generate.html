@@ -29,9 +29,10 @@
       <select id="batch-workflow">
         <option value="digital_human">图片生成数字人视频</option>
         <option value="ltx_lip_sync">已有视频进行对口型</option>
+        {% if h3_access_enabled %}<option value="minimax_h3_ref2va">MiniMax H3 多参考生成</option>{% endif %}
       </select>
     </label>
-    <label>声音来源
+    <label id="batch-audio-mode-field">声音来源
       <select id="batch-audio-mode">
         <option value="upload">上传已经准备好的音频</option>
         <option value="minimax">输入文案并选择音色</option>
@@ -47,7 +48,7 @@
     <input id="batch-seedvr2-enabled" type="checkbox">
     <span>数字人完成后使用 SeedVR2 48G 放大（会产生额外 RunningHub 费用）</span>
   </label>
-  <p class="field-help">文本语音最终只形成一个视频子任务时可自动进入本地包装；数字人口播分段最长 32.8 秒，提交模型时另加 2 秒静音收尾；视频对口型最长 20 秒。多分段任务在画面生成后等待人工处理，拼接仅作为检查预览。</p>
+  <p id="batch-workflow-help" class="field-help">文本语音最终只形成一个视频子任务时可自动进入本地包装；数字人口播分段最长 32.8 秒，提交模型时另加 2 秒静音收尾；视频对口型最长 20 秒。多分段任务在画面生成后等待人工处理，拼接仅作为检查预览。</p>
   <details class="advanced-settings">
     <summary>高级设置</summary>
     <div class="advanced-settings-body stack-form">
@@ -72,6 +73,24 @@
         <label>对口型人物与语言
           <input id="speech-ltx-prompt-prefix" maxlength="500" value="一名人物用中文说">
           <span class="field-help">系统会自动追加每条口播脚本，生成最终视频正向提示词。</span>
+        </label>
+      </div>
+      <div id="h3-batch-settings" class="three-columns hidden">
+        <label>衔接方式
+          <select id="h3-continuity-mode">
+            <option value="loop_anchor">首尾同图（默认）</option>
+            <option value="fast">快速并行</option>
+            <option value="soft_chain">连续模式（尾帧串行）</option>
+          </select>
+        </label>
+        <label>画面比例
+          <select id="h3-aspect-ratio">
+            <option value="9:16 (Portrait Widescreen)">9:16 竖屏</option>
+            <option value="16:9 (Widescreen)">16:9 横屏</option>
+          </select>
+        </label>
+        <label>清晰度（MP）
+          <input id="h3-megapixels" type="number" min="0.2" max="2" step="0.1" value="1">
         </label>
       </div>
       <p class="field-help">以上设置应用于整个任务，单次最多 {{ max_batch_items }} 条。</p>
@@ -218,6 +237,76 @@
     <input id="speech-cost-confirm" type="checkbox">
     <span id="speech-cost-confirm-text">我已了解语音文本生成会产生费用；非官方音色首次正式使用还可能产生音色费</span>
   </label>
+</section>
+
+<section id="h3-entry-panel" class="hidden">
+  <section class="panel stack-form">
+    <div class="panel-heading">
+      <h2>2. 上传 H3 素材</h2>
+      <p class="muted">人物参考图整批共用；每条任务依次绑定一段参考视频、一份成品音频和对应原稿。</p>
+    </div>
+    <div class="batch-upload-grid">
+      <div class="batch-upload-column">
+        <label>人物参考图（可选，最多 4 张）
+          <input id="h3-image-files" type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/*">
+        </label>
+        <ol id="h3-image-list" class="ordered-upload-list"></ol>
+      </div>
+      <div class="batch-upload-column">
+        <label>逐条参考视频
+          <input id="h3-video-files" type="file" multiple accept=".mp4,.mov,.webm,video/*">
+        </label>
+        <ol id="h3-video-list" class="ordered-upload-list"></ol>
+      </div>
+      <div class="batch-upload-column">
+        <label>逐条成品音频
+          <input id="h3-audio-files" type="file" multiple accept=".mp3,.wav,.m4a,.aac,.flac,audio/*">
+        </label>
+        <ol id="h3-audio-list" class="ordered-upload-list"></ol>
+      </div>
+    </div>
+    <p id="h3-upload-progress" class="muted">尚未上传 H3 素材。</p>
+  </section>
+
+  <section class="panel stack-form">
+    <div class="panel-heading">
+      <h2>3. 核对台词和费用</h2>
+      <p class="muted">台词必须与上传音频一致；系统会先对齐音频并计算 4～15 秒分段，不会在这一步创建付费 H3 任务。</p>
+    </div>
+    <div class="table-wrap">
+      <table class="pairing-table">
+        <thead><tr><th>序号</th><th>参考视频</th><th>成品音频</th><th>对应原稿</th></tr></thead>
+        <tbody id="h3-pairing-body"></tbody>
+      </table>
+    </div>
+    <label>整批补充方向（可选）
+      <textarea id="h3-user-direction" rows="3" maxlength="1000" placeholder="留空使用系统固定 H3 提示词"></textarea>
+    </label>
+    <label class="inline-check batch-confirm">
+      <input id="h3-input-confirm" type="checkbox">
+      我已试听并确认每条成品音频与原稿、参考视频的顺序一致
+    </label>
+    <div id="h3-errors" class="error hidden"></div>
+    <div class="submit-row">
+      <span id="h3-ready-summary" class="muted">请先上传等量的视频和音频，并填写对应原稿。</span>
+      <button id="h3-prepare-button" type="button">计算分段与费用</button>
+    </div>
+  </section>
+
+  <section id="h3-fee-panel" class="panel stack-form hidden">
+    <div class="panel-heading">
+      <h2>4. 确认 H3 费用并开始</h2>
+      <p id="h3-fee-summary" class="muted"></p>
+    </div>
+    <label class="inline-check batch-confirm">
+      <input id="h3-cost-confirm" type="checkbox">
+      我确认每个未复用的 H3 分段都会产生 RunningHub 费用
+    </label>
+    <div class="submit-row">
+      <span class="muted">确认后才会把付费任务放入执行队列。</span>
+      <button id="h3-confirm-button" type="button">确认费用并开始 H3</button>
+    </div>
+  </section>
 </section>
 
 <div class="workflow-switch batch-entry-switch" role="tablist" aria-label="批量创建方式">
@@ -371,7 +460,9 @@ window.batchGenerateConfig = {
   digitalDefaultPrompt: {{ digital_config.default_prompt|tojson }},
   ltxDefaultInstance: "plus",
   minimaxConfigured: {{ minimax_configured|tojson }},
+  h3AccessEnabled: {{ h3_access_enabled|tojson }},
 };
 </script>
 <script src="/static/batch_generate.js" defer></script>
+<script src="/static/batch_generate_h3.js" defer></script>
 {% endblock %}

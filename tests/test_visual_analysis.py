@@ -10,6 +10,7 @@ from app.database import SessionLocal
 from app.models import ArkConfig, User, VisualAnalysisCache
 from app.services.security import encrypt_secret
 from app.services.visual_analysis.analysis import (
+    VISUAL_ANALYSIS_PROMPT_VERSION,
     _system_prompt,
     analyze_visual_context,
 )
@@ -146,9 +147,12 @@ def test_seam_candidate_contract_and_prompt_define_a_real_relevance_floor() -> N
     parsed = parse_visual_analysis_request(request)
     assert parsed.candidates[0].usage == "seam_broll"
     prompt = _system_prompt()
-    assert "连接处或频率强行选择" in prompt
+    assert "频率强行选择" in prompt
     assert "宽泛" in prompt
     assert "素材画面本身可能带网络文字" in prompt
+    assert "只允许选择 direct_concept_ids" in prompt
+    assert "不得使用" in prompt and "MATCH_EDITORIAL_CONTEXT" in prompt
+    assert VISUAL_ANALYSIS_PROMPT_VERSION == "jyd.visual-analysis.prompt.v3"
 
 
 class FakeArkClient:

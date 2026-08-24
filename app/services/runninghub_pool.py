@@ -380,7 +380,8 @@ def execution_account_for_admin_page(
         .options(
             selectinload(RunningHubExecutionAccount.pool_memberships).selectinload(
                 RunningHubPoolMembership.admin_user
-            )
+            ),
+            selectinload(RunningHubExecutionAccount.h3_capability),
         )
         .where(RunningHubExecutionAccount.id == account_id)
     )
@@ -395,7 +396,8 @@ def execution_accounts_for_admin_page(
             .options(
                 selectinload(RunningHubExecutionAccount.pool_memberships).selectinload(
                     RunningHubPoolMembership.admin_user
-                )
+                ),
+                selectinload(RunningHubExecutionAccount.h3_capability),
             )
             .order_by(RunningHubExecutionAccount.id)
         ).all()

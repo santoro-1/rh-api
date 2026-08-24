@@ -114,6 +114,9 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    h3_access_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -571,11 +574,54 @@ class RunningHubExecutionAccount(Base):
     attempts: Mapped[list["GenerationTaskAttempt"]] = relationship(
         back_populates="execution_account"
     )
+    h3_capability: Mapped[Optional["RunningHubH3Capability"]] = relationship(
+        back_populates="execution_account",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     __table_args__ = (
         CheckConstraint(
             "max_concurrent_tasks >= 1 AND max_concurrent_tasks <= 5",
             name="ck_runninghub_execution_account_concurrency",
+        ),
+    )
+
+
+class RunningHubH3Capability(Base):
+    """Workflow-specific H3 capability attached to an existing real credential."""
+
+    __tablename__ = "runninghub_h3_capabilities"
+
+    execution_account_id: Mapped[int] = mapped_column(
+        ForeignKey("runninghub_execution_accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    workflow_id: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    access_password_encrypted: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    instance_type: Mapped[str] = mapped_column(String(20), nullable=False, default="plus")
+    max_concurrent_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    safe_note: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    execution_account: Mapped["RunningHubExecutionAccount"] = relationship(
+        back_populates="h3_capability"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "max_concurrent_tasks >= 1 AND max_concurrent_tasks <= 5",
+            name="ck_runninghub_h3_capability_concurrency",
+        ),
+        CheckConstraint(
+            "instance_type IN ('default', 'plus')",
+            name="ck_runninghub_h3_capability_instance_type",
         ),
     )
 
@@ -1035,6 +1081,7 @@ class GenerationTaskEnhancementAttempt(Base):
 BATCH_SOURCE_LEGACY_WEB = "legacy_web"
 BATCH_SOURCE_NEW_WORKBENCH = "new_workbench"
 BATCH_SOURCE_LTX_WORKBENCH = "ltx_workbench"
+BATCH_SOURCE_H3_WORKBENCH = "h3_workbench"
 BATCH_SOURCE_MULTI_CAMERA_WEB = "multi_camera_web_v1"
 BATCH_EXECUTION_MODE_SAME_ACCOUNT_V1 = "same_account_v1"
 BATCH_EXECUTION_MODE_DUAL_POOL_V1 = "dual_pool_v1"
@@ -1094,6 +1141,9 @@ class GenerationBatch(Base):
         back_populates="batch",
         cascade="all, delete-orphan",
         order_by="MultiCameraImageGroup.position",
+    )
+    h3_config: Mapped[Optional["H3BatchConfig"]] = relationship(
+        back_populates="batch", cascade="all, delete-orphan", uselist=False
     )
 
     __table_args__ = (
@@ -1173,10 +1223,98 @@ class GenerationBatchItem(Base):
     multi_camera_binding: Mapped[Optional["MultiCameraItemBinding"]] = relationship(
         back_populates="batch_item", cascade="all, delete-orphan", uselist=False
     )
+    h3_config: Mapped[Optional["H3ItemConfig"]] = relationship(
+        back_populates="batch_item", cascade="all, delete-orphan", uselist=False
+    )
 
     __table_args__ = (
         UniqueConstraint("batch_id", "row_number", name="uq_batch_items_row_number"),
         UniqueConstraint("batch_id", "row_key", name="uq_batch_items_row_key"),
+    )
+
+
+class H3BatchConfig(Base):
+    """Immutable batch defaults, identity images, and cost-confirmation snapshot."""
+
+    __tablename__ = "h3_batch_configs"
+
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batches.id", ondelete="CASCADE"), primary_key=True
+    )
+    contract_schema: Mapped[str] = mapped_column(String(100), nullable=False)
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    prompt_profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_template_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    continuity_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    aspect_ratio: Mapped[str] = mapped_column(String(100), nullable=False)
+    megapixels: Mapped[float] = mapped_column(Float, nullable=False)
+    multiple: Mapped[int] = mapped_column(Integer, nullable=False, default=32)
+    generation_tail_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    adapter_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    reference_images_json: Mapped[str] = mapped_column(Text, nullable=False)
+    fee_snapshot_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    batch: Mapped[GenerationBatch] = relationship(back_populates="h3_config")
+
+    __table_args__ = (
+        CheckConstraint(
+            "continuity_mode IN ('loop_anchor', 'fast', 'soft_chain')",
+            name="ck_h3_batch_continuity_mode",
+        ),
+        CheckConstraint("multiple = 32", name="ck_h3_batch_multiple"),
+        CheckConstraint(
+            "generation_tail_seconds >= 0 AND generation_tail_seconds <= 1",
+            name="ck_h3_batch_generation_tail",
+        ),
+    )
+
+
+class H3ItemConfig(Base):
+    """Frozen per-script inputs; reference video is deliberately not batch-global."""
+
+    __tablename__ = "h3_item_configs"
+
+    batch_item_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_batch_items.id", ondelete="CASCADE"), primary_key=True
+    )
+    script_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    reference_video_asset_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    reference_video_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    reference_video_original_name: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    reference_video_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    audio_batch_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    audio_item_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    audio_generation_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    full_audio_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    full_audio_original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_audio_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    raw_cues_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    raw_cues_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    raw_cues_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    audio_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    user_direction: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    continuity_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    aspect_ratio: Mapped[str] = mapped_column(String(100), nullable=False)
+    megapixels: Mapped[float] = mapped_column(Float, nullable=False)
+    multiple: Mapped[int] = mapped_column(Integer, nullable=False, default=32)
+    segment_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    batch_item: Mapped[GenerationBatchItem] = relationship(back_populates="h3_config")
+
+    __table_args__ = (
+        CheckConstraint(
+            "continuity_mode IN ('loop_anchor', 'fast', 'soft_chain')",
+            name="ck_h3_item_continuity_mode",
+        ),
+        CheckConstraint("multiple = 32", name="ck_h3_item_multiple"),
+        CheckConstraint("segment_count >= 1", name="ck_h3_item_segment_count"),
     )
 
 
@@ -1551,12 +1689,97 @@ class GenerationSegment(Base):
     multi_camera_binding: Mapped[Optional[MultiCameraSegmentBinding]] = relationship(
         back_populates="segment", cascade="all, delete-orphan", uselist=False
     )
+    h3_config: Mapped[Optional["H3SegmentConfig"]] = relationship(
+        back_populates="segment",
+        cascade="all, delete-orphan",
+        uselist=False,
+        foreign_keys="H3SegmentConfig.segment_id",
+    )
 
     __table_args__ = (
         UniqueConstraint(
             "batch_item_id",
             "segment_index",
             name="uq_generation_segments_item_index",
+        ),
+    )
+
+
+class H3SegmentConfig(Base):
+    """Frozen H3 segment identity, duration grid, dependency, and normalized result."""
+
+    __tablename__ = "h3_segment_configs"
+
+    segment_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_segments.id", ondelete="CASCADE"), primary_key=True
+    )
+    idempotency_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    segment_audio_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_template_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    motion_reference_index: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    motion_reference_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    motion_reference_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    requested_generation_duration_seconds: Mapped[float] = mapped_column(
+        Float, nullable=False
+    )
+    quantized_frame_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    effective_generation_duration_seconds: Mapped[float] = mapped_column(
+        Float, nullable=False
+    )
+    continuity_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    previous_segment_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("generation_segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    continuity_anchor_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    continuity_anchor_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    dynamic_workflow_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    normalized_video_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    normalized_video_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    invalidated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    segment: Mapped[GenerationSegment] = relationship(
+        back_populates="h3_config", foreign_keys=[segment_id]
+    )
+    previous_segment: Mapped[Optional[GenerationSegment]] = relationship(
+        foreign_keys=[previous_segment_id]
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "continuity_mode IN ('loop_anchor', 'fast', 'soft_chain')",
+            name="ck_h3_segment_continuity_mode",
+        ),
+        CheckConstraint(
+            "quantized_frame_count >= 5",
+            name="ck_h3_segment_quantized_frames",
         ),
     )
 

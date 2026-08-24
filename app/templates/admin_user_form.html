@@ -8,7 +8,8 @@
     <label>用户名<input name="username" value="{{ user.username if user else '' }}" required maxlength="80"></label>
     <label>{{ "新密码（留空不改）" if editing else "密码" }}<input name="password" type="password" {% if not editing %}required{% endif %} minlength="8"></label>
   </div>
-  <div class="check-row"><label><input type="checkbox" name="is_admin" {% if user and user.is_admin %}checked{% endif %}> 管理员</label><label><input type="checkbox" name="is_active" {% if not user or user.is_active %}checked{% endif %}> 启用账号</label></div>
+  <div class="check-row"><label><input type="checkbox" name="is_admin" {% if user and user.is_admin %}checked{% endif %}> 管理员</label><label><input type="checkbox" name="is_active" {% if not user or user.is_active %}checked{% endif %}> 启用账号</label><label><input type="checkbox" name="h3_access_enabled" {% if user and user.h3_access_enabled %}checked{% endif %}> 开通 MiniMax H3 多参考</label></div>
+  <p class="field-help">H3 是独立的用户权限，不受数字人双池运行模式开关影响。实际 RunningHub Key、Workflow ID 和并发仍由资源池管理员统一配置。</p>
   <details class="admin-config-section" open>
   <summary>RunningHub 配置</summary>
   <div class="admin-config-body stack-form">

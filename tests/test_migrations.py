@@ -26,6 +26,190 @@ def _run_alembic(database: Path, revision: str, command: str = "upgrade") -> Non
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_h3_motion_reference_pool_migration_is_reversible() -> None:
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-h3-motion-pool-{uuid.uuid4().hex}.db"
+    try:
+        _run_alembic(database, "0042_h3_loop_anchor_mode")
+        _run_alembic(database, "head")
+        with sqlite3.connect(database) as connection:
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info('h3_segment_configs')"
+                )
+            }
+        connection.close()
+        assert revision == "0043_h3_motion_reference_pool"
+        assert {
+            "motion_reference_index",
+            "motion_reference_path",
+            "motion_reference_sha256",
+        } <= columns
+
+        _run_alembic(
+            database,
+            "0042_h3_loop_anchor_mode",
+            command="downgrade",
+        )
+        with sqlite3.connect(database) as connection:
+            columns_after_downgrade = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info('h3_segment_configs')"
+                )
+            }
+        connection.close()
+        assert not {
+            "motion_reference_index",
+            "motion_reference_path",
+            "motion_reference_sha256",
+        } & columns_after_downgrade
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_h3_access_password_migration_preserves_existing_capability() -> None:
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-h3-access-{uuid.uuid4().hex}.db"
+    timestamp = "2026-08-22 18:00:00"
+    try:
+        _run_alembic(database, "0039_h3_workbench_snapshots")
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "INSERT INTO runninghub_execution_accounts "
+                "(id, label, api_key_encrypted, credential_fingerprint, base_url, "
+                "digital_human_ai_app_id, max_concurrent_tasks, is_enabled, health_status, "
+                "created_at, updated_at) VALUES (1, 'H3', 'encrypted', ?, "
+                "'https://example', 'digital', 5, 1, 'UNKNOWN', ?, ?)",
+                ("a" * 64, timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO runninghub_h3_capabilities "
+                "(execution_account_id, is_enabled, workflow_id, instance_type, "
+                "max_concurrent_tasks, safe_note, created_at, updated_at) "
+                "VALUES (1, 1, 'workflow', 'plus', 3, 'note', ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.commit()
+        connection.close()
+
+        _run_alembic(database, "head")
+        with sqlite3.connect(database) as connection:
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info('runninghub_h3_capabilities')"
+                )
+            }
+            row = connection.execute(
+                "SELECT workflow_id, access_password_encrypted "
+                "FROM runninghub_h3_capabilities WHERE execution_account_id=1"
+            ).fetchone()
+            foreign_key_errors = connection.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
+        connection.close()
+
+        assert revision == "0043_h3_motion_reference_pool"
+        assert "access_password_encrypted" in columns
+        assert row == ("workflow", None)
+        assert foreign_key_errors == []
+
+        _run_alembic(
+            database,
+            "0039_h3_workbench_snapshots",
+            command="downgrade",
+        )
+        with sqlite3.connect(database) as connection:
+            revision_after_downgrade = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            columns_after_downgrade = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info('runninghub_h3_capabilities')"
+                )
+            }
+            preserved = connection.execute(
+                "SELECT workflow_id FROM runninghub_h3_capabilities "
+                "WHERE execution_account_id=1"
+            ).fetchone()
+        connection.close()
+
+        assert revision_after_downgrade == "0039_h3_workbench_snapshots"
+        assert "access_password_encrypted" not in columns_after_downgrade
+        assert preserved == ("workflow",)
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_h3_user_access_migration_backfills_existing_h3_members() -> None:
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-h3-user-access-{uuid.uuid4().hex}.db"
+    timestamp = "2026-08-23 12:00:00"
+    try:
+        _run_alembic(database, "0040_h3_access_password")
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "INSERT INTO users "
+                "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+                "VALUES (1, 'enabled-member', 'hash', 1, 1, ?, ?), "
+                "(2, 'not-a-member', 'hash', 1, 1, ?, ?)",
+                (timestamp, timestamp, timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO runninghub_execution_accounts "
+                "(id, label, api_key_encrypted, credential_fingerprint, base_url, "
+                "digital_human_ai_app_id, max_concurrent_tasks, is_enabled, health_status, "
+                "created_at, updated_at) VALUES (1, 'H3', 'encrypted', ?, "
+                "'https://example', 'digital', 5, 1, 'UNKNOWN', ?, ?)",
+                ("b" * 64, timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO runninghub_h3_capabilities "
+                "(execution_account_id, is_enabled, workflow_id, instance_type, "
+                "max_concurrent_tasks, safe_note, access_password_encrypted, created_at, updated_at) "
+                "VALUES (1, 1, 'workflow', 'plus', 3, 'note', NULL, ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO runninghub_pool_memberships "
+                "(admin_user_id, execution_account_id, created_at) VALUES (1, 1, ?)",
+                (timestamp,),
+            )
+            connection.commit()
+        connection.close()
+
+        _run_alembic(database, "head")
+        with sqlite3.connect(database) as connection:
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            grants = connection.execute(
+                "SELECT id, h3_access_enabled FROM users ORDER BY id"
+            ).fetchall()
+            foreign_key_errors = connection.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
+        connection.close()
+
+        assert revision == "0043_h3_motion_reference_pool"
+        assert grants == [(1, 1), (2, 0)]
+        assert foreign_key_errors == []
+    finally:
+        database.unlink(missing_ok=True)
+
+
 def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
     database = tmp_path / "external-cwd.db"
     environment = os.environ.copy()
@@ -144,7 +328,20 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "AND name LIKE 'multi_camera_%'"
             )
         }
-    assert revision == "0037_multi_camera_web"
+        h3_capability_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info('runninghub_h3_capabilities')"
+            )
+        }
+        h3_workbench_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name LIKE 'h3_%_configs'"
+            )
+        }
+    assert revision == "0043_h3_motion_reference_pool"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -198,6 +395,19 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
         "multi_camera_item_bindings",
         "multi_camera_segment_bindings",
     } <= multi_camera_tables
+    assert {
+        "execution_account_id",
+        "is_enabled",
+        "workflow_id",
+        "instance_type",
+        "max_concurrent_tasks",
+        "safe_note",
+    } <= h3_capability_columns
+    assert {
+        "h3_batch_configs",
+        "h3_item_configs",
+        "h3_segment_configs",
+    } <= h3_workbench_tables
     assert {
         "merged_video_status",
         "merged_video_path",
@@ -371,7 +581,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0037_multi_camera_web"
+        assert version == "0043_h3_motion_reference_pool"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -433,7 +643,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0037_multi_camera_web"
+        assert revision == "0043_h3_motion_reference_pool"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -606,7 +816,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0037_multi_camera_web"
+        assert revision == "0043_h3_motion_reference_pool"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -743,7 +953,7 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
             ).fetchall()
         connection.close()
 
-        assert revision == "0037_multi_camera_web"
+        assert revision == "0043_h3_motion_reference_pool"
         assert grant == (7, 1, 1)
         assert batch_snapshot == (None, None)
         assert foreign_key_errors == []
@@ -836,7 +1046,7 @@ def test_item_execution_pool_migration_copies_legacy_batch_snapshots():
             ).fetchone()
         connection.close()
 
-        assert revision == "0037_multi_camera_web"
+        assert revision == "0043_h3_motion_reference_pool"
         assert snapshots == ("[3,5]", "[7]")
     finally:
         database.unlink(missing_ok=True)
@@ -914,6 +1124,6 @@ def test_multi_camera_migration_bootstraps_only_exact_active_accounts(tmp_path):
         ).fetchall()
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert revision == "0037_multi_camera_web"
+    assert revision == "0043_h3_motion_reference_pool"
     assert grants == [(1, 1), (2, 1)]
     assert foreign_key_errors == []

@@ -136,11 +136,16 @@ def cancel_generation_task(db: Session, task: GenerationTask) -> None:
     try:
         workflow_config = get_user_workflow_config(task.user, task.workflow_type)
         adapter = get_workflow(task.workflow_type)
-        ai_app_id = (
-            account.digital_human_ai_app_id
-            if isinstance(account, RunningHubExecutionAccount)
-            else workflow_config.ai_app_id
-        )
+        if isinstance(account, RunningHubExecutionAccount):
+            if task.workflow_type == "minimax_h3_ref2va":
+                capability = account.h3_capability
+                if capability is None or not capability.is_enabled:
+                    raise ValueError("H3 执行账号能力未启用")
+                ai_app_id = capability.workflow_id
+            else:
+                ai_app_id = account.digital_human_ai_app_id
+        else:
+            ai_app_id = workflow_config.ai_app_id
         client = RunningHubClient(
             api_key=decrypt_secret(account.api_key_encrypted),
             base_url=account.base_url,

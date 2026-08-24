@@ -19,6 +19,7 @@ from app.routes import (
     admin,
     auth,
     batches,
+    h3_page,
     long_audio,
     media_worker_api,
     operations,
@@ -27,6 +28,7 @@ from app.routes import (
     voices,
     workbench,
     workbench_ltx,
+    workbench_h3,
     multi_camera,
 )
 from app.services.deployment_drain import is_deployment_draining
@@ -112,12 +114,14 @@ def create_app() -> FastAPI:
     app.include_router(runninghub_pool_admin.router)
     app.include_router(tasks.router)
     app.include_router(batches.router)
+    app.include_router(h3_page.router)
     app.include_router(voices.router)
     app.include_router(long_audio.router)
     app.include_router(media_worker_api.router)
     app.include_router(operations.router)
     app.include_router(workbench.router)
     app.include_router(workbench_ltx.router)
+    app.include_router(workbench_h3.router)
     app.include_router(multi_camera.router)
 
     @app.get("/healthz", include_in_schema=False)
