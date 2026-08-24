@@ -66,6 +66,7 @@ from app.services.h3_pool import (
     validate_h3_account_selection,
 )
 from app.services.alignment import get_alignment_provider
+from app.services.alignment.script_timestamps import AlignedScriptToken
 from app.services.media_segmentation import MediaSegmentationError
 from app.services.media_segmentation import cut_audio_segment
 from app.services.runninghub_dispatch import task_uses_execution_pool
@@ -108,6 +109,7 @@ H3_PROMPT_PROFILE_ID = "dual_reference_talking_v2"
 H3_RAW_CUES_VERSION = "minimax.raw-cues.v1"
 H3_UPLOADED_AUDIO_CUES_VERSION = "funasr.aligned-cues.v1"
 H3_UPLOADED_AUDIO_BATCH_MARKER = "uploaded-audio"
+H3_SAFE_CUT_ALIGNMENT_SCHEMA = "jyd.h3-safe-cut-alignment.v1"
 H3_REGENERATION_WAITING = "WAITING_REGENERATION_DEPENDENCY"
 H3_CANCELLABLE_TASK_STATUSES = {
     TaskStatus.PENDING.value,
@@ -140,8 +142,37 @@ def _plan_h3_audio_segments(
     audio_duration: float,
     *,
     generation_tail_seconds: float,
+    client_alignment: dict[str, object] | None = None,
+    audio_sha256: str = "",
 ) -> list[H3TimestampedSegment]:
     """Use MiniMax cues first, then repair overlong cues with FunASR."""
+
+    if client_alignment is not None:
+        if str(client_alignment.get("audio_sha256") or "") != audio_sha256:
+            raise H3WorkbenchError("JYD 本地 ASR 切点与当前 MiniMax 音频不一致")
+        aligned_tokens = [
+            AlignedScriptToken(
+                text=script_text[
+                    int(value["script_start"]) : int(value["script_end"])
+                ],
+                script_start=int(value["script_start"]),
+                script_end=int(value["script_end"]),
+                start_seconds=int(value["start_us"]) / 1_000_000,
+                end_seconds=int(value["end_us"]) / 1_000_000,
+            )
+            for value in client_alignment["ranges"]
+        ]
+        try:
+            return plan_h3_aligned_segments(
+                script_text,
+                aligned_tokens,
+                audio_duration,
+                generation_tail_seconds=generation_tail_seconds,
+            )
+        except (MediaSegmentationError, ValueError) as exc:
+            raise H3WorkbenchError(
+                f"JYD 本地 ASR 切点无法形成 H3 分段：{exc}"
+            ) from exc
 
     if cues:
         try:
@@ -172,6 +203,92 @@ def _plan_h3_audio_segments(
             "音频与原稿无法建立 H3 安全切点："
             f"{exc}"
         ) from exc
+
+
+def _clean_client_audio_alignment(
+    raw: object,
+    *,
+    position: int,
+    script_text: str,
+    audio_batch_id: str,
+    audio_item_id: str,
+    audio_version: int,
+) -> dict[str, object] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise H3WorkbenchError(f"第 {position} 行本地 ASR 切点格式错误")
+    if str(raw.get("schema") or "") != H3_SAFE_CUT_ALIGNMENT_SCHEMA:
+        raise H3WorkbenchError(f"第 {position} 行本地 ASR 切点版本不受支持")
+    script_sha = str(raw.get("script_sha256") or "").lower()
+    audio_sha = str(raw.get("audio_sha256") or "").lower()
+    if script_sha != _sha256_text(script_text):
+        raise H3WorkbenchError(f"第 {position} 行本地 ASR 切点与冻结原稿不一致")
+    if len(audio_sha) != 64 or any(value not in "0123456789abcdef" for value in audio_sha):
+        raise H3WorkbenchError(f"第 {position} 行本地 ASR 音频摘要无效")
+    try:
+        bound_version = int(raw.get("audio_generation_version") or 0)
+    except (TypeError, ValueError) as exc:
+        raise H3WorkbenchError(f"第 {position} 行本地 ASR 声音版本无效") from exc
+    if (
+        str(raw.get("audio_batch_id") or "") != audio_batch_id
+        or str(raw.get("audio_item_id") or "") != audio_item_id
+        or bound_version != audio_version
+    ):
+        raise H3WorkbenchError(f"第 {position} 行本地 ASR 切点绑定了另一份声音")
+    raw_ranges = raw.get("ranges")
+    if not isinstance(raw_ranges, list) or not 2 <= len(raw_ranges) <= 10_000:
+        raise H3WorkbenchError(f"第 {position} 行本地 ASR 切点数量无效")
+    ranges: list[dict[str, int]] = []
+    previous_script_end = -1
+    previous_audio_end = -1
+    for range_position, value in enumerate(raw_ranges, start=1):
+        if not isinstance(value, dict):
+            raise H3WorkbenchError(
+                f"第 {position} 行本地 ASR 第 {range_position} 个切点无效"
+            )
+        try:
+            script_start = int(value["script_start"])
+            script_end = int(value["script_end"])
+            start_us = int(value["start_us"])
+            end_us = int(value["end_us"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise H3WorkbenchError(
+                f"第 {position} 行本地 ASR 第 {range_position} 个切点无效"
+            ) from exc
+        if (
+            script_start < 0
+            or script_end <= script_start
+            or script_end > len(script_text)
+            or not script_text[script_start:script_end].strip()
+            or start_us < 0
+            or end_us <= start_us
+            or script_start < previous_script_end
+            or start_us + 250_000 < previous_audio_end
+        ):
+            raise H3WorkbenchError(
+                f"第 {position} 行本地 ASR 第 {range_position} 个切点无效"
+            )
+        ranges.append(
+            {
+                "script_start": script_start,
+                "script_end": script_end,
+                "start_us": start_us,
+                "end_us": end_us,
+            }
+        )
+        previous_script_end = script_end
+        previous_audio_end = end_us
+    return {
+        "schema": H3_SAFE_CUT_ALIGNMENT_SCHEMA,
+        "source": "jyd_local_funasr",
+        "script_sha256": script_sha,
+        "audio_sha256": audio_sha,
+        "audio_batch_id": audio_batch_id,
+        "audio_item_id": audio_item_id,
+        "audio_generation_version": audio_version,
+        "ranges": ranges,
+    }
 
 
 def _plan_uploaded_h3_audio(
@@ -361,6 +478,19 @@ def _clean_rows(
         audio_item_id = str(
             raw.get("audio_item_id") or raw.get("audioItemId") or ""
         ).strip()
+        raw_reference_image_ids = raw.get(
+            "reference_image_asset_ids",
+            raw.get("referenceImageAssetIds", []),
+        )
+        if not isinstance(raw_reference_image_ids, list) or len(raw_reference_image_ids) > 4:
+            raise H3WorkbenchError(f"第 {position} 行人物参考图必须为 0～4 张")
+        reference_image_ids = [
+            str(value or "").strip() for value in raw_reference_image_ids
+        ]
+        if any(not value for value in reference_image_ids) or len(
+            set(reference_image_ids)
+        ) != len(reference_image_ids):
+            raise H3WorkbenchError(f"第 {position} 行人物参考图 ID 不能为空或重复")
         try:
             audio_version = int(
                 raw.get("audio_generation_version")
@@ -383,6 +513,21 @@ def _clean_rows(
             raise H3WorkbenchError(
                 f"第 {position} 行必须且只能绑定一份上传音频或已生成音频"
             )
+        raw_audio_alignment = raw.get(
+            "audio_alignment", raw.get("audioAlignment")
+        )
+        if raw_audio_alignment is not None and not has_generated_audio:
+            raise H3WorkbenchError(
+                f"第 {position} 行只有已生成的 MiniMax 音频可以提交本地 ASR 切点"
+            )
+        audio_alignment = _clean_client_audio_alignment(
+            raw_audio_alignment,
+            position=position,
+            script_text=script_text,
+            audio_batch_id=audio_batch_id,
+            audio_item_id=audio_item_id,
+            audio_version=audio_version,
+        )
         audio_source_key = audio_asset_id or audio_item_id
         if audio_source_key in seen_audio_sources:
             raise H3WorkbenchError(
@@ -426,6 +571,8 @@ def _clean_rows(
                 "audio_batch_id": audio_batch_id,
                 "audio_item_id": audio_item_id,
                 "audio_generation_version": audio_version,
+                "audio_alignment": audio_alignment,
+                "reference_image_asset_ids": reference_image_ids,
                 "user_direction": user_direction,
                 "continuity_mode": continuity,
                 "resolution": resolution,
@@ -879,16 +1026,28 @@ def prepare_h3_workbench_batch(
         raise H3WorkbenchError("H3 批次人物参考图 ID 不能为空或重复")
     clean_defaults = _clean_defaults(defaults)
     clean_rows = _clean_rows(rows, settings, clean_defaults)
-    if not image_ids and any(
-        str(row["continuity_mode"]) == "loop_anchor" for row in clean_rows
+    for row in clean_rows:
+        row_image_ids = list(row.get("reference_image_asset_ids") or image_ids)
+        row["reference_image_asset_ids"] = row_image_ids
+    if any(
+        str(row["continuity_mode"]) == "loop_anchor"
+        and not row["reference_image_asset_ids"]
+        for row in clean_rows
     ):
         raise H3WorkbenchError("H3 首尾同图模式至少需要选择 1 张人物参考图")
+    all_image_ids = list(
+        dict.fromkeys(
+            image_id
+            for row in clean_rows
+            for image_id in row["reference_image_asset_ids"]
+        )
+    )
     try:
         account_ids = validate_h3_account_selection(db, user, selected_account_ids)
     except H3PoolValidationError as exc:
         raise H3WorkbenchError(str(exc)) from exc
     instance_type = _selected_instance_type(db, account_ids)
-    assets = _available_assets(db, user, image_ids, clean_rows)
+    assets = _available_assets(db, user, all_image_ids, clean_rows)
 
     batch_id = str(uuid.uuid4())
     batch_dir = _batch_directory(settings, user.id, batch_id)
@@ -929,7 +1088,7 @@ def prepare_h3_workbench_batch(
     }
     try:
         shared_dir = batch_dir / "shared"
-        for order, asset_id in enumerate(image_ids):
+        for order, asset_id in enumerate(all_image_ids):
             asset = assets[asset_id]
             source = safe_relative_path(asset.relative_path, settings.data_dir)
             target = materialize_staged_asset(source, shared_dir, kind="identity-image")
@@ -944,6 +1103,9 @@ def prepare_h3_workbench_batch(
             normalized_contract["reference_images"].append(
                 {key: snapshot[key] for key in ("asset_id", "order", "sha256")}
             )
+        reference_images_by_id = {
+            str(image["asset_id"]): image for image in reference_images
+        }
         batch_config = H3BatchConfig(
             batch=batch,
             contract_schema=H3_BATCH_SCHEMA,
@@ -961,6 +1123,10 @@ def prepare_h3_workbench_batch(
         batch.h3_config = batch_config
 
         for position, row in enumerate(clean_rows, start=1):
+            row_reference_images = [
+                reference_images_by_id[str(asset_id)]
+                for asset_id in row["reference_image_asset_ids"]
+            ]
             video_asset = assets[str(row["video_asset_id"])]
             video_source = safe_relative_path(video_asset.relative_path, settings.data_dir)
             uploaded_audio_id = str(row.get("audio_asset_id") or "")
@@ -997,6 +1163,7 @@ def prepare_h3_workbench_batch(
             item_dir = batch_dir / "items" / item_id
             video_target = materialize_staged_asset(video_source, item_dir, kind="reference-video")
             audio_target = materialize_staged_asset(audio_source, item_dir, kind="full-audio")
+            audio_sha = _sha256_file(audio_target)
             if cues_source is None:
                 plans, cues_text = _plan_uploaded_h3_audio(
                     str(row["script_text"]),
@@ -1013,17 +1180,18 @@ def prepare_h3_workbench_batch(
                 plans = _plan_h3_audio_segments(
                     str(row["script_text"]),
                     cues,
-                    audio_source,
+                    audio_target,
                     audio_duration,
                     generation_tail_seconds=float(
                         clean_defaults["generation_tail_seconds"]
                     ),
+                    client_alignment=row.get("audio_alignment"),
+                    audio_sha256=audio_sha,
                 )
                 cues_target = materialize_staged_asset(
                     cues_source, item_dir, kind="raw-cues"
                 )
             video_sha = _sha256_file(video_target)
-            audio_sha = _sha256_file(audio_target)
             cues_sha = _sha256_file(cues_target)
             motion_references = split_h3_motion_reference(
                 video_target,
@@ -1042,7 +1210,7 @@ def prepare_h3_workbench_batch(
             )
             primary_frame: dict[str, object] | None = None
             is_loop_anchor = str(row["continuity_mode"]) == "loop_anchor"
-            if len(reference_images) >= 2 and not is_loop_anchor:
+            if len(row_reference_images) >= 2 and not is_loop_anchor:
                 frame_target = item_dir / "primary-reference-frame.png"
                 try:
                     extract_reference_frame(video_target, frame_target)
@@ -1056,7 +1224,9 @@ def prepare_h3_workbench_batch(
                     "selection": "0.5s_with_first_frame_fallback",
                 }
             effective_reference_images = (
-                [primary_frame, *reference_images] if primary_frame else reference_images
+                [primary_frame, *row_reference_images]
+                if primary_frame
+                else row_reference_images
             )
             item = GenerationBatchItem(
                 id=item_id,
@@ -1184,8 +1354,11 @@ def prepare_h3_workbench_batch(
                         else "picture_primary" if primary_frame else "video_primary"
                     ),
                     "primary_reference_frame": primary_frame,
+                    "identity_reference_asset_ids": list(
+                        row["reference_image_asset_ids"]
+                    ),
                     "loop_anchor_image_sha256": (
-                        str(reference_images[0]["sha256"])
+                        str(row_reference_images[0]["sha256"])
                         if is_loop_anchor
                         else None
                     ),
@@ -1198,6 +1371,23 @@ def prepare_h3_workbench_batch(
                         "generation_version": audio_generation_version,
                         "raw_cues_version": raw_cues_version,
                         "duration_seconds": audio_duration,
+                        "safe_cut_alignment": (
+                            {
+                                "schema": H3_SAFE_CUT_ALIGNMENT_SCHEMA,
+                                "source": "jyd_local_funasr",
+                                "script_sha256": row["audio_alignment"][
+                                    "script_sha256"
+                                ],
+                                "audio_sha256": row["audio_alignment"][
+                                    "audio_sha256"
+                                ],
+                                "ranges_sha256": _content_digest(
+                                    row["audio_alignment"]["ranges"]
+                                ),
+                            }
+                            if row.get("audio_alignment") is not None
+                            else None
+                        ),
                     },
                     "effective": {
                         "user_direction": row["user_direction"],
@@ -1230,8 +1420,11 @@ def prepare_h3_workbench_batch(
                     "primary_reference_frame_sha256": (
                         str(primary_frame["sha256"]) if primary_frame else None
                     ),
+                    "identity_reference_image_sha256s": [
+                        str(image["sha256"]) for image in row_reference_images
+                    ],
                     "loop_anchor_image_sha256": (
-                        str(reference_images[0]["sha256"])
+                        str(row_reference_images[0]["sha256"])
                         if is_loop_anchor
                         else None
                     ),
@@ -1306,10 +1499,19 @@ def _effective_reference_assets(
     item: GenerationBatchItem,
 ) -> list[dict[str, object]]:
     images = _reference_assets(batch)
+    try:
+        manifest = json.loads(item.manifest_json)
+        row_image_ids = manifest.get("identity_reference_asset_ids", [])
+        if not isinstance(row_image_ids, list):
+            raise TypeError
+        if row_image_ids:
+            images_by_id = {str(image.get("asset_id") or ""): image for image in images}
+            images = [images_by_id[str(asset_id)] for asset_id in row_image_ids]
+    except (TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise H3WorkbenchError("H3 逐行人物参考图快照损坏") from exc
     if item.h3_config.continuity_mode == "loop_anchor" or len(images) < 2:
         return images
     try:
-        manifest = json.loads(item.manifest_json)
         primary = manifest["primary_reference_frame"]
         if not isinstance(primary, dict):
             raise TypeError

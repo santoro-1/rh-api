@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import uuid
@@ -95,7 +96,9 @@ def _configure_minimax(username: str) -> str:
         return voice.id
 
 
-def _finished_audio(client, token: str, username: str) -> tuple[str, str]:
+def _finished_audio(
+    client, token: str, username: str, *, overlong_cue: bool = False
+) -> tuple[str, str]:
     voice_id = _configure_minimax(username)
     created = client.post(
         "/api/workbench/audio-batches",
@@ -126,20 +129,31 @@ def _finished_audio(client, token: str, username: str) -> tuple[str, str]:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"ID3h3-generated-audio")
         cues = get_settings().outputs_dir / f"{username}-h3-cues.json"
+        cue_payload = (
+            [
+                {
+                    "text": SCRIPT,
+                    "start_seconds": 0,
+                    "end_seconds": 20,
+                }
+            ]
+            if overlong_cue
+            else [
+                {
+                    "text": "真正的优势，是把复杂的事情长期做对。",
+                    "start_seconds": 0,
+                    "end_seconds": 10,
+                },
+                {
+                    "text": "然后稳定地继续向前。",
+                    "start_seconds": 10,
+                    "end_seconds": 20,
+                },
+            ]
+        )
         cues.write_text(
             json.dumps(
-                [
-                    {
-                        "text": "真正的优势，是把复杂的事情长期做对。",
-                        "start_seconds": 0,
-                        "end_seconds": 10,
-                    },
-                    {
-                        "text": "然后稳定地继续向前。",
-                        "start_seconds": 10,
-                        "end_seconds": 20,
-                    },
-                ],
+                cue_payload,
                 ensure_ascii=False,
             ),
             encoding="utf-8",
@@ -241,7 +255,9 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
     image_1 = _stage(client, token, "image", "front.png", "image/png")
     image_2 = _stage(client, token, "image", "side.png", "image/png")
     video_id = _stage(client, token, "video", "row-one.mp4", "video/mp4")
-    audio_batch_id, audio_item_id = _finished_audio(client, token, username)
+    audio_batch_id, audio_item_id = _finished_audio(
+        client, token, username, overlong_cue=True
+    )
 
     audio_sources = client.post(
         "/api/workbench/h3-audio-sources",
@@ -288,6 +304,10 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
         "app.services.h3_workbench.extract_reference_frame",
         _fake_reference_frame,
     )
+    monkeypatch.setattr(
+        "app.services.h3_workbench.get_alignment_provider",
+        lambda _name: pytest.fail("H3 预检不应调用云端本机 ASR"),
+    )
 
     accounts = client.post(
         "/api/workbench/h3-execution-accounts",
@@ -332,9 +352,35 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
                 "row_id": "ROW-001",
                 "script_text": SCRIPT,
                 "video_asset_id": video_id,
+                "reference_image_asset_ids": [image_2],
                 "audio_batch_id": audio_batch_id,
                 "audio_item_id": audio_item_id,
                 "audio_generation_version": 1,
+                "audio_alignment": {
+                    "schema": "jyd.h3-safe-cut-alignment.v1",
+                    "source": "jyd_local_funasr",
+                    "script_sha256": hashlib.sha256(SCRIPT.encode()).hexdigest(),
+                    "audio_sha256": hashlib.sha256(
+                        b"ID3h3-generated-audio"
+                    ).hexdigest(),
+                    "audio_batch_id": audio_batch_id,
+                    "audio_item_id": audio_item_id,
+                    "audio_generation_version": 1,
+                    "ranges": [
+                        {
+                            "script_start": 0,
+                            "script_end": len("真正的优势，是把复杂的事情长期做对"),
+                            "start_us": 100_000,
+                            "end_us": 9_800_000,
+                        },
+                        {
+                            "script_start": len("真正的优势，是把复杂的事情长期做对。"),
+                            "script_end": len(SCRIPT) - 1,
+                            "start_us": 10_200_000,
+                            "end_us": 19_800_000,
+                        },
+                    ],
+                },
             }
         ],
     }
@@ -342,7 +388,7 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
     assert prepared.status_code == 201, prepared.text
     body = prepared.json()
     assert body["status"] == "AWAITING_COST_CONFIRMATION"
-    assert body["reference_image_count"] == 2
+    assert body["reference_image_count"] == 1
     assert body["fee_snapshot"]["segment_count"] == 2
     assert body["fee_snapshot"]["estimated_paid_calls"] == 2
     assert [segment["status"] for segment in body["items"][0]["segments"]] == [
@@ -444,13 +490,12 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
         assert all(task.seedvr2_enabled is False for task in tasks)
         assert all(task.batch_item_id is None for task in tasks)
         assert all(task.segment_id for task in tasks)
-        assert all("identity_image_2" in task.input_payload for task in tasks)
-        assert all("identity_image_3" not in task.input_payload for task in tasks)
+        assert all("identity_image_1" in task.input_payload for task in tasks)
+        assert all("identity_image_2" not in task.input_payload for task in tasks)
         for task in tasks:
             assets = json.loads(task.input_payload)["assets"]
             assert assets["video"]["original_name"].startswith("motion-")
-            assert assets["identity_image_1"]["original_name"] == "front.png"
-            assert assets["identity_image_2"]["original_name"] == "side.png"
+            assert assets["identity_image_1"]["original_name"] == "side.png"
         assert all(
             "continuity_anchor" not in json.loads(task.input_payload)["assets"]
             for task in tasks
@@ -473,6 +518,7 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
                 **payload["rows"][0],
                 "row_id": "ROW-REUSE-001",
                 "video_asset_id": reused_video_id,
+                "reference_image_asset_ids": [],
             }
         ],
     }
