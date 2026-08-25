@@ -179,7 +179,14 @@ def _audio_task_for_row(
         raise LtxWorkbenchError("MiniMax 声音任务不存在或不属于当前账号")
     if task.generation_version != row["audio_generation_version"]:
         raise LtxWorkbenchError("MiniMax 声音版本已经变化，请刷新后重新提交")
-    if task.status != AudioTaskStatus.AWAITING_REVIEW.value:
+    reusable_audio = (
+        task.status == AudioTaskStatus.AWAITING_REVIEW.value
+        and task.reviewed_at is None
+    ) or (
+        task.status == AudioTaskStatus.SUCCESS.value
+        and task.reviewed_at is not None
+    )
+    if not reusable_audio:
         raise LtxWorkbenchError("MiniMax 声音尚未进入可试听确认状态")
     if not task.output_path or not task.subtitle_path:
         raise LtxWorkbenchError("MiniMax 声音或句级时间戳尚未准备完成")
@@ -189,6 +196,11 @@ def _audio_task_for_row(
 def _lock_audio_for_ltx(task: AudioGenerationTask, reviewed_at: datetime) -> None:
     """Lock the reviewed MiniMax version without starting the old DH handoff."""
 
+    # H3 and LTX share the immutable MiniMax master. A previous H3/LTX review
+    # already locked this exact generation version, so do not require another
+    # review or rewrite its attempt state when it is reused by the other engine.
+    if task.status == AudioTaskStatus.SUCCESS.value and task.reviewed_at is not None:
+        return
     current_attempt(task).status = "APPROVED"
     task.reviewed_at = reviewed_at
     task.status = AudioTaskStatus.SUCCESS.value

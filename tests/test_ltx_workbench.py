@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
@@ -285,6 +286,44 @@ def test_ltx_workbench_validates_full_row_duration_and_creates_idempotently(
             segment["endSeconds"] - segment["startSeconds"]
             for segment in json.loads(preparation.segment_plan_json)
         ) <= 20
+
+
+def test_ltx_reuses_the_same_minimax_version_after_h3_review(
+    client, monkeypatch
+) -> None:
+    create_user("ltx-after-h3-user")
+    _enable_ltx("ltx-after-h3-user")
+    token = _token(client, "ltx-after-h3-user")
+    video_id = _stage(client, token, "video", "source.mp4", "video/mp4")
+    audio_batch_id, audio_item_id = _finished_audio(
+        client, token, "ltx-after-h3-user"
+    )
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).filter_by(
+            batch_item_id=audio_item_id
+        ).one()
+        task.status = AudioTaskStatus.SUCCESS.value
+        task.reviewed_at = datetime.now(timezone.utc)
+        task.batch_item.audio_status = "AUDIO_APPROVED_H3"
+        task.batch_item.status = "AUDIO_APPROVED_H3"
+        task.attempts[-1].status = "APPROVED"
+        db.commit()
+    monkeypatch.setattr(
+        "app.services.ltx_workbench.inspect_audio_duration", lambda path: 20.0
+    )
+    monkeypatch.setattr(
+        "app.services.ltx_workbench.inspect_media_duration", lambda path: 22.0
+    )
+
+    validated = client.post(
+        "/api/workbench/ltx-batches/validate",
+        json={
+            "access_token": token,
+            "rows": [_row(video_id, audio_batch_id, audio_item_id)],
+        },
+    )
+
+    assert validated.status_code == 200, validated.text
 
 
 def test_minimax_timestamp_ltx_skips_asr_and_preserves_video_timeline(
