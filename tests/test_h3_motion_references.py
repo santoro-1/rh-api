@@ -30,11 +30,17 @@ from app.services.h3.motion_references import (
                 (15.0, 16.0),
             ],
         ),
+        (
+            15.4,
+            [(0.0, 3.0), (3.0, 6.0), (6.0, 9.0), (9.0, 12.0), (12.0, 15.4)],
+        ),
+        (3.49, [(0.0, 3.49)]),
+        (3.5, [(0.0, 3.0), (3.0, 3.5)]),
         (2.25, [(0.0, 2.25)]),
         (6.0, [(0.0, 3.0), (3.0, 6.0)]),
     ],
 )
-def test_split_h3_motion_reference_keeps_the_final_remainder(
+def test_split_h3_motion_reference_merges_a_tail_shorter_than_half_a_second(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     duration: float,

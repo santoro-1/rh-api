@@ -9,6 +9,7 @@ from app.services.media_segmentation import cut_video_segment, inspect_media_dur
 
 
 H3_MOTION_CLIP_SECONDS = 3.0
+H3_MOTION_MIN_TAIL_SECONDS = 0.5
 H3_MOTION_ASSIGNMENT_VERSION = "balanced_bag_v1"
 _DURATION_EPSILON_SECONDS = 0.001
 
@@ -34,17 +35,25 @@ def split_h3_motion_reference(
     source: Path,
     target_dir: Path,
 ) -> list[H3MotionReference]:
-    """Split one uploaded reference into fixed visual-only three-second clips."""
+    """Split one uploaded reference without creating an unusably short tail."""
 
     duration = inspect_media_duration(source)
     clip_count = max(
         1,
         math.ceil((duration - _DURATION_EPSILON_SECONDS) / H3_MOTION_CLIP_SECONDS),
     )
+    if clip_count > 1:
+        tail_seconds = duration - (clip_count - 1) * H3_MOTION_CLIP_SECONDS
+        if tail_seconds < H3_MOTION_MIN_TAIL_SECONDS:
+            clip_count -= 1
     clips: list[H3MotionReference] = []
     for index in range(clip_count):
         start_seconds = index * H3_MOTION_CLIP_SECONDS
-        end_seconds = min(duration, start_seconds + H3_MOTION_CLIP_SECONDS)
+        end_seconds = (
+            duration
+            if index == clip_count - 1
+            else min(duration, start_seconds + H3_MOTION_CLIP_SECONDS)
+        )
         target = target_dir / f"motion-{index + 1:03d}.mp4"
         cut_video_segment(
             source,
@@ -101,6 +110,7 @@ def assign_h3_motion_references(
 __all__ = [
     "H3_MOTION_ASSIGNMENT_VERSION",
     "H3_MOTION_CLIP_SECONDS",
+    "H3_MOTION_MIN_TAIL_SECONDS",
     "H3MotionReference",
     "assign_h3_motion_references",
     "split_h3_motion_reference",
