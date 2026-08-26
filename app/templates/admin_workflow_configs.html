@@ -23,7 +23,16 @@
       <label>工作流访问密码<input name="access_password" type="password" autocomplete="new-password" maxlength="500" placeholder="{{ '已加密保存，留空不修改' if config.settings.get('access_password_encrypted') else '未配置' }}"></label>
       {% if config.settings.get('access_password_encrypted') %}<label class="inline-check"><input type="checkbox" name="clear_access_password"> 清除已保存的工作流访问密码</label>{% endif %}
       {% endif %}
+      {% if workflow.key == 'minimax_h3_ref2va' %}
+      <div class="admin-config-section">
+        <strong>内置 PromptProfile</strong>
+        <input value="{{ h3_prompt_template_version }}" readonly aria-label="H3 内置 PromptProfile 版本">
+        <p class="field-help">首尾同图模式：{{ h3_loop_anchor_prompt_template_version }}</p>
+        <p class="field-help">系统会根据每段台词、人物图、参考视频、音频、画幅和衔接方式自动编译完整六段式 Ref2VA Prompt。此处不提供手工覆盖，前端补充方向仍会作为受约束的附加要求参与编译。</p>
+      </div>
+      {% else %}
       <label>默认提示词<textarea name="default_prompt" rows="5">{{ config.default_prompt }}</textarea></label>
+      {% endif %}
       <label class="inline-check"><input type="checkbox" name="is_enabled" {% if config.is_enabled %}checked{% endif %}> 启用此工作流</label>
       <div class="button-row"><button type="submit">保存工作流配置</button></div>
     </form>

@@ -15,6 +15,10 @@ from app.routes.dependencies import get_page_admin
 from app.services.csrf import require_csrf
 from app.services.logging_config import log_event
 from app.services.security import encrypt_secret
+from app.services.h3.prompt import (
+    H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION,
+    H3_PROMPT_TEMPLATE_VERSION,
+)
 from app.services.workflow_configs import (
     get_system_workflow_config,
     save_system_workflow_config,
@@ -67,6 +71,10 @@ def workflow_config_page(
             "workflows": workflows,
             "configs": configs,
             "current_user": current_user,
+            "h3_prompt_template_version": H3_PROMPT_TEMPLATE_VERSION,
+            "h3_loop_anchor_prompt_template_version": (
+                H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION
+            ),
         },
     )
 
@@ -101,7 +109,11 @@ def update_workflow_config(
             workflow_key,
             ai_app_id=ai_app_id,
             instance_type=instance_type,
-            default_prompt=default_prompt,
+            default_prompt=(
+                workflow.default_prompt
+                if workflow_key == "minimax_h3_ref2va"
+                else default_prompt
+            ),
             is_enabled=is_enabled,
             settings=settings,
         )
