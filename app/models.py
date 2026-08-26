@@ -94,7 +94,7 @@ class LongAudioProjectStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
-class H3HeadTrimJobStatus(str, Enum):
+class H3RemoteAsrJobStatus(str, Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     SUCCESS = "SUCCESS"
@@ -902,7 +902,7 @@ class GenerationTask(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
-    h3_head_trim_job: Mapped[Optional["H3HeadTrimJob"]] = relationship(
+    h3_remote_asr_job: Mapped[Optional["H3RemoteAsrJob"]] = relationship(
         back_populates="generation_task",
         cascade="all, delete-orphan",
         uselist=False,
@@ -978,28 +978,47 @@ class GenerationTaskAttempt(Base):
     )
 
 
-class H3HeadTrimJob(Base):
-    """Durable remote-ASR decision for one downloaded H3 result."""
+class H3RemoteAsrJob(Base):
+    """Durable remote-ASR work for H3 input alignment and output head trim."""
 
-    __tablename__ = "h3_head_trim_jobs"
+    __tablename__ = "h3_remote_asr_jobs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    generation_task_id: Mapped[str] = mapped_column(
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generation_task_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("generation_tasks.id", ondelete="CASCADE"),
         unique=True,
-        nullable=False,
+        nullable=True,
         index=True,
     )
-    source_video_path: Mapped[str] = mapped_column(String(500), nullable=False)
-    source_video_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    staged_asset_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("staged_assets.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    idempotency_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    source_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     script_text: Mapped[str] = mapped_column(Text, nullable=False)
+    script_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    audio_batch_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    audio_item_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    audio_generation_version: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
     status: Mapped[str] = mapped_column(
         String(30),
         nullable=False,
-        default=H3HeadTrimJobStatus.PENDING.value,
+        default=H3RemoteAsrJobStatus.PENDING.value,
         index=True,
     )
-    decision_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     remote_lease_id: Mapped[Optional[str]] = mapped_column(
@@ -1021,8 +1040,8 @@ class H3HeadTrimJob(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    generation_task: Mapped[GenerationTask] = relationship(
-        back_populates="h3_head_trim_job"
+    generation_task: Mapped[Optional[GenerationTask]] = relationship(
+        back_populates="h3_remote_asr_job"
     )
 
 

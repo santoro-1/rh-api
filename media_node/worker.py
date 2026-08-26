@@ -23,6 +23,11 @@ from app.services.h3.postprocess import (
     extract_h3_audio_for_alignment,
     h3_head_trim_decision_payload,
 )
+from app.services.h3.remote_asr import (
+    H3_ASR_ACTION_AUDIO_ALIGNMENT,
+    H3_ASR_ACTION_HEAD_TRIM,
+    h3_audio_alignment_result_payload,
+)
 from app.services.media_segmentation import (
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS,
@@ -35,7 +40,7 @@ from app.services.media_segmentation import (
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NODE_ROOT = Path(__file__).resolve().parent
-WORKER_VERSION = "3"
+WORKER_VERSION = "4"
 
 
 class RemoteWorkerError(RuntimeError):
@@ -164,7 +169,12 @@ class RemoteMediaClient:
             headers=self.headers,
             json={
                 "workerId": worker_id,
-                "capabilities": ["analysis", "cut", "h3_head_trim"],
+                "capabilities": [
+                    "analysis",
+                    "cut",
+                    H3_ASR_ACTION_AUDIO_ALIGNMENT,
+                    H3_ASR_ACTION_HEAD_TRIM,
+                ],
             },
             timeout=(10, 60),
         )
@@ -213,8 +223,9 @@ class RemoteMediaClient:
         action: str = "",
     ) -> None:
         endpoint = (
-            f"/api/media-worker/v1/h3-head-trim-jobs/{job_id}/heartbeat"
-            if action == "h3_head_trim"
+            f"/api/media-worker/v1/h3-asr-jobs/{job_id}/heartbeat"
+            if action
+            in {H3_ASR_ACTION_AUDIO_ALIGNMENT, H3_ASR_ACTION_HEAD_TRIM}
             else f"/api/media-worker/v1/jobs/{job_id}/heartbeat"
         )
         response = requests.post(
@@ -308,28 +319,33 @@ class RemoteMediaClient:
                 f"上传切割结果失败：{_response_error(response)}"
             )
 
-    def complete_h3_head_trim(
+    def complete_h3_asr(
         self,
         job_id: str,
         lease_id: str,
-        decision: dict[str, object],
+        result: dict[str, object],
         metrics: dict[str, Any],
+        *,
+        action: str,
     ) -> None:
+        field = (
+            "alignment"
+            if action == H3_ASR_ACTION_AUDIO_ALIGNMENT
+            else "decision"
+        )
         response = requests.post(
-            self._url(
-                f"/api/media-worker/v1/h3-head-trim-jobs/{job_id}/complete"
-            ),
+            self._url(f"/api/media-worker/v1/h3-asr-jobs/{job_id}/complete"),
             headers=self.headers,
             json={
                 "leaseId": lease_id,
-                "decision": decision,
+                field: result,
                 "metrics": metrics,
             },
             timeout=(10, 120),
         )
         if response.status_code >= 400:
             raise RemoteWorkerError(
-                f"提交 H3 片头 ASR 结果失败：{_response_error(response)}"
+                f"提交 H3 ASR 结果失败：{_response_error(response)}"
             )
 
     def fail(
@@ -342,8 +358,9 @@ class RemoteMediaClient:
         action: str = "",
     ) -> None:
         endpoint = (
-            f"/api/media-worker/v1/h3-head-trim-jobs/{job_id}/failed"
-            if action == "h3_head_trim"
+            f"/api/media-worker/v1/h3-asr-jobs/{job_id}/failed"
+            if action
+            in {H3_ASR_ACTION_AUDIO_ALIGNMENT, H3_ASR_ACTION_HEAD_TRIM}
             else f"/api/media-worker/v1/jobs/{job_id}/failed"
         )
         response = requests.post(
@@ -496,7 +513,8 @@ def process_job(
     if not job_id or not lease_id or action not in {
         "analysis",
         "cut",
-        "h3_head_trim",
+        H3_ASR_ACTION_AUDIO_ALIGNMENT,
+        H3_ASR_ACTION_HEAD_TRIM,
     }:
         raise RemoteWorkerError("服务器返回的任务格式错误")
     source = job.get("source")
@@ -526,7 +544,7 @@ def process_job(
             heartbeat_seconds,
             action,
         ):
-            if action == "h3_head_trim":
+            if action == H3_ASR_ACTION_HEAD_TRIM:
                 video_bytes = client.download(
                     str(source.get("videoUrl") or ""),
                     video_path,
@@ -560,18 +578,51 @@ def process_job(
                         "trimSeconds": decision.trim_seconds,
                     },
                 )
-                client.complete_h3_head_trim(
+                client.complete_h3_asr(
                     job_id,
                     lease_id,
                     h3_head_trim_decision_payload(decision),
                     metrics,
+                    action=action,
                 )
             else:
                 audio_bytes = client.download(
                     str(source.get("audioUrl") or ""),
                     audio_path,
                 )
-            if action == "analysis":
+            if action == H3_ASR_ACTION_AUDIO_ALIGNMENT:
+                provider = FunASRHTTPProvider(
+                    base_url=os.getenv(
+                        "ASR_BASE_URL", "http://127.0.0.1:18084"
+                    ),
+                    shared_token=os.getenv("ASR_SHARED_TOKEN", ""),
+                    timeout_seconds=_env_int(
+                        "ASR_REQUEST_TIMEOUT_SECONDS", 1800
+                    ),
+                )
+                alignment = provider.align(
+                    audio_path,
+                    str(job.get("scriptText") or ""),
+                )
+                metrics = _metrics(
+                    phase="h3_audio_alignment_completed",
+                    started=started,
+                    extra={
+                        "audioDownloadMb": round(
+                            audio_bytes / 1024 / 1024, 1
+                        ),
+                        "tokenCount": len(alignment.tokens),
+                        "matchRatio": alignment.match_ratio,
+                    },
+                )
+                client.complete_h3_asr(
+                    job_id,
+                    lease_id,
+                    h3_audio_alignment_result_payload(alignment),
+                    metrics,
+                    action=action,
+                )
+            elif action == "analysis":
                 if workflow_type == "digital_human":
                     result_provider = "vad_silence"
                     result_tokens = ()

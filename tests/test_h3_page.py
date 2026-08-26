@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import json
+import hashlib
+from dataclasses import replace
 
+from app.config import get_settings
 from app.database import SessionLocal
 from app.models import GenerationTask
-from app.services.h3.segmentation import H3TimestampedSegment
 from tests.conftest import create_user, login
 from tests.test_h3_workbench import (
     _enable_h3_pool,
@@ -50,6 +51,14 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
     create_user(username, h3_access_enabled=True)
     login(client, username)
     account_id = _enable_h3_pool(username)
+    remote_settings = replace(get_settings(), media_processing_mode="remote")
+    monkeypatch.setattr("app.routes.h3_page.get_settings", lambda: remote_settings)
+    monkeypatch.setattr(
+        "app.services.h3_workbench.get_alignment_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("带远程切点的 H3 prepare 不应由云端直连 ASR")
+        ),
+    )
     video_id = _stage(
         client,
         "video",
@@ -66,24 +75,30 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
         "app.services.h3_workbench.split_h3_motion_reference",
         _fake_motion_references,
     )
-    monkeypatch.setattr(
-        "app.services.h3_workbench._plan_uploaded_h3_audio",
-        lambda *args, **kwargs: (
-            [
-                H3TimestampedSegment(
-                    index=0,
-                    script_text=SCRIPT,
-                    start_seconds=0.0,
-                    end_seconds=10.0,
-                    boundary_strength="strong",
-                )
-            ],
-            json.dumps(
-                [{"text": SCRIPT, "start_seconds": 0.0, "end_seconds": 10.0}],
-                ensure_ascii=False,
-            ),
-        ),
-    )
+    split_at = len(SCRIPT) // 2
+    alignment = {
+        "schema": "jyd.h3-safe-cut-alignment.v1",
+        "source": "remote_media_node_funasr",
+        "script_sha256": hashlib.sha256(SCRIPT.encode("utf-8")).hexdigest(),
+        "audio_sha256": hashlib.sha256(b"ID3final-audio").hexdigest(),
+        "audio_batch_id": "uploaded-audio",
+        "audio_item_id": audio_id,
+        "audio_generation_version": 0,
+        "ranges": [
+            {
+                "script_start": 0,
+                "script_end": split_at,
+                "start_us": 0,
+                "end_us": 5_000_000,
+            },
+            {
+                "script_start": split_at,
+                "script_end": len(SCRIPT),
+                "start_us": 5_000_000,
+                "end_us": 10_000_000,
+            },
+        ],
+    }
 
     prepared = client.post(
         "/api/h3-page/batches/prepare",
@@ -107,6 +122,7 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
                     "script_text": SCRIPT,
                     "video_asset_id": video_id,
                     "audio_asset_id": audio_id,
+                    "audio_alignment": alignment,
                 }
             ],
         },
@@ -135,3 +151,96 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
     with SessionLocal() as db:
         task = db.query(GenerationTask).one()
         assert task.workflow_type == "minimax_h3_ref2va"
+
+
+def test_h3_page_audio_alignment_is_claimed_by_remote_media_node(
+    client, monkeypatch
+) -> None:
+    username = "h3-remote-alignment-user"
+    create_user(username, h3_access_enabled=True)
+    login(client, username)
+    audio_id = _stage(client, "audio", "final.mp3", b"ID3remote-audio", "audio/mpeg")
+    settings = replace(
+        get_settings(),
+        media_processing_mode="remote",
+        media_worker_token="remote-worker-test-token-0123456789abcdef",
+        media_worker_lease_seconds=1800,
+    )
+    monkeypatch.setattr("app.routes.h3_page.get_settings", lambda: settings)
+    monkeypatch.setattr("app.routes.media_worker_api.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.services.h3_workbench.get_alignment_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("远程模式下云端不应直接调用 ASR")
+        ),
+    )
+
+    created = client.post(
+        "/api/h3-page/audio-alignments",
+        json={"audio_asset_id": audio_id, "script_text": SCRIPT},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["status"] == "PENDING"
+    job_id = created.json()["job_id"]
+
+    claimed = client.post(
+        "/api/media-worker/v1/jobs/claim",
+        headers={
+            "Authorization": "Bearer remote-worker-test-token-0123456789abcdef"
+        },
+        json={
+            "workerId": "asr-node",
+            "capabilities": ["h3_audio_alignment"],
+        },
+    )
+    assert claimed.status_code == 200, claimed.text
+    job = claimed.json()
+    assert job["jobId"] == job_id
+    assert job["action"] == "h3_audio_alignment"
+    source = client.get(
+        job["source"]["audioUrl"],
+        headers={
+            "Authorization": "Bearer remote-worker-test-token-0123456789abcdef"
+        },
+    )
+    assert source.status_code == 200
+    assert source.content == b"ID3remote-audio"
+
+    split_at = len(SCRIPT) // 2
+    completed = client.post(
+        f"/api/media-worker/v1/h3-asr-jobs/{job_id}/complete",
+        headers={
+            "Authorization": "Bearer remote-worker-test-token-0123456789abcdef"
+        },
+        json={
+            "leaseId": job["leaseId"],
+            "alignment": {
+                "schema": "runninghub.h3-audio-alignment-result.v1",
+                "provider": "funasr_http",
+                "matchRatio": 0.99,
+                "tokens": [
+                    {
+                        "text": SCRIPT[:split_at],
+                        "scriptStart": 0,
+                        "scriptEnd": split_at,
+                        "startSeconds": 0,
+                        "endSeconds": 5,
+                    },
+                    {
+                        "text": SCRIPT[split_at:],
+                        "scriptStart": split_at,
+                        "scriptEnd": len(SCRIPT),
+                        "startSeconds": 5,
+                        "endSeconds": 10,
+                    },
+                ],
+            },
+        },
+    )
+    assert completed.status_code == 200, completed.text
+    result = client.get(f"/api/h3-page/audio-alignments/{job_id}")
+    assert result.status_code == 200, result.text
+    payload = result.json()
+    assert payload["status"] == "SUCCESS"
+    assert payload["alignment"]["audio_item_id"] == audio_id
+    assert payload["alignment"]["source"] == "remote_media_node_funasr"

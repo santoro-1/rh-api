@@ -26,6 +26,85 @@ def _run_alembic(database: Path, revision: str, command: str = "upgrade") -> Non
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_h3_remote_asr_migration_preserves_existing_head_trim_job() -> None:
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-h3-remote-asr-{uuid.uuid4().hex}.db"
+    try:
+        _run_alembic(database, "0045_h3_remote_head_trim_jobs")
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "INSERT INTO users "
+                "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+                "VALUES (1, 'h3-asr-user', 'hash', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+            connection.execute(
+                "INSERT INTO generation_tasks "
+                "(id, user_id, workflow_type, image_path, audio_path, image_original_name, "
+                "audio_original_name, audio_duration_seconds, start_seconds, end_seconds, "
+                "prompt, status, runninghub_auto_retry_count, created_at, updated_at) "
+                "VALUES ('h3-task', 1, 'minimax_h3_ref2va', 'image.png', 'audio.mp3', "
+                "'image.png', 'audio.mp3', 10, 0, 10, 'test', 'RUNNING', 0, "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+            connection.execute(
+                "INSERT INTO h3_head_trim_jobs "
+                "(id, generation_task_id, source_video_path, source_video_name, "
+                "script_text, status, decision_json, created_at, updated_at) "
+                "VALUES ('head-job', 'h3-task', 'outputs/raw.mp4', 'raw.mp4', "
+                "'你好世界', 'SUCCESS', '{\"trimSeconds\":0.2}', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+            connection.commit()
+        connection.close()
+
+        _run_alembic(database, "head")
+        with sqlite3.connect(database) as connection:
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            migrated = connection.execute(
+                "SELECT user_id, generation_task_id, action, source_path, "
+                "source_name, script_sha256, result_json "
+                "FROM h3_remote_asr_jobs WHERE id = 'head-job'"
+            ).fetchone()
+            old_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='h3_head_trim_jobs'"
+            ).fetchone()
+        connection.close()
+        assert revision == "0046_h3_remote_asr_jobs"
+        assert migrated[:5] == (
+            1,
+            "h3-task",
+            "h3_head_trim",
+            "outputs/raw.mp4",
+            "raw.mp4",
+        )
+        assert len(migrated[5]) == 64
+        assert '"trimSeconds":0.2' in migrated[6]
+        assert old_table is None
+
+        _run_alembic(
+            database,
+            "0045_h3_remote_head_trim_jobs",
+            command="downgrade",
+        )
+        with sqlite3.connect(database) as connection:
+            restored = connection.execute(
+                "SELECT generation_task_id, source_video_path, decision_json "
+                "FROM h3_head_trim_jobs WHERE id = 'head-job'"
+            ).fetchone()
+        connection.close()
+        assert restored == (
+            "h3-task",
+            "outputs/raw.mp4",
+            '{"trimSeconds":0.2}',
+        )
+    finally:
+        database.unlink(missing_ok=True)
+
+
 def test_h3_motion_reference_pool_migration_is_reversible() -> None:
     runtime = PROJECT_ROOT / "tests" / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -44,7 +123,7 @@ def test_h3_motion_reference_pool_migration_is_reversible() -> None:
                 )
             }
         connection.close()
-        assert revision == "0045_h3_remote_head_trim_jobs"
+        assert revision == "0046_h3_remote_asr_jobs"
         assert {
             "motion_reference_index",
             "motion_reference_path",
@@ -119,7 +198,7 @@ def test_h3_access_password_migration_preserves_existing_capability() -> None:
             ).fetchall()
         connection.close()
 
-        assert revision == "0045_h3_remote_head_trim_jobs"
+        assert revision == "0046_h3_remote_asr_jobs"
         assert "access_password_encrypted" in columns
         assert row == ("workflow", None)
         assert foreign_key_errors == []
@@ -203,7 +282,7 @@ def test_h3_user_access_migration_backfills_existing_h3_members() -> None:
             ).fetchall()
         connection.close()
 
-        assert revision == "0045_h3_remote_head_trim_jobs"
+        assert revision == "0046_h3_remote_asr_jobs"
         assert grants == [(1, 1), (2, 0)]
         assert foreign_key_errors == []
     finally:
@@ -341,13 +420,13 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "AND name LIKE 'h3_%_configs'"
             )
         }
-        h3_head_trim_columns = {
+        h3_remote_asr_columns = {
             row[1]
             for row in connection.execute(
-                "PRAGMA table_info('h3_head_trim_jobs')"
+                "PRAGMA table_info('h3_remote_asr_jobs')"
             )
         }
-    assert revision == "0045_h3_remote_head_trim_jobs"
+    assert revision == "0046_h3_remote_asr_jobs"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -395,13 +474,17 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
     } <= ltx_preparation_columns
     assert {
         "generation_task_id",
-        "source_video_path",
+        "staged_asset_id",
+        "action",
+        "source_path",
+        "source_sha256",
         "script_text",
+        "script_sha256",
         "status",
-        "decision_json",
+        "result_json",
         "remote_lease_id",
         "remote_lease_expires_at",
-    } <= h3_head_trim_columns
+    } <= h3_remote_asr_columns
     assert {
         "multi_camera_user_access",
         "multi_camera_batch_configs",
@@ -596,7 +679,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0045_h3_remote_head_trim_jobs"
+        assert version == "0046_h3_remote_asr_jobs"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -658,7 +741,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0045_h3_remote_head_trim_jobs"
+        assert revision == "0046_h3_remote_asr_jobs"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -831,7 +914,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0045_h3_remote_head_trim_jobs"
+        assert revision == "0046_h3_remote_asr_jobs"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -968,7 +1051,7 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
             ).fetchall()
         connection.close()
 
-        assert revision == "0045_h3_remote_head_trim_jobs"
+        assert revision == "0046_h3_remote_asr_jobs"
         assert grant == (7, 1, 1)
         assert batch_snapshot == (None, None)
         assert foreign_key_errors == []
@@ -1061,7 +1144,7 @@ def test_item_execution_pool_migration_copies_legacy_batch_snapshots():
             ).fetchone()
         connection.close()
 
-        assert revision == "0045_h3_remote_head_trim_jobs"
+        assert revision == "0046_h3_remote_asr_jobs"
         assert snapshots == ("[3,5]", "[7]")
     finally:
         database.unlink(missing_ok=True)
@@ -1139,6 +1222,6 @@ def test_multi_camera_migration_bootstraps_only_exact_active_accounts(tmp_path):
         ).fetchall()
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert revision == "0045_h3_remote_head_trim_jobs"
+    assert revision == "0046_h3_remote_asr_jobs"
     assert grants == [(1, 1), (2, 1)]
     assert foreign_key_errors == []

@@ -12,7 +12,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     GenerationTask,
-    H3HeadTrimJobStatus,
+    H3RemoteAsrJobStatus,
     RunningHubExecutionAccount,
     RunningHubPoolMembership,
     TaskStatus,
@@ -249,12 +249,12 @@ def test_h3_remote_mode_queues_asr_then_resumes_postprocess(
         db.expire_all()
         task = db.get(GenerationTask, task_id)
         assert task.status == TaskStatus.RUNNING.value
-        assert task.h3_head_trim_job is not None
-        assert task.h3_head_trim_job.status == H3HeadTrimJobStatus.PENDING.value
-        assert (remote_settings.data_dir / task.h3_head_trim_job.source_video_path).is_file()
+        assert task.h3_remote_asr_job is not None
+        assert task.h3_remote_asr_job.status == H3RemoteAsrJobStatus.PENDING.value
+        assert (remote_settings.data_dir / task.h3_remote_asr_job.source_path).is_file()
 
-        task.h3_head_trim_job.status = H3HeadTrimJobStatus.SUCCESS.value
-        task.h3_head_trim_job.decision_json = json.dumps(
+        task.h3_remote_asr_job.status = H3RemoteAsrJobStatus.SUCCESS.value
+        task.h3_remote_asr_job.result_json = json.dumps(
             {
                 "mode": "asr_adaptive",
                 "trimSeconds": 0.18,

@@ -130,6 +130,53 @@
     return "";
   }
 
+  const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+  async function createAudioAlignment(audio, scriptText) {
+    const response = await fetch("/api/h3-page/audio-alignments", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
+      body: JSON.stringify({
+        audio_asset_id: audio.assetId,
+        script_text: scriptText,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(errorMessage(payload, "H3 音频对齐任务创建失败"));
+    return payload;
+  }
+
+  async function waitForAudioAlignment(initial, position, total) {
+    let payload = initial;
+    while (["PENDING", "RUNNING"].includes(payload.status)) {
+      byId("h3-prepare-button").textContent =
+        `正在等待 ASR 对齐 ${position}/${total}（${payload.status === "RUNNING" ? "处理中" : "排队中"}）…`;
+      await wait(Math.max(Number(payload.retry_after_seconds || 2), 1) * 1000);
+      const response = await fetch(`/api/h3-page/audio-alignments/${payload.job_id}`);
+      payload = await response.json();
+      if (!response.ok) throw new Error(errorMessage(payload, "H3 音频对齐状态读取失败"));
+    }
+    if (payload.status !== "SUCCESS" || !payload.alignment) {
+      throw new Error(payload.error_message || `第 ${position} 条音频 ASR 对齐失败`);
+    }
+    return payload.alignment;
+  }
+
+  async function alignUploadedAudios() {
+    const created = [];
+    for (let index = 0; index < state.audios.length; index += 1) {
+      byId("h3-prepare-button").textContent =
+        `正在创建 ASR 对齐任务 ${index + 1}/${state.audios.length}…`;
+      created.push(await createAudioAlignment(
+        state.audios[index],
+        state.scripts[index].trim(),
+      ));
+    }
+    return Promise.all(created.map((job, index) =>
+      waitForAudioAlignment(job, index + 1, created.length),
+    ));
+  }
+
   async function prepare() {
     clearError();
     const validation = validateInputs();
@@ -139,11 +186,14 @@
     button.textContent = "正在对齐音频并计算…";
     try {
       if (!accountIds.length) await loadAccounts();
+      const alignments = await alignUploadedAudios();
+      button.textContent = "正在生成安全切段与费用快照…";
       const rows = state.videos.map((video, index) => ({
         row_id: `H3-${String(index + 1).padStart(3, "0")}`,
         script_text: state.scripts[index].trim(),
         video_asset_id: video.assetId,
         audio_asset_id: state.audios[index].assetId,
+        audio_alignment: alignments[index],
       }));
       const response = await fetch("/api/h3-page/batches/prepare", {
         method: "POST",

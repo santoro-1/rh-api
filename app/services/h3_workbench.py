@@ -24,6 +24,8 @@ from app.models import (
     GenerationTask,
     H3BatchConfig,
     H3ItemConfig,
+    H3RemoteAsrJob,
+    H3RemoteAsrJobStatus,
     H3SegmentConfig,
     RunningHubExecutionAccount,
     StagedAsset,
@@ -49,6 +51,13 @@ from app.services.h3.prompt import (
     H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION,
     H3_PROMPT_TEMPLATE_VERSION,
 )
+from app.services.h3.remote_asr import (
+    H3_ASR_ACTION_AUDIO_ALIGNMENT,
+    H3_SAFE_CUT_ALIGNMENT_SCHEMA,
+    aligned_tokens_from_safe_cut,
+    h3_audio_alignment_result_payload,
+    normalize_h3_audio_alignment_result,
+)
 from app.services.h3.postprocess import (
     H3_OUTPUT_CONTRACT_VERSION,
     H3PostprocessError,
@@ -67,7 +76,6 @@ from app.services.h3_pool import (
 )
 from app.services.workflow_configs import get_system_workflow_config
 from app.services.alignment import get_alignment_provider
-from app.services.alignment.script_timestamps import AlignedScriptToken
 from app.services.media_segmentation import MediaSegmentationError
 from app.services.media_segmentation import cut_audio_segment
 from app.services.runninghub_dispatch import task_uses_execution_pool
@@ -110,7 +118,6 @@ H3_PROMPT_PROFILE_ID = "dual_reference_talking_v2"
 H3_RAW_CUES_VERSION = "minimax.raw-cues.v1"
 H3_UPLOADED_AUDIO_CUES_VERSION = "funasr.aligned-cues.v1"
 H3_UPLOADED_AUDIO_BATCH_MARKER = "uploaded-audio"
-H3_SAFE_CUT_ALIGNMENT_SCHEMA = "jyd.h3-safe-cut-alignment.v1"
 H3_REGENERATION_WAITING = "WAITING_REGENERATION_DEPENDENCY"
 H3_CANCELLABLE_TASK_STATUSES = {
     TaskStatus.PENDING.value,
@@ -145,24 +152,14 @@ def _plan_h3_audio_segments(
     generation_tail_seconds: float,
     client_alignment: dict[str, object] | None = None,
     audio_sha256: str = "",
+    allow_server_asr: bool = True,
 ) -> list[H3TimestampedSegment]:
     """Use MiniMax cues first, then repair overlong cues with FunASR."""
 
     if client_alignment is not None:
         if str(client_alignment.get("audio_sha256") or "") != audio_sha256:
             raise H3WorkbenchError("JYD 本地 ASR 切点与当前 MiniMax 音频不一致")
-        aligned_tokens = [
-            AlignedScriptToken(
-                text=script_text[
-                    int(value["script_start"]) : int(value["script_end"])
-                ],
-                script_start=int(value["script_start"]),
-                script_end=int(value["script_end"]),
-                start_seconds=int(value["start_us"]) / 1_000_000,
-                end_seconds=int(value["end_us"]) / 1_000_000,
-            )
-            for value in client_alignment["ranges"]
-        ]
+        aligned_tokens = aligned_tokens_from_safe_cut(script_text, client_alignment)
         try:
             return plan_h3_aligned_segments(
                 script_text,
@@ -172,7 +169,7 @@ def _plan_h3_audio_segments(
             )
         except (MediaSegmentationError, ValueError) as exc:
             raise H3WorkbenchError(
-                f"JYD 本地 ASR 切点无法形成 H3 分段：{exc}"
+                f"ASR 切点无法形成 H3 分段：{exc}"
             ) from exc
 
     if cues:
@@ -186,6 +183,8 @@ def _plan_h3_audio_segments(
         except ValueError as raw_error:
             if "无法在 4～15 秒请求窗口内安全分段" not in str(raw_error):
                 raise
+    if not allow_server_asr:
+        raise H3WorkbenchError("H3 音频需要先由远程媒体节点完成 ASR 对齐")
     try:
         alignment = get_alignment_provider("funasr_http").align(
             audio_source,
@@ -282,7 +281,7 @@ def _clean_client_audio_alignment(
         previous_audio_end = end_us
     return {
         "schema": H3_SAFE_CUT_ALIGNMENT_SCHEMA,
-        "source": "jyd_local_funasr",
+        "source": str(raw.get("source") or "client_funasr")[:100],
         "script_sha256": script_sha,
         "audio_sha256": audio_sha,
         "audio_batch_id": audio_batch_id,
@@ -298,18 +297,29 @@ def _plan_uploaded_h3_audio(
     audio_duration: float,
     *,
     generation_tail_seconds: float,
+    client_alignment: dict[str, object] | None,
+    audio_sha256: str,
+    allow_server_asr: bool,
 ) -> tuple[list[H3TimestampedSegment], str]:
     """Align one uploaded final audio track to its immutable source script."""
 
     try:
-        alignment = get_alignment_provider("funasr_http").align(
-            audio_source, script_text
-        )
-        if not alignment.tokens:
+        if client_alignment is not None:
+            if str(client_alignment.get("audio_sha256") or "") != audio_sha256:
+                raise H3WorkbenchError("ASR 切点与当前上传音频不一致")
+            tokens = aligned_tokens_from_safe_cut(script_text, client_alignment)
+        elif allow_server_asr:
+            alignment = get_alignment_provider("funasr_http").align(
+                audio_source, script_text
+            )
+            tokens = list(alignment.tokens)
+        else:
+            raise H3WorkbenchError("上传音频需要先由远程媒体节点完成 ASR 对齐")
+        if not tokens:
             raise H3WorkbenchError("FunASR 未返回字词时间戳")
         plans = plan_h3_aligned_segments(
             script_text,
-            alignment.tokens,
+            tokens,
             audio_duration,
             generation_tail_seconds=generation_tail_seconds,
         )
@@ -321,7 +331,7 @@ def _plan_uploaded_h3_audio(
             start_seconds=token.start_seconds,
             end_seconds=token.end_seconds,
         )
-        for token in alignment.tokens
+        for token in tokens
     ]
     return plans, dump_subtitle_cues(cues)
 H3_ACTIVE_TASK_STATUSES = {
@@ -362,6 +372,139 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def prepare_h3_audio_alignment_job(
+    db: Session,
+    user: User,
+    settings: Settings,
+    *,
+    audio_asset_id: str,
+    script_text: str,
+) -> tuple[H3RemoteAsrJob, bool]:
+    """Create or reuse one immutable preflight alignment job for the H3 page."""
+
+    clean_asset_id = str(audio_asset_id or "").strip()
+    clean_script = str(script_text or "").strip()
+    if not clean_asset_id:
+        raise H3WorkbenchError("H3 音频素材 ID 不能为空")
+    if not clean_script or len(clean_script) > 100_000:
+        raise H3WorkbenchError("H3 音频原稿长度必须为 1–100000")
+    assets = load_available_assets(db, user, [clean_asset_id])
+    asset = assets[0]
+    if asset.kind != "audio":
+        raise H3WorkbenchError("H3 对齐任务只能使用音频素材")
+    source = safe_relative_path(asset.relative_path, settings.data_dir)
+    if not source.is_file():
+        raise H3WorkbenchError("H3 对齐音频文件不存在")
+    audio_sha = _sha256_file(source)
+    script_sha = _sha256_text(clean_script)
+    idempotency_sha = _sha256_text(
+        _canonical_json(
+            {
+                "action": H3_ASR_ACTION_AUDIO_ALIGNMENT,
+                "user_id": user.id,
+                "audio_asset_id": asset.id,
+                "audio_sha256": audio_sha,
+                "script_sha256": script_sha,
+            }
+        )
+    )
+    existing = db.scalar(
+        select(H3RemoteAsrJob).where(
+            H3RemoteAsrJob.idempotency_sha256 == idempotency_sha
+        )
+    )
+    if existing is not None:
+        if existing.status == H3RemoteAsrJobStatus.FAILED.value:
+            existing.status = H3RemoteAsrJobStatus.PENDING.value
+            existing.result_json = None
+            existing.error_code = None
+            existing.error_message = None
+            existing.completed_at = None
+            existing.remote_worker_id = None
+            existing.remote_lease_id = None
+            existing.remote_lease_expires_at = None
+            existing.remote_last_heartbeat_at = None
+            db.commit()
+            db.refresh(existing)
+        return existing, False
+
+    job = H3RemoteAsrJob(
+        id=str(uuid.uuid4()),
+        user_id=user.id,
+        generation_task_id=None,
+        staged_asset_id=asset.id,
+        action=H3_ASR_ACTION_AUDIO_ALIGNMENT,
+        idempotency_sha256=idempotency_sha,
+        source_path=asset.relative_path,
+        source_name=asset.original_name,
+        source_sha256=audio_sha,
+        script_text=clean_script,
+        script_sha256=script_sha,
+        audio_batch_id=H3_UPLOADED_AUDIO_BATCH_MARKER,
+        audio_item_id=asset.id,
+        audio_generation_version=0,
+        status=H3RemoteAsrJobStatus.PENDING.value,
+    )
+    db.add(job)
+    db.flush()
+    if settings.media_processing_mode != "remote":
+        try:
+            alignment = get_alignment_provider("funasr_http").align(
+                source, clean_script
+            )
+            normalized = normalize_h3_audio_alignment_result(
+                h3_audio_alignment_result_payload(alignment),
+                script_text=job.script_text,
+                script_sha256=job.script_sha256,
+                audio_sha256=job.source_sha256,
+                audio_batch_id=str(job.audio_batch_id),
+                audio_item_id=str(job.audio_item_id),
+                audio_generation_version=int(job.audio_generation_version or 0),
+            )
+            job.result_json = json.dumps(normalized, ensure_ascii=False)
+            job.status = H3RemoteAsrJobStatus.SUCCESS.value
+            job.completed_at = datetime.now(timezone.utc)
+        except (MediaSegmentationError, ValueError, OSError) as exc:
+            job.status = H3RemoteAsrJobStatus.FAILED.value
+            job.error_code = "LOCAL_ASR_FAILED"
+            job.error_message = str(exc)[:4000]
+            job.completed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(job)
+    return job, True
+
+
+def h3_audio_alignment_job_payload(job: H3RemoteAsrJob) -> dict[str, object]:
+    if job.action != H3_ASR_ACTION_AUDIO_ALIGNMENT:
+        raise H3WorkbenchError("H3 音频对齐任务类型不匹配")
+    alignment = None
+    if job.status == H3RemoteAsrJobStatus.SUCCESS.value:
+        try:
+            alignment = json.loads(job.result_json or "null")
+        except json.JSONDecodeError as exc:
+            raise H3WorkbenchError("H3 音频对齐结果损坏") from exc
+        if not isinstance(alignment, dict):
+            raise H3WorkbenchError("H3 音频对齐结果损坏")
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "alignment": alignment,
+        "error_code": job.error_code,
+        "error_message": job.error_message,
+        "retry_after_seconds": (
+            2
+            if job.status
+            in {
+                H3RemoteAsrJobStatus.PENDING.value,
+                H3RemoteAsrJobStatus.RUNNING.value,
+            }
+            else None
+        ),
+        "created_at": job.created_at.isoformat(),
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
 
 
 def _strict_bool(value: object, field: str) -> bool:
@@ -517,17 +660,18 @@ def _clean_rows(
         raw_audio_alignment = raw.get(
             "audio_alignment", raw.get("audioAlignment")
         )
-        if raw_audio_alignment is not None and not has_generated_audio:
-            raise H3WorkbenchError(
-                f"第 {position} 行只有已生成的 MiniMax 音频可以提交本地 ASR 切点"
-            )
+        bound_audio_batch_id = (
+            H3_UPLOADED_AUDIO_BATCH_MARKER if has_uploaded_audio else audio_batch_id
+        )
+        bound_audio_item_id = audio_asset_id if has_uploaded_audio else audio_item_id
+        bound_audio_version = 0 if has_uploaded_audio else audio_version
         audio_alignment = _clean_client_audio_alignment(
             raw_audio_alignment,
             position=position,
             script_text=script_text,
-            audio_batch_id=audio_batch_id,
-            audio_item_id=audio_item_id,
-            audio_version=audio_version,
+            audio_batch_id=bound_audio_batch_id,
+            audio_item_id=bound_audio_item_id,
+            audio_version=bound_audio_version,
         )
         audio_source_key = audio_asset_id or audio_item_id
         if audio_source_key in seen_audio_sources:
@@ -788,7 +932,7 @@ def _reset_h3_task_runtime(
     status: str,
     now: datetime,
 ) -> None:
-    task.h3_head_trim_job = None
+    task.h3_remote_asr_job = None
     if task_uses_execution_pool(task):
         task.execution_account_id = None
         task.execution_account = None
@@ -1164,6 +1308,9 @@ def prepare_h3_workbench_batch(
                     generation_tail_seconds=float(
                         clean_defaults["generation_tail_seconds"]
                     ),
+                    client_alignment=row.get("audio_alignment"),
+                    audio_sha256=audio_sha,
+                    allow_server_asr=settings.media_processing_mode != "remote",
                 )
                 cues_target = item_dir / "raw-cues.json"
                 cues_target.write_text(cues_text, encoding="utf-8")
@@ -1179,6 +1326,7 @@ def prepare_h3_workbench_batch(
                     ),
                     client_alignment=row.get("audio_alignment"),
                     audio_sha256=audio_sha,
+                    allow_server_asr=settings.media_processing_mode != "remote",
                 )
                 cues_target = materialize_staged_asset(
                     cues_source, item_dir, kind="raw-cues"
@@ -1956,7 +2104,7 @@ def confirm_h3_segment_retry(
     except TaskManagementError as exc:
         raise H3WorkbenchError(str(exc)) from exc
     if task.runninghub_task_id is None:
-        task.h3_head_trim_job = None
+        task.h3_remote_asr_job = None
     if task.status == TaskStatus.PENDING.value and segment.h3_config is not None:
         segment.h3_config.dynamic_workflow_sha256 = None
     segment.status = task.status
@@ -2579,10 +2727,12 @@ __all__ = [
     "confirm_h3_segment_retry",
     "get_h3_batch",
     "h3_account_payload",
+    "h3_audio_alignment_job_payload",
     "h3_audio_sources_payload",
     "h3_batch_payload",
     "prepare_h3_workbench_batch",
     "prepare_h3_segment_regeneration",
     "prepare_h3_segment_retry",
+    "prepare_h3_audio_alignment_job",
     "sync_h3_task_hierarchy",
 ]

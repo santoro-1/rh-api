@@ -25,8 +25,8 @@ from app.models import (
     GenerationTaskAttempt,
     GenerationTaskEnhancement,
     GenerationTaskEnhancementAttempt,
-    H3HeadTrimJob,
-    H3HeadTrimJobStatus,
+    H3RemoteAsrJob,
+    H3RemoteAsrJobStatus,
     RunningHubConfig,
     RunningHubExecutionAccount,
     SeedVR2ExecutionAccount,
@@ -82,6 +82,7 @@ from app.services.h3.postprocess import (
     parse_h3_head_trim_decision,
     postprocess_h3_result,
 )
+from app.services.h3.remote_asr import H3_ASR_ACTION_HEAD_TRIM
 from app.services.h3_workbench import (
     activate_next_h3_soft_chain_segment,
     sync_h3_task_hierarchy,
@@ -719,7 +720,7 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
             selectinload(GenerationTask.enhancement).selectinload(
                 GenerationTaskEnhancement.seedvr2_execution_account
             ),
-            selectinload(GenerationTask.h3_head_trim_job),
+            selectinload(GenerationTask.h3_remote_asr_job),
             selectinload(GenerationTask.batch_item).selectinload(
                 GenerationBatchItem.batch
             ),
@@ -945,12 +946,12 @@ def _handle_remote_status(
         task.workflow_type == "minimax_h3_ref2va"
         and settings.media_processing_mode == "remote"
     )
-    head_trim_job = task.h3_head_trim_job if remote_h3_head_trim else None
+    head_trim_job = task.h3_remote_asr_job if remote_h3_head_trim else None
     if head_trim_job is not None:
-        destination = safe_relative_path(head_trim_job.source_video_path, settings.data_dir)
+        destination = safe_relative_path(head_trim_job.source_path, settings.data_dir)
         if head_trim_job.status in {
-            H3HeadTrimJobStatus.PENDING.value,
-            H3HeadTrimJobStatus.RUNNING.value,
+            H3RemoteAsrJobStatus.PENDING.value,
+            H3RemoteAsrJobStatus.RUNNING.value,
         }:
             return
     else:
@@ -993,15 +994,27 @@ def _handle_remote_status(
                 _mark_failed(task, "H3_POSTPROCESS_FAILED", "H3 分段审计快照缺失")
                 db.commit()
                 return
-            head_trim_job = H3HeadTrimJob(
+            source_sha = _file_sha256(destination)
+            head_trim_job = H3RemoteAsrJob(
                 id=str(uuid.uuid4()),
+                user_id=task.user_id,
                 generation_task_id=task.id,
-                source_video_path=to_relative_data_path(destination, settings),
-                source_video_name=destination.name,
+                action=H3_ASR_ACTION_HEAD_TRIM,
+                idempotency_sha256=hashlib.sha256(
+                    f"{H3_ASR_ACTION_HEAD_TRIM}\0{task.id}\0{source_sha}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+                source_path=to_relative_data_path(destination, settings),
+                source_name=destination.name,
+                source_sha256=source_sha,
                 script_text=segment.script_text,
-                status=H3HeadTrimJobStatus.PENDING.value,
+                script_sha256=hashlib.sha256(
+                    segment.script_text.encode("utf-8")
+                ).hexdigest(),
+                status=H3RemoteAsrJobStatus.PENDING.value,
             )
-            task.h3_head_trim_job = head_trim_job
+            task.h3_remote_asr_job = head_trim_job
             task.status = TaskStatus.RUNNING.value
             segment.status = TaskStatus.RUNNING.value
             db.add(head_trim_job)
@@ -1011,7 +1024,7 @@ def _handle_remote_status(
                 "video.h3_head_trim_queued",
                 "H3 原始成片已下载，等待远程媒体节点执行片头 ASR",
                 job_id=head_trim_job.id,
-                source_video_path=head_trim_job.source_video_path,
+                source_video_path=head_trim_job.source_path,
                 **_video_log_context(task),
             )
             return
@@ -1035,11 +1048,11 @@ def _handle_remote_status(
         try:
             head_trim_decision = None
             if head_trim_job is not None:
-                if head_trim_job.status == H3HeadTrimJobStatus.SUCCESS.value:
+                if head_trim_job.status == H3RemoteAsrJobStatus.SUCCESS.value:
                     head_trim_decision = parse_h3_head_trim_decision(
-                        head_trim_job.decision_json or ""
+                        head_trim_job.result_json or ""
                     )
-                elif head_trim_job.status == H3HeadTrimJobStatus.FAILED.value:
+                elif head_trim_job.status == H3RemoteAsrJobStatus.FAILED.value:
                     head_trim_decision = fallback_h3_head_trim(
                         head_trim_job.error_code or "remote_asr_failed"
                     )

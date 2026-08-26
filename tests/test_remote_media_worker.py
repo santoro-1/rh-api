@@ -12,8 +12,8 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     GenerationTask,
-    H3HeadTrimJob,
-    H3HeadTrimJobStatus,
+    H3RemoteAsrJob,
+    H3RemoteAsrJobStatus,
     LongAudioProject,
     LongAudioProjectStatus,
     User,
@@ -333,13 +333,18 @@ def test_remote_worker_claims_and_completes_h3_head_trim(client, monkeypatch):
         )
         db.add(task)
         db.flush()
-        job = H3HeadTrimJob(
+        job = H3RemoteAsrJob(
             id=str(uuid.uuid4()),
+            user_id=user.id,
             generation_task_id=task.id,
-            source_video_path=source.relative_to(settings.data_dir).as_posix(),
-            source_video_name="raw.mp4",
+            action="h3_head_trim",
+            idempotency_sha256="a" * 64,
+            source_path=source.relative_to(settings.data_dir).as_posix(),
+            source_name="raw.mp4",
+            source_sha256="b" * 64,
             script_text="你好世界",
-            status=H3HeadTrimJobStatus.PENDING.value,
+            script_sha256="c" * 64,
+            status=H3RemoteAsrJobStatus.PENDING.value,
         )
         db.add(job)
         db.commit()
@@ -362,7 +367,7 @@ def test_remote_worker_claims_and_completes_h3_head_trim(client, monkeypatch):
     assert source_response.content.endswith(b"h3")
 
     completed = client.post(
-        f"/api/media-worker/v1/h3-head-trim-jobs/{job_id}/complete",
+        f"/api/media-worker/v1/h3-asr-jobs/{job_id}/complete",
         headers=_worker_headers(),
         json={
             "leaseId": payload["leaseId"],
@@ -380,10 +385,10 @@ def test_remote_worker_claims_and_completes_h3_head_trim(client, monkeypatch):
     )
     assert completed.status_code == 200, completed.text
     with SessionLocal() as db:
-        job = db.get(H3HeadTrimJob, job_id)
+        job = db.get(H3RemoteAsrJob, job_id)
         assert job is not None
-        assert job.status == H3HeadTrimJobStatus.SUCCESS.value
-        assert json.loads(job.decision_json)["trimSeconds"] == 0.18
+        assert job.status == H3RemoteAsrJobStatus.SUCCESS.value
+        assert json.loads(job.result_json)["trimSeconds"] == 0.18
         assert job.remote_lease_id is None
 
 

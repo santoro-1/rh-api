@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import GenerationBatchItem, User
+from app.models import GenerationBatchItem, H3RemoteAsrJob, User
 from app.routes.dependencies import check_rate_limit, get_current_user, get_page_user
 from app.services.batch_assets import StagedAssetError
 from app.services.csrf import require_csrf
@@ -17,7 +17,9 @@ from app.services.h3_workbench import (
     confirm_h3_workbench_batch,
     get_h3_batch,
     h3_account_payload,
+    h3_audio_alignment_job_payload,
     h3_batch_payload,
+    prepare_h3_audio_alignment_job,
     prepare_h3_workbench_batch,
 )
 from app.services.storage import safe_relative_path
@@ -39,6 +41,52 @@ def page_h3_accounts(
         return h3_account_payload(db, current_user)
     except H3WorkbenchError as exc:
         raise _error(exc, status_code=403) from exc
+
+
+@router.post("/audio-alignments")
+async def prepare_page_h3_audio_alignment(
+    request: Request,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del csrf_ok
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="H3 对齐请求内容不是有效对象")
+    settings = get_settings()
+    check_rate_limit(
+        request,
+        f"h3-page-alignment:{current_user.id}",
+        max(settings.task_create_rate_limit_per_minute * 10, 50),
+    )
+    try:
+        job, created = prepare_h3_audio_alignment_job(
+            db,
+            current_user,
+            settings,
+            audio_asset_id=str(payload.get("audio_asset_id") or ""),
+            script_text=str(payload.get("script_text") or ""),
+        )
+        response = h3_audio_alignment_job_payload(job)
+    except (H3WorkbenchError, StagedAssetError, ValueError, OSError) as exc:
+        raise _error(exc) from exc
+    return JSONResponse(response, status_code=201 if created else 200)
+
+
+@router.get("/audio-alignments/{job_id}")
+def page_h3_audio_alignment(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = db.get(H3RemoteAsrJob, job_id)
+    if job is None or job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="H3 音频对齐任务不存在")
+    try:
+        return h3_audio_alignment_job_payload(job)
+    except H3WorkbenchError as exc:
+        raise _error(exc, status_code=409) from exc
 
 
 @router.post("/batches/prepare")

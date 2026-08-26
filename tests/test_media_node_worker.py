@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 from app.services.media_segmentation import SegmentPlan
 from app.services.h3.postprocess import H3HeadTrimDecision
@@ -90,9 +91,10 @@ def test_remote_h3_head_trim_downloads_video_and_returns_decision(
             target.write_bytes(b"h3-video")
             return target.stat().st_size
 
-        def complete_h3_head_trim(
-            self, _job_id, _lease_id, decision, _metrics
+        def complete_h3_asr(
+            self, _job_id, _lease_id, decision, _metrics, *, action
         ):
+            assert action == "h3_head_trim"
             self.decision = decision
 
         def fail(self, *_args, **_kwargs):
@@ -143,3 +145,77 @@ def test_remote_h3_head_trim_downloads_video_and_returns_decision(
     )
     assert client.decision["mode"] == "asr_adaptive"
     assert client.decision["trimSeconds"] == 0.18
+
+
+def test_remote_h3_audio_alignment_uses_local_asr_and_returns_tokens(
+    monkeypatch,
+    tmp_path,
+):
+    class _AlignmentClient:
+        def __init__(self) -> None:
+            self.alignment = None
+
+        def download(self, _url, target):
+            target.write_bytes(b"ID3audio")
+            return target.stat().st_size
+
+        def complete_h3_asr(
+            self, _job_id, _lease_id, alignment, _metrics, *, action
+        ):
+            assert action == "h3_audio_alignment"
+            self.alignment = alignment
+
+        def fail(self, *_args, **_kwargs):
+            raise AssertionError("H3 音频对齐不应失败")
+
+    class _Provider:
+        def __init__(self, **kwargs):
+            assert kwargs["base_url"] == "http://127.0.0.1:18084"
+
+        def align(self, _audio, script):
+            assert script == "你好世界"
+            return SimpleNamespace(
+                provider="funasr_http",
+                match_ratio=1.0,
+                plans=(),
+                tokens=(
+                    SimpleNamespace(
+                        text="你好",
+                        script_start=0,
+                        script_end=2,
+                        start_seconds=0.1,
+                        end_seconds=1.0,
+                        confidence=0.99,
+                    ),
+                    SimpleNamespace(
+                        text="世界",
+                        script_start=2,
+                        script_end=4,
+                        start_seconds=1.0,
+                        end_seconds=2.0,
+                        confidence=0.98,
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(worker, "HeartbeatLoop", lambda *_a, **_k: nullcontext())
+    monkeypatch.setattr(worker, "FunASRHTTPProvider", _Provider)
+    monkeypatch.setenv("ASR_BASE_URL", "http://127.0.0.1:18084")
+    client = _AlignmentClient()
+    worker.process_job(
+        client,
+        {
+            "jobId": "h3-audio-alignment-job",
+            "leaseId": "lease-2",
+            "action": "h3_audio_alignment",
+            "scriptText": "你好世界",
+            "source": {
+                "audioUrl": "/source/audio",
+                "audioName": "final.mp3",
+            },
+        },
+        work_root=tmp_path,
+        heartbeat_seconds=60,
+    )
+    assert client.alignment["schema"] == "runninghub.h3-audio-alignment-result.v1"
+    assert len(client.alignment["tokens"]) == 2
