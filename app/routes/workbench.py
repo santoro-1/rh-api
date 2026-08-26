@@ -439,6 +439,12 @@ def _execution_assignments(
     return assignments
 
 
+def _h3_audio_is_approved(item: GenerationBatchItem) -> bool:
+    return str(item.audio_status or "").strip().upper() == "AUDIO_APPROVED_H3" or str(
+        item.status or ""
+    ).strip().upper() == "AUDIO_APPROVED_H3"
+
+
 def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
     tasks = [
         segment.generation_task
@@ -450,6 +456,14 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         not tasks
         and audio_task is not None
         and audio_task.status == AudioTaskStatus.FAILED.value
+    )
+    h3_audio_approved = _h3_audio_is_approved(item)
+    obsolete_h3_composition_handoff = bool(
+        not tasks
+        and item.generation_task is None
+        and h3_audio_approved
+        and audio_task is not None
+        and audio_task.primary_path
     )
     error_message = item.merged_video_error or item.error_message
     if audio_task is not None and audio_task.error_message:
@@ -485,6 +499,11 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         error_message = failed.error_message or failed.runninghub_failed_reason
     elif audio_failed:
         status = "COMPOSITION_FAILED"
+    elif obsolete_h3_composition_handoff:
+        status = "COMPOSITION_FAILED"
+        error_message = (
+            "该请求来自已停用的普通数字人交接；新版工作台请直接使用多参考生成"
+        )
     elif any(
         task.enhancement is not None
         and task.enhancement.status != EnhancementStatus.SUCCESS.value
@@ -495,6 +514,8 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
         status = "VIDEO_MERGING"
     elif tasks:
         status = "DIGITAL_HUMAN_RUNNING"
+    elif h3_audio_approved:
+        status = "AUDIO_READY"
     elif audio_task is not None and (
         audio_task.reviewed_at is not None
         or audio_task.status
@@ -541,8 +562,16 @@ def _composition_payload(item: GenerationBatchItem) -> dict[str, Any]:
             else None
         ),
         "error_message": error_message,
-        "error_code": audio_task.error_code if audio_failed else None,
-        "failure_stage": "audio" if audio_failed else None,
+        "error_code": (
+            "NEW_WORKBENCH_H3_ONLY"
+            if obsolete_h3_composition_handoff
+            else (audio_task.error_code if audio_failed else None)
+        ),
+        "failure_stage": (
+            "handoff"
+            if obsolete_h3_composition_handoff
+            else ("audio" if audio_failed else None)
+        ),
         "runninghub_execution_account_ids": item_execution_account_snapshot(item),
         "seedvr2_execution_account_ids": seedvr2_item_account_snapshot(item),
         "execution_mode": item.batch.execution_mode,
@@ -1249,6 +1278,15 @@ def start_workbench_composition(
     if item is None or item.audio_task is None:
         raise HTTPException(status_code=404, detail="声音任务不存在")
     task = item.audio_task
+    if (
+        _h3_audio_is_approved(item)
+        and not item.segments
+        and item.generation_task is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="新版工作台只支持多参考生成；普通数字人交接请求已停止",
+        )
     try:
         requested_image_sha256 = _payload_image_sha256(payload)
     except AudioReviewError as exc:

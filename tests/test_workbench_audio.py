@@ -310,6 +310,70 @@ def test_workbench_composition_reports_failed_approved_audio_as_audio_stage(
     assert composition["error_code"] == "CONFIGURATION_ERROR"
 
 
+def test_h3_approved_audio_rejects_obsolete_digital_human_handoff(
+    client, monkeypatch
+):
+    _account("workbench-h3-only-user")
+    monkeypatch.setattr(
+        "app.services.speech.workbench_voices.MiniMaxClient.list_voices",
+        lambda self, voice_type="system": OFFICIAL_ITEMS,
+    )
+    token = _token(client, "workbench-h3-only-user")
+    voices = client.post("/api/workbench/voices", json={"access_token": token})
+    voice_id = voices.json()["voices"][0]["voice_asset_id"]
+    created = client.post(
+        "/api/workbench/audio-batches",
+        json={
+            "access_token": token,
+            "name": "多参考交接边界",
+            "request_key": "workbench-h3-only-1",
+            "rows": [{"row_id": "1", "speech_script": "只走多参考。"}],
+            "speech_options": {
+                "voiceAssetId": voice_id,
+                "model": "speech-2.8-hd",
+                "speed": 1,
+                "volume": 1,
+                "pitch": 0,
+                "languageBoost": "Chinese",
+                "outputFormat": "mp3",
+                "costConfirmed": True,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    batch_id = created.json()["batch_id"]
+    item_id = created.json()["items"][0]["item_id"]
+    with SessionLocal() as db:
+        task = db.query(AudioGenerationTask).filter_by(batch_item_id=item_id).one()
+        task.status = AudioTaskStatus.SUCCESS.value
+        task.reviewed_at = datetime.now(timezone.utc)
+        task.primary_kind = "image"
+        task.primary_path = "uploads/obsolete-person.png"
+        task.batch_item.audio_status = "AUDIO_APPROVED_H3"
+        task.batch_item.status = "AUDIO_APPROVED_H3"
+        db.commit()
+
+    rejected = client.post(
+        f"/api/workbench/audio-batches/{batch_id}/items/{item_id}/composition",
+        json={
+            "access_token": token,
+            "idempotency_key": "obsolete-standard-handoff",
+            "cost_confirmed": True,
+        },
+    )
+    assert rejected.status_code == 409
+    assert "只支持多参考" in rejected.json()["detail"]
+
+    manifest = client.post(
+        f"/api/workbench/tasks/{item_id}", json={"access_token": token}
+    )
+    assert manifest.status_code == 200, manifest.text
+    composition = manifest.json()["composition"]
+    assert composition["status"] == "COMPOSITION_FAILED"
+    assert composition["error_code"] == "NEW_WORKBENCH_H3_ONLY"
+    assert composition["failure_stage"] == "handoff"
+
+
 def test_workbench_voice_clone_reuses_existing_voice_queue(client, monkeypatch):
     _account("workbench-clone-user")
     token = _token(client, "workbench-clone-user")
