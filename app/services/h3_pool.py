@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.models import (
     RunningHubExecutionAccount,
     RunningHubH3Capability,
     RunningHubPoolMembership,
+    SystemWorkflowConfig,
     User,
 )
 from app.services.runninghub_pool import (
@@ -17,6 +19,7 @@ from app.services.runninghub_pool import (
     credential_active_task_count,
     execution_account_configuration_ready,
 )
+from app.services.workflow_configs import get_system_workflow_config
 from app.services.security import encrypt_secret
 
 
@@ -91,6 +94,42 @@ def configure_h3_capability(
             encrypt_secret(clean_password) if clean_password else None
         )
     capability.is_enabled = bool(is_enabled)
+    session = object_session(account)
+    if session is not None:
+        shared = next(
+            (
+                item
+                for item in session.new
+                if isinstance(item, SystemWorkflowConfig)
+                and item.workflow_key == "minimax_h3_ref2va"
+            ),
+            None,
+        )
+        if shared is None:
+            shared = session.scalar(
+                select(SystemWorkflowConfig).where(
+                    SystemWorkflowConfig.workflow_key == "minimax_h3_ref2va"
+                )
+            )
+        if shared is None:
+            shared = SystemWorkflowConfig(
+                workflow_key="minimax_h3_ref2va",
+                ai_app_id=clean_workflow_id,
+                instance_type=instance_type,
+                default_prompt="由 H3 PromptProfile 根据每段台词自动编译",
+                is_enabled=bool(is_enabled),
+                settings_json="{}",
+            )
+            if capability.access_password_encrypted:
+                shared.settings_json = json.dumps(
+                    {
+                        "access_password_encrypted": (
+                            capability.access_password_encrypted
+                        )
+                    },
+                    ensure_ascii=False,
+                )
+            session.add(shared)
     return capability
 
 
@@ -115,6 +154,9 @@ def h3_capability_snapshots_for_user(
     if not user_has_h3_pool_entitlement(db, user):
         return []
 
+    config = get_system_workflow_config(db, "minimax_h3_ref2va")
+    if not config.is_enabled or not config.ai_app_id:
+        return []
     accounts = list(
         db.scalars(
             select(RunningHubExecutionAccount)
@@ -127,16 +169,14 @@ def h3_capability_snapshots_for_user(
         H3ExecutionCapabilitySnapshot(
             execution_account_id=account.id,
             label=account.label,
-            workflow_id=account.h3_capability.workflow_id,
-            instance_type=account.h3_capability.instance_type,
-            max_concurrent_tasks=account.h3_capability.max_concurrent_tasks,
-            safe_note=account.h3_capability.safe_note,
-            has_access_password=bool(
-                account.h3_capability.access_password_encrypted
-            ),
+            workflow_id=config.ai_app_id,
+            instance_type=config.instance_type,
+            max_concurrent_tasks=account.max_concurrent_tasks,
+            safe_note="",
+            has_access_password=bool(config.settings.get("access_password_encrypted")),
         )
         for account in accounts
-        if h3_capability_ready(account)
+        if execution_account_configuration_ready(account)
     ]
 
 
@@ -145,6 +185,7 @@ def h3_execution_account_summary(db: Session, user: User) -> dict[str, object]:
 
     if not user_has_h3_pool_entitlement(db, user):
         raise H3PoolValidationError("当前账号尚未开通 H3 多账号执行池")
+    config = get_system_workflow_config(db, "minimax_h3_ref2va")
     accounts = list(
         db.scalars(
             select(RunningHubExecutionAccount)
@@ -157,16 +198,16 @@ def h3_execution_account_summary(db: Session, user: User) -> dict[str, object]:
     summaries: list[dict[str, object]] = []
     defaults: list[int] = []
     for account in accounts:
-        capability = account.h3_capability
         configured = bool(
             execution_account_configuration_ready(account)
-            and h3_capability_ready(account)
+            and config.is_enabled
+            and config.ai_app_id
         )
         cooldown_active = bool(
             account.cooldown_until and _as_utc(account.cooldown_until) > now
         )
         health_status = str(account.health_status or "UNKNOWN").upper()
-        if not account.is_enabled or not capability or not capability.is_enabled:
+        if not account.is_enabled or not config.is_enabled:
             availability = "DISABLED"
         elif not configured:
             availability = "INCOMPLETE"
@@ -180,23 +221,21 @@ def h3_execution_account_summary(db: Session, user: User) -> dict[str, object]:
         if selectable:
             defaults.append(account.id)
         active = credential_active_task_count(db, account.credential_fingerprint)
-        limit = capability.max_concurrent_tasks if capability else 0
+        limit = account.max_concurrent_tasks
         summaries.append(
             {
                 "id": account.id,
                 "label": account.label,
-                "instance_type": capability.instance_type if capability else None,
+                "instance_type": config.instance_type,
                 "max_concurrent_tasks": limit,
                 "active_tasks": active,
                 "available_slots": max(limit - active, 0),
                 "health_status": health_status,
-                "is_enabled": bool(account.is_enabled and capability and capability.is_enabled),
+                "is_enabled": bool(account.is_enabled and config.is_enabled),
                 "selectable": selectable,
                 "availability": availability,
-                "safe_note": capability.safe_note if capability else "",
-                "has_access_password": bool(
-                    capability and capability.access_password_encrypted
-                ),
+                "safe_note": "",
+                "has_access_password": bool(config.settings.get("access_password_encrypted")),
             }
         )
     return {
@@ -223,6 +262,9 @@ def validate_h3_account_selection(
     if len(set(raw_selection)) != len(raw_selection):
         raise H3PoolValidationError("H3 执行账号 ID 不能重复")
     selected = sorted(raw_selection)
+    config = get_system_workflow_config(db, "minimax_h3_ref2va")
+    if not config.is_enabled or not config.ai_app_id:
+        raise H3PoolValidationError("H3 系统工作流未启用或未配置")
     accounts = list(
         db.scalars(
             select(RunningHubExecutionAccount)
@@ -235,6 +277,6 @@ def validate_h3_account_selection(
     )
     if {account.id for account in accounts} != set(selected):
         raise H3PoolValidationError("所选 H3 执行账号不存在或不属于当前用户")
-    if any(not h3_capability_ready(account) for account in accounts):
-        raise H3PoolValidationError("所选账号存在未启用或未配置的 H3 能力")
+    if any(not execution_account_configuration_ready(account) for account in accounts):
+        raise H3PoolValidationError("所选账号存在已停用或未配置的 RunningHub 账号")
     return selected

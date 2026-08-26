@@ -1959,21 +1959,23 @@ def process_task(db: Session, task_id: str) -> None:
         effective_instance_type = workflow_config.instance_type
         if uses_pool and isinstance(execution_config, RunningHubExecutionAccount):
             if task.workflow_type == "minimax_h3_ref2va":
-                capability = execution_config.h3_capability
-                if capability is None or not capability.is_enabled:
-                    raise ValueError("H3 执行账号能力未启用")
-                effective_ai_app_id = capability.workflow_id
-                effective_instance_type = capability.instance_type
-                if capability.access_password_encrypted:
+                if not workflow_config.is_enabled or not workflow_config.ai_app_id:
+                    raise ValueError("H3 系统工作流未启用或未配置")
+                effective_ai_app_id = workflow_config.ai_app_id
+                encrypted_password = workflow_config.settings.get(
+                    "access_password_encrypted"
+                )
+                if encrypted_password:
                     client.set_access_password(
                         decrypt_secret(
-                            capability.access_password_encrypted,
+                            str(encrypted_password),
                             label="H3 工作流访问密码",
                         )
                     )
             else:
-                effective_ai_app_id = execution_config.digital_human_ai_app_id
-                effective_instance_type = "default"
+                if not workflow_config.is_enabled or not workflow_config.ai_app_id:
+                    raise ValueError("系统工作流未启用或未配置")
+                effective_ai_app_id = workflow_config.ai_app_id
         else:
             effective_ai_app_id = workflow_config.ai_app_id
         # RunningHubClient is generic.  The workflow config determines only

@@ -202,3 +202,35 @@ def test_active_admin_without_user_management_h3_grant_is_rejected() -> None:
 
         with pytest.raises(H3PoolValidationError, match="尚未开通 H3"):
             h3_execution_account_summary(db, user)
+
+
+def test_active_normal_user_can_use_only_assigned_h3_accounts() -> None:
+    with SessionLocal() as db:
+        user = _user("ly1-style-h3-user")
+        user.is_admin = False
+        allowed = _account("normal-h3-key", "分配给普通用户")
+        forbidden = _account("other-h3-key", "未分配给普通用户")
+        db.add_all([user, allowed, forbidden])
+        db.flush()
+        db.add(RunningHubPoolMembership(execution_account=allowed, admin_user=user))
+        for account, workflow_id in (
+            (allowed, "normal-h3-workflow"),
+            (forbidden, "other-h3-workflow"),
+        ):
+            db.add(
+                configure_h3_capability(
+                    account,
+                    workflow_id=workflow_id,
+                    instance_type="plus",
+                    max_concurrent_tasks=2,
+                    is_enabled=True,
+                )
+            )
+        db.commit()
+
+        summary = h3_execution_account_summary(db, user)
+
+        assert [account["label"] for account in summary["accounts"]] == [
+            "分配给普通用户"
+        ]
+        assert summary["default_selected_account_ids"] == [allowed.id]

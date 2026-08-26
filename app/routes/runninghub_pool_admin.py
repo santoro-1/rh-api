@@ -14,7 +14,12 @@ from app.models import RunningHubDualPoolGrant, User
 from app.routes.dependencies import get_page_admin
 from app.services.csrf import require_csrf
 from app.services.logging_config import log_event
-from app.services.h3_pool import H3PoolValidationError, configure_h3_capability
+from app.services.security import encrypt_secret
+from app.services.workflow_configs import (
+    get_system_workflow_config,
+    save_system_workflow_config,
+)
+from app.workflows.registry import get_workflow, list_workflows
 from app.services.runninghub_pool import (
     DuplicateRunningHubCredentialError,
     RunningHubPoolValidationError,
@@ -44,27 +49,89 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/runninghub-pool", tags=["runninghub-pool-admin"])
 
 
+@router.get("/workflows")
+def workflow_config_page(
+    request: Request,
+    current_user: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    workflows = list_workflows()
+    configs = {
+        workflow.key: get_system_workflow_config(db, workflow.key)
+        for workflow in workflows
+    }
+    return templates.TemplateResponse(
+        request,
+        "admin_workflow_configs.html",
+        {
+            "workflows": workflows,
+            "configs": configs,
+            "current_user": current_user,
+        },
+    )
+
+
+@router.post("/workflows/{workflow_key}")
+def update_workflow_config(
+    workflow_key: str,
+    ai_app_id: str = Form(""),
+    instance_type: str = Form("plus"),
+    default_prompt: str = Form(""),
+    is_enabled: bool = Form(False),
+    access_password: str = Form(""),
+    clear_access_password: bool = Form(False),
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        workflow = get_workflow(workflow_key)
+        existing = get_system_workflow_config(db, workflow_key)
+        settings = dict(existing.settings)
+        if clear_access_password:
+            settings.pop("access_password_encrypted", None)
+        elif access_password.strip():
+            if len(access_password) > 500:
+                raise ValueError("工作流访问密码不能超过 500 个字符")
+            settings["access_password_encrypted"] = encrypt_secret(
+                access_password.strip()
+            )
+        save_system_workflow_config(
+            db,
+            workflow_key,
+            ai_app_id=ai_app_id,
+            instance_type=instance_type,
+            default_prompt=default_prompt,
+            is_enabled=is_enabled,
+            settings=settings,
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        logger,
+        "runninghub_workflow.updated",
+        "管理员更新系统 RunningHub 工作流配置",
+        operator_user_id=current_user.id,
+        workflow_key=workflow.key,
+        has_access_password=bool(settings.get("access_password_encrypted")),
+    )
+    return RedirectResponse(
+        f"/admin/runninghub-pool/workflows?updated={workflow_key}",
+        status_code=303,
+    )
+
+
 @router.get("")
 def runninghub_pool_page(
     request: Request,
     current_user: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
 ):
-    administrators = db.scalars(
-        select(User)
-        .outerjoin(RunningHubDualPoolGrant)
-        .where(
-            User.is_active.is_(True),
-            (User.is_admin.is_(True))
-            | (
-                RunningHubDualPoolGrant.is_enabled.is_(True)
-                & RunningHubDualPoolGrant.allow_non_admin.is_(True)
-            ),
-        )
-        .order_by(User.id)
-    ).all()
     runtime_control = dual_pool_runtime_control(db)
     accounts = execution_accounts_for_admin_page(db)
+    digital_human_config = get_system_workflow_config(db, "digital_human")
     return templates.TemplateResponse(
         request,
         "admin_runninghub_pool.html",
@@ -74,9 +141,9 @@ def runninghub_pool_page(
                 account.id: balance_summary(db, account.credential_fingerprint)
                 for account in accounts
             },
-            "administrators": administrators,
             "current_user": current_user,
             "default_base_url": get_settings().runninghub_base_url,
+            "digital_human_workflow_id": digital_human_config.ai_app_id,
             "dual_pool_enabled": dual_pool_runtime_enabled(db),
             "dual_pool_control_saved": runtime_control is not None,
         },
@@ -125,17 +192,13 @@ def create_runninghub_pool_account(
     digital_human_ai_app_id: str = Form(...),
     max_concurrent_tasks: int = Form(5),
     is_enabled: bool = Form(False),
-    h3_workflow_id: str = Form(""),
-    h3_instance_type: str = Form("plus"),
-    h3_max_concurrent_tasks: int = Form(3),
-    h3_safe_note: str = Form(""),
-    h3_access_password: str = Form(""),
-    h3_enabled: bool = Form(False),
+    user_ids: list[int] | None = Form(None),
     admin_user_ids: list[int] | None = Form(None),
     csrf_ok: None = Depends(require_csrf),
     current_user: User = Depends(get_page_admin),
     db: Session = Depends(get_db),
 ):
+    member_user_ids = user_ids if user_ids is not None else (admin_user_ids or [])
     try:
         account = create_execution_account(
             db,
@@ -145,21 +208,11 @@ def create_runninghub_pool_account(
             digital_human_ai_app_id=digital_human_ai_app_id,
             max_concurrent_tasks=max_concurrent_tasks,
             is_enabled=is_enabled,
-            admin_user_ids=admin_user_ids or [],
+            user_ids=member_user_ids,
         )
-        capability = configure_h3_capability(
-            account,
-            workflow_id=h3_workflow_id,
-            instance_type=h3_instance_type,
-            max_concurrent_tasks=h3_max_concurrent_tasks,
-            safe_note=h3_safe_note,
-            access_password=h3_access_password,
-            is_enabled=h3_enabled,
-        )
-        db.add(capability)
         db.commit()
         db.refresh(account)
-    except (RunningHubPoolValidationError, H3PoolValidationError, IntegrityError) as exc:
+    except (RunningHubPoolValidationError, IntegrityError) as exc:
         db.rollback()
         raise _pool_error(exc) from exc
     log_event(
@@ -171,9 +224,7 @@ def create_runninghub_pool_account(
         execution_account_label=account.label,
         max_concurrent_tasks=account.max_concurrent_tasks,
         is_enabled=account.is_enabled,
-        h3_enabled=capability.is_enabled,
-        h3_has_access_password=bool(capability.access_password_encrypted),
-        admin_user_ids=sorted(admin_user_ids or []),
+        user_ids=sorted(member_user_ids),
     )
     return RedirectResponse("/admin/runninghub-pool?created=1", status_code=303)
 
@@ -187,13 +238,7 @@ def update_runninghub_pool_account(
     digital_human_ai_app_id: str = Form(...),
     max_concurrent_tasks: int = Form(5),
     is_enabled: bool = Form(False),
-    h3_workflow_id: str = Form(""),
-    h3_instance_type: str = Form("plus"),
-    h3_max_concurrent_tasks: int = Form(3),
-    h3_safe_note: str = Form(""),
-    h3_access_password: str = Form(""),
-    h3_clear_access_password: bool = Form(False),
-    h3_enabled: bool = Form(False),
+    user_ids: list[int] | None = Form(None),
     admin_user_ids: list[int] | None = Form(None),
     csrf_ok: None = Depends(require_csrf),
     current_user: User = Depends(get_page_admin),
@@ -202,6 +247,14 @@ def update_runninghub_pool_account(
     account = execution_account_for_admin_page(db, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="RunningHub 执行账号不存在")
+    if user_ids is not None:
+        member_user_ids = user_ids
+    elif admin_user_ids is not None:
+        member_user_ids = admin_user_ids
+    else:
+        member_user_ids = [
+            membership.admin_user_id for membership in account.pool_memberships
+        ]
     try:
         changed_fields = update_execution_account(
             db,
@@ -212,50 +265,10 @@ def update_runninghub_pool_account(
             digital_human_ai_app_id=digital_human_ai_app_id,
             max_concurrent_tasks=max_concurrent_tasks,
             is_enabled=is_enabled,
-            admin_user_ids=admin_user_ids or [],
+            user_ids=member_user_ids,
         )
-        password_update: str | None
-        if h3_clear_access_password:
-            password_update = ""
-        elif h3_access_password.strip():
-            password_update = h3_access_password
-        else:
-            password_update = None
-        previous_capability = account.h3_capability
-        previous_h3 = (
-            {
-                "workflow_id": previous_capability.workflow_id,
-                "instance_type": previous_capability.instance_type,
-                "max_concurrent_tasks": previous_capability.max_concurrent_tasks,
-                "safe_note": previous_capability.safe_note,
-                "is_enabled": previous_capability.is_enabled,
-            }
-            if previous_capability is not None
-            else None
-        )
-        capability = configure_h3_capability(
-            account,
-            workflow_id=h3_workflow_id,
-            instance_type=h3_instance_type,
-            max_concurrent_tasks=h3_max_concurrent_tasks,
-            safe_note=h3_safe_note,
-            access_password=password_update,
-            is_enabled=h3_enabled,
-        )
-        db.add(capability)
-        current_h3 = {
-            "workflow_id": capability.workflow_id,
-            "instance_type": capability.instance_type,
-            "max_concurrent_tasks": capability.max_concurrent_tasks,
-            "safe_note": capability.safe_note,
-            "is_enabled": capability.is_enabled,
-        }
-        if previous_h3 != current_h3:
-            changed_fields.add("h3_capability")
-        if password_update is not None:
-            changed_fields.add("h3_access_password")
         db.commit()
-    except (RunningHubPoolValidationError, H3PoolValidationError, IntegrityError) as exc:
+    except (RunningHubPoolValidationError, IntegrityError) as exc:
         db.rollback()
         raise _pool_error(exc) from exc
     log_event(
@@ -267,9 +280,7 @@ def update_runninghub_pool_account(
         execution_account_label=account.label,
         max_concurrent_tasks=account.max_concurrent_tasks,
         is_enabled=account.is_enabled,
-        h3_enabled=capability.is_enabled,
-        h3_has_access_password=bool(capability.access_password_encrypted),
-        admin_user_ids=sorted(admin_user_ids or []),
+        user_ids=sorted(member_user_ids),
         changed_fields=sorted(changed_fields),
     )
     return RedirectResponse("/admin/runninghub-pool?updated=1", status_code=303)

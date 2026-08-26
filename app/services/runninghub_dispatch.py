@@ -16,7 +16,6 @@ from app.models import (
     RunningHubExecutionAccount,
     TaskStatus,
 )
-from app.services.h3_pool import h3_capability_ready
 from app.services.runninghub_pool import (
     backfill_runninghub_config_fingerprints,
     credential_active_count_subquery,
@@ -80,10 +79,9 @@ def task_account_limit(
     account: RunningHubExecutionAccount,
 ) -> int | None:
     if task.workflow_type == "minimax_h3_ref2va":
-        if not h3_capability_ready(account):
+        if not execution_account_configuration_ready(account):
             return None
-        assert account.h3_capability is not None
-        return max(int(account.h3_capability.max_concurrent_tasks), 1)
+        return max(int(account.max_concurrent_tasks), 1)
     if not execution_account_configuration_ready(account):
         return None
     return max(int(account.max_concurrent_tasks), 1)

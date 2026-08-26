@@ -16,10 +16,10 @@ from app.models import (
     GenerationTaskAttempt,
     GenerationTaskEnhancement,
     RunningHubConfig,
-    RunningHubDualPoolGrant,
     RunningHubExecutionAccount,
     RunningHubPoolMembership,
     SeedVR2ExecutionAccount,
+    SystemWorkflowConfig,
     TaskStatus,
     User,
 )
@@ -154,28 +154,28 @@ def _clean_account_fields(
     return clean_label, clean_url, clean_app_id, max_concurrent_tasks
 
 
-def _validated_admin_ids(db: Session, admin_user_ids: list[int]) -> set[int]:
-    requested = {int(user_id) for user_id in admin_user_ids}
+def _validated_member_ids(db: Session, user_ids: list[int]) -> set[int]:
+    """Validate website users assigned to one real RunningHub account.
+
+    The persisted membership column keeps its historical ``admin_user_id`` name
+    for upgrade compatibility, but membership is intentionally available to any
+    active website user. H3 access remains an independent user-level switch.
+    """
+
+    requested = {int(user_id) for user_id in user_ids}
     if not requested:
-        raise RunningHubPoolValidationError("至少选择一个可使用此执行账号的用户")
+        return set()
     valid = set(
         db.scalars(
-            select(User.id)
-            .outerjoin(RunningHubDualPoolGrant)
-            .where(
+            select(User.id).where(
                 User.id.in_(requested),
                 User.is_active.is_(True),
-                (User.is_admin.is_(True))
-                | (
-                    RunningHubDualPoolGrant.is_enabled.is_(True)
-                    & RunningHubDualPoolGrant.allow_non_admin.is_(True)
-                ),
             )
         ).all()
     )
     if valid != requested:
         raise RunningHubPoolValidationError(
-            "资源池成员必须全部是管理员账号，或具有受控双池授权"
+            "资源池成员必须全部是已启用的网站账号"
         )
     return valid
 
@@ -232,7 +232,7 @@ def _ensure_unique_pool_fingerprint(
 def _sync_memberships(
     db: Session,
     account: RunningHubExecutionAccount,
-    admin_user_ids: set[int],
+    user_ids: set[int],
 ) -> bool:
     memberships = db.scalars(
         select(RunningHubPoolMembership).where(
@@ -240,15 +240,15 @@ def _sync_memberships(
         )
     ).all()
     existing_ids = {membership.admin_user_id for membership in memberships}
-    if existing_ids == admin_user_ids:
+    if existing_ids == user_ids:
         return False
     for membership in memberships:
-        if membership.admin_user_id not in admin_user_ids:
+        if membership.admin_user_id not in user_ids:
             db.delete(membership)
-    for admin_user_id in sorted(admin_user_ids - existing_ids):
+    for user_id in sorted(user_ids - existing_ids):
         db.add(
             RunningHubPoolMembership(
-                admin_user_id=admin_user_id,
+                admin_user_id=user_id,
                 execution_account=account,
             )
         )
@@ -264,7 +264,8 @@ def create_execution_account(
     digital_human_ai_app_id: str,
     max_concurrent_tasks: int,
     is_enabled: bool,
-    admin_user_ids: list[int],
+    user_ids: list[int] | None = None,
+    admin_user_ids: list[int] | None = None,
 ) -> RunningHubExecutionAccount:
     clean_key = api_key.strip()
     if not clean_key or len(clean_key) > 4096:
@@ -277,7 +278,11 @@ def create_execution_account(
         digital_human_ai_app_id=digital_human_ai_app_id,
         max_concurrent_tasks=max_concurrent_tasks,
     )
-    member_ids = _validated_admin_ids(db, admin_user_ids)
+    # ``admin_user_ids`` is accepted while older code-update packages or an
+    # already-open admin page are still posting the historical field name.
+    member_ids = _validated_member_ids(
+        db, user_ids if user_ids is not None else (admin_user_ids or [])
+    )
     fingerprint = secret_fingerprint(clean_key)
     _ensure_unique_pool_fingerprint(db, fingerprint)
     backfill_runninghub_config_fingerprints(db)
@@ -293,6 +298,25 @@ def create_execution_account(
     )
     db.add(account)
     db.flush()
+    if db.scalar(
+        select(SystemWorkflowConfig.id).where(
+            SystemWorkflowConfig.workflow_key == "digital_human"
+        )
+    ) is None:
+        # Compatibility for a fresh database or an older caller that creates
+        # the first execution account before the workflow admin page is saved.
+        db.add(
+            SystemWorkflowConfig(
+                workflow_key="digital_human",
+                ai_app_id=clean_app_id,
+                instance_type="plus",
+                default_prompt=(
+                    "人物自然地说话，表情自然，动作自然，镜头保持稳定。"
+                ),
+                is_enabled=True,
+                settings_json="{}",
+            )
+        )
     _sync_memberships(db, account, member_ids)
     db.flush()
     return account
@@ -324,7 +348,8 @@ def update_execution_account(
     digital_human_ai_app_id: str,
     max_concurrent_tasks: int,
     is_enabled: bool,
-    admin_user_ids: list[int],
+    user_ids: list[int] | None = None,
+    admin_user_ids: list[int] | None = None,
 ) -> set[str]:
     clean_label, clean_url, clean_app_id, concurrency = _clean_account_fields(
         label=label,
@@ -332,7 +357,9 @@ def update_execution_account(
         digital_human_ai_app_id=digital_human_ai_app_id,
         max_concurrent_tasks=max_concurrent_tasks,
     )
-    member_ids = _validated_admin_ids(db, admin_user_ids)
+    member_ids = _validated_member_ids(
+        db, user_ids if user_ids is not None else (admin_user_ids or [])
+    )
     changed_fields: set[str] = set()
     clean_key = api_key.strip()
     if clean_key:
@@ -366,7 +393,7 @@ def update_execution_account(
             setattr(account, field, value)
             changed_fields.add(field)
     if _sync_memberships(db, account, member_ids):
-        changed_fields.add("admin_user_ids")
+        changed_fields.add("user_ids")
     backfill_runninghub_config_fingerprints(db)
     db.flush()
     return changed_fields
@@ -402,6 +429,38 @@ def execution_accounts_for_admin_page(
             .order_by(RunningHubExecutionAccount.id)
         ).all()
     )
+
+
+def sync_user_execution_account_memberships(
+    db: Session, user_id: int, execution_account_ids: list[int]
+) -> None:
+    requested = {int(account_id) for account_id in execution_account_ids}
+    if requested:
+        existing_account_ids = set(
+            db.scalars(
+                select(RunningHubExecutionAccount.id).where(
+                    RunningHubExecutionAccount.id.in_(requested)
+                )
+            ).all()
+        )
+        if existing_account_ids != requested:
+            raise RunningHubPoolValidationError("选择中包含不存在的 RunningHub 账号")
+    memberships = db.scalars(
+        select(RunningHubPoolMembership).where(
+            RunningHubPoolMembership.admin_user_id == user_id
+        )
+    ).all()
+    existing = {item.execution_account_id for item in memberships}
+    for membership in memberships:
+        if membership.execution_account_id not in requested:
+            db.delete(membership)
+    for account_id in sorted(requested - existing):
+        db.add(
+            RunningHubPoolMembership(
+                admin_user_id=user_id,
+                execution_account_id=account_id,
+            )
+        )
 
 
 def _as_utc(value: datetime) -> datetime:

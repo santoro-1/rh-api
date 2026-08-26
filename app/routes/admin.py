@@ -15,6 +15,7 @@ from app.models import (
     GenerationTask,
     MiniMaxVoiceAsset,
     RunningHubConfig,
+    RunningHubPoolMembership,
     TaskStatus,
     User,
     VoiceAssetStatus,
@@ -40,6 +41,10 @@ from app.services.speech.minimax import MiniMaxAPIError, MiniMaxClient
 from app.services.speech.system_voices import (
     group_system_voice_assets,
     sync_system_voices,
+)
+from app.services.runninghub_pool import (
+    execution_accounts_for_admin_page,
+    sync_user_execution_account_memberships,
 )
 from app.services.storage import remove_directory
 from app.services.workflow_configs import (
@@ -287,6 +292,9 @@ def users_page(
             selectinload(User.workflow_configs),
             selectinload(User.minimax_config),
             selectinload(User.ark_config),
+            selectinload(User.runninghub_pool_memberships).selectinload(
+                RunningHubPoolMembership.execution_account
+            ),
         )
         .order_by(User.id)
     ).all()
@@ -299,7 +307,9 @@ def users_page(
 
 @router.get("/users/new")
 def new_user_page(
-    request: Request, current_user: User = Depends(get_page_admin)
+    request: Request,
+    current_user: User = Depends(get_page_admin),
+    db: Session = Depends(get_db),
 ):
     settings = get_settings()
     return templates.TemplateResponse(
@@ -342,6 +352,8 @@ def new_user_page(
             "custom_minimax_voices": [],
             "system_voice_count": 0,
             "hidden_system_voice_count": 0,
+            "runninghub_execution_accounts": execution_accounts_for_admin_page(db),
+            "runninghub_execution_account_ids": [],
         },
     )
 
@@ -354,6 +366,7 @@ def create_user(
     is_admin: bool = Form(False),
     is_active: bool = Form(False),
     h3_access_enabled: bool = Form(False),
+    runninghub_execution_account_ids: list[int] | None = Form(None),
     api_key: str = Form(""),
     base_url: str = Form(...),
     ai_app_id: str = Form(...),
@@ -395,6 +408,10 @@ def create_user(
             h3_access_enabled=h3_access_enabled,
         )
         db.add(user)
+        db.flush()
+        sync_user_execution_account_memberships(
+            db, user.id, runninghub_execution_account_ids or []
+        )
         _save_config(
             db,
             user,
@@ -444,6 +461,7 @@ def edit_user_page(
             selectinload(User.minimax_config),
             selectinload(User.minimax_voices),
             selectinload(User.ark_config),
+            selectinload(User.runninghub_pool_memberships),
         )
         .where(User.id == user_id)
     )
@@ -479,6 +497,11 @@ def edit_user_page(
                 "max_retries": 2,
             },
             **_voice_management_context(user),
+            "runninghub_execution_accounts": execution_accounts_for_admin_page(db),
+            "runninghub_execution_account_ids": [
+                membership.execution_account_id
+                for membership in user.runninghub_pool_memberships
+            ],
         },
     )
 
@@ -491,6 +514,7 @@ def update_user(
     is_admin: bool = Form(False),
     is_active: bool = Form(False),
     h3_access_enabled: bool = Form(False),
+    runninghub_execution_account_ids: list[int] | None = Form(None),
     api_key: str = Form(""),
     base_url: str = Form(...),
     ai_app_id: str = Form(...),
@@ -526,6 +550,7 @@ def update_user(
             selectinload(User.minimax_config),
             selectinload(User.minimax_voices),
             selectinload(User.ark_config),
+            selectinload(User.runninghub_pool_memberships),
         )
         .where(User.id == user_id)
     )
@@ -540,6 +565,9 @@ def update_user(
         user.is_admin = is_admin
         user.is_active = is_active
         user.h3_access_enabled = h3_access_enabled
+        sync_user_execution_account_memberships(
+            db, user.id, runninghub_execution_account_ids or []
+        )
         if password:
             user.password_hash = hash_password(password)
         _save_config(

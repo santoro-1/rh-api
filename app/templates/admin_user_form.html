@@ -11,52 +11,26 @@
   <div class="check-row"><label><input type="checkbox" name="is_admin" {% if user and user.is_admin %}checked{% endif %}> 管理员</label><label><input type="checkbox" name="is_active" {% if not user or user.is_active %}checked{% endif %}> 启用账号</label><label><input type="checkbox" name="h3_access_enabled" {% if user and user.h3_access_enabled %}checked{% endif %}> 开通 MiniMax H3 多参考</label></div>
   <p class="field-help">H3 是独立的用户权限，不受数字人双池运行模式开关影响。实际 RunningHub Key、Workflow ID 和并发仍由资源池管理员统一配置。</p>
   <details class="admin-config-section" open>
-  <summary>RunningHub 配置</summary>
+  <summary>可使用的 RunningHub 账号</summary>
   <div class="admin-config-body stack-form">
-  <label>RunningHub API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="{{ '已加密保存，留空不修改' if editing else '可稍后配置' }}"></label>
-  <div class="two-columns">
-    <label>Base URL<input name="base_url" value="{{ config.base_url }}" required></label>
-    <label>AI App ID<input name="ai_app_id" value="{{ config.ai_app_id }}" required></label>
-  </div>
-  <div class="two-columns">
-    <label>数字人运行实例
-      <select name="instance_type">
-        <option value="default" {% if config.instance_type == 'default' %}selected{% endif %}>default（24G）</option>
-        <option value="plus" {% if config.instance_type == 'plus' %}selected{% endif %}>plus（48G）</option>
-      </select>
-    </label>
-    <label>最大同时任务数<input name="max_concurrent_tasks" type="number" min="1" max="20" value="{{ config.max_concurrent_tasks }}" required></label>
-  </div>
-  <p class="field-help">只影响保存后新创建的数字人任务；任务启动时会冻结该配置。SeedVR2 放大仍固定使用 Plus 48G。</p>
-  <label>默认提示词<textarea name="default_prompt" rows="4">{{ config.default_prompt }}</textarea></label>
+    <p class="field-help">这里只分配该登录用户可以调用哪些执行账号。Key、并发和工作流配置分别在资源池与工作流配置页面维护。</p>
+    <div class="pool-member-list">
+      {% for account in runninghub_execution_accounts %}
+        <label><input type="checkbox" name="runninghub_execution_account_ids" value="{{ account.id }}" {% if account.id in runninghub_execution_account_ids %}checked{% endif %}> {{ account.label }}{% if not account.is_enabled %}（已停用）{% endif %}</label>
+      {% else %}<span class="muted">尚未配置 RunningHub 执行账号。</span>{% endfor %}
+    </div>
   </div>
   </details>
-  <details class="admin-config-section">
-  <summary>视频对口型工作流</summary>
-  <div class="admin-config-body stack-form">
-  <label class="check-row"><span><input type="checkbox" name="ltx_enabled" {% if ltx_config.is_enabled %}checked{% endif %}> 为该账号启用</span></label>
-  <div class="two-columns">
-    <label>Workflow ID<input name="ltx_workflow_id" value="{{ ltx_config.ai_app_id }}" required></label>
-    <label>实例类型
-      <select name="ltx_instance_type">
-        <option value="plus" {% if ltx_config.instance_type == 'plus' %}selected{% endif %}>plus（48G，默认）</option>
-        <option value="default" {% if ltx_config.instance_type == 'default' %}selected{% endif %}>default（24G）</option>
-      </select>
-    </label>
-  </div>
-  <label>工作流访问密码
-    <input name="ltx_access_password" type="password" autocomplete="new-password" maxlength="500" placeholder="{{ '已加密保存，留空不修改' if ltx_has_access_password else '仅发布时开启加密访问需要填写' }}">
-    <span class="field-help">RunningHub 发布设置开启“加密访问”时填写；仅加密保存在服务端，不会显示原密码。</span>
-  </label>
-  {% if ltx_has_access_password %}
-    <label class="check-row"><span><input type="checkbox" name="ltx_clear_access_password"> 清除已保存的工作流访问密码</span></label>
-  {% endif %}
-  <label>视频对口型默认正向提示词
-    <textarea name="ltx_default_prompt" rows="5">{{ ltx_config.default_prompt }}</textarea>
-    <span class="field-help">填写人物、语言和与音频一致的台词模板，不需要动作或画面描述。</span>
-  </label>
-  </div>
-  </details>
+  <input name="api_key" type="hidden" value="">
+  <input name="base_url" type="hidden" value="{{ config.base_url }}">
+  <input name="ai_app_id" type="hidden" value="{{ config.ai_app_id }}">
+  <input name="instance_type" type="hidden" value="{{ config.instance_type }}">
+  <input name="default_prompt" type="hidden" value="{{ config.default_prompt }}">
+  <input name="max_concurrent_tasks" type="hidden" value="{{ config.max_concurrent_tasks }}">
+  <input name="ltx_workflow_id" type="hidden" value="{{ ltx_config.ai_app_id }}">
+  <input name="ltx_instance_type" type="hidden" value="{{ ltx_config.instance_type }}">
+  <input name="ltx_default_prompt" type="hidden" value="{{ ltx_config.default_prompt }}">
+  {% if ltx_config.is_enabled %}<input name="ltx_enabled" type="hidden" value="true">{% endif %}
   <details class="admin-config-section" open>
   <summary>MiniMax 语音账号</summary>
   <div class="admin-config-body stack-form">

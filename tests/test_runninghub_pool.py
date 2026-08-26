@@ -22,6 +22,7 @@ from app.models import (
     MiniMaxVoiceAsset,
     RunningHubExecutionAccount,
     RunningHubCredentialBalance,
+    SystemWorkflowConfig,
     SeedVR2ExecutionAccount,
     TaskStatus,
     User,
@@ -91,110 +92,104 @@ def _seedvr2_pool_form(
     return payload
 
 
-def _with_h3(
-    payload: dict[str, object],
-    *,
-    workflow_id: str = "h3-workflow-id",
-    access_password: str | None = None,
-    enabled: bool = True,
-) -> dict[str, object]:
-    updated = dict(payload)
-    updated.update(
-        {
-            "h3_workflow_id": workflow_id,
-            "h3_instance_type": "plus",
-            "h3_max_concurrent_tasks": "3",
-            "h3_safe_note": "仅运行审核后的 Ref2VA 模板",
-        }
-    )
-    if access_password is not None:
-        updated["h3_access_password"] = access_password
-    if enabled:
-        updated["h3_enabled"] = "true"
-    return updated
-
-
-def test_admin_manages_h3_capability_password_without_exposing_it(client, caplog):
+def test_admin_manages_shared_h3_workflow_password_without_exposing_it(
+    client, caplog
+):
     administrator = create_user("h3-pool-admin", is_admin=True)
     login(client, administrator.username)
     password = "h3-private-workflow-password"
 
     with caplog.at_level(logging.INFO):
         created = client.post(
-            "/admin/runninghub-pool/accounts",
-            data=_with_h3(
-                _pool_form([administrator.id], api_key="h3-pool-api-key"),
-                access_password=password,
-            ),
+            "/admin/runninghub-pool/workflows/minimax_h3_ref2va",
+            data={
+                "ai_app_id": "h3-workflow-id",
+                "instance_type": "plus",
+                "default_prompt": "由 H3 PromptProfile 自动编译",
+                "access_password": password,
+                "is_enabled": "true",
+            },
             follow_redirects=False,
         )
     assert created.status_code == 303
     assert password not in caplog.text
 
     with SessionLocal() as db:
-        account = db.query(RunningHubExecutionAccount).one()
-        account_id = account.id
-        capability = account.h3_capability
-        assert capability is not None
-        original_ciphertext = capability.access_password_encrypted
-        assert capability.workflow_id == "h3-workflow-id"
-        assert capability.instance_type == "plus"
-        assert capability.max_concurrent_tasks == 3
-        assert capability.is_enabled is True
+        config = db.query(SystemWorkflowConfig).filter_by(
+            workflow_key="minimax_h3_ref2va"
+        ).one()
+        settings = json.loads(config.settings_json or "{}")
+        original_ciphertext = settings["access_password_encrypted"]
+        assert config.ai_app_id == "h3-workflow-id"
+        assert config.instance_type == "plus"
+        assert config.is_enabled is True
         assert original_ciphertext != password
         assert decrypt_secret(original_ciphertext) == password
 
-    page = client.get("/admin/runninghub-pool")
+    page = client.get("/admin/runninghub-pool/workflows")
     assert page.status_code == 200
-    assert "访问密码：已加密配置" in page.text
+    assert "已加密保存，留空不修改" in page.text
     assert password not in page.text
     assert original_ciphertext not in page.text
 
     preserved = client.post(
-        f"/admin/runninghub-pool/accounts/{account_id}",
-        data=_with_h3(
-            _pool_form([administrator.id], api_key=""),
-            access_password=None,
-        ),
+        "/admin/runninghub-pool/workflows/minimax_h3_ref2va",
+        data={
+            "ai_app_id": "h3-workflow-id",
+            "instance_type": "plus",
+            "default_prompt": "由 H3 PromptProfile 自动编译",
+            "is_enabled": "true",
+        },
         follow_redirects=False,
     )
     assert preserved.status_code == 303
     with SessionLocal() as db:
-        capability = db.get(RunningHubExecutionAccount, account_id).h3_capability
-        assert capability.access_password_encrypted == original_ciphertext
+        config = db.query(SystemWorkflowConfig).filter_by(
+            workflow_key="minimax_h3_ref2va"
+        ).one()
+        assert json.loads(config.settings_json or "{}")[
+            "access_password_encrypted"
+        ] == original_ciphertext
 
-    clear_payload = _with_h3(
-        _pool_form([administrator.id], api_key=""),
-        access_password=None,
-    )
-    clear_payload["h3_clear_access_password"] = "true"
     cleared = client.post(
-        f"/admin/runninghub-pool/accounts/{account_id}",
-        data=clear_payload,
+        "/admin/runninghub-pool/workflows/minimax_h3_ref2va",
+        data={
+            "ai_app_id": "h3-workflow-id",
+            "instance_type": "plus",
+            "default_prompt": "由 H3 PromptProfile 自动编译",
+            "clear_access_password": "true",
+            "is_enabled": "true",
+        },
         follow_redirects=False,
     )
     assert cleared.status_code == 303
     with SessionLocal() as db:
-        capability = db.get(RunningHubExecutionAccount, account_id).h3_capability
-        assert capability.access_password_encrypted is None
+        config = db.query(SystemWorkflowConfig).filter_by(
+            workflow_key="minimax_h3_ref2va"
+        ).one()
+        assert "access_password_encrypted" not in json.loads(
+            config.settings_json or "{}"
+        )
 
 
-def test_h3_capability_validation_rolls_back_new_pool_account(client):
+def test_shared_h3_workflow_requires_workflow_id(client):
     administrator = create_user("invalid-h3-pool-admin", is_admin=True)
     login(client, administrator.username)
     response = client.post(
-        "/admin/runninghub-pool/accounts",
-        data=_with_h3(
-            _pool_form([administrator.id], api_key="invalid-h3-pool-key"),
-            workflow_id="",
-        ),
+        "/admin/runninghub-pool/workflows/minimax_h3_ref2va",
+        data={
+            "ai_app_id": "",
+            "instance_type": "plus",
+            "default_prompt": "由 H3 PromptProfile 自动编译",
+            "is_enabled": "true",
+        },
         follow_redirects=False,
     )
 
     assert response.status_code == 400
-    assert "必须配置 workflowId" in response.text
+    assert "不能为空" in response.text
     with SessionLocal() as db:
-        assert db.query(RunningHubExecutionAccount).count() == 0
+        assert db.query(SystemWorkflowConfig).count() == 0
 
 
 def test_admin_refreshes_pool_account_rh_coins_without_exposing_key(
@@ -441,7 +436,7 @@ def test_duplicate_pool_key_is_rejected_without_creating_fake_capacity(client):
         assert db.query(RunningHubExecutionAccount).count() == 1
 
 
-def test_pool_update_preserves_blank_key_and_only_accepts_admin_members(client):
+def test_pool_update_preserves_blank_key_and_accepts_active_website_users(client):
     administrator = create_user("update-pool-admin", is_admin=True)
     peer = create_user("update-pool-peer", is_admin=True)
     normal = create_user("update-pool-normal")
@@ -480,19 +475,18 @@ def test_pool_update_preserves_blank_key_and_only_accepts_admin_members(client):
             peer.id
         }
 
-    rejected = client.post(
+    reassigned = client.post(
         f"/admin/runninghub-pool/accounts/{account_id}",
-        data=_pool_form([normal.id], label="不得保存", api_key=""),
+        data=_pool_form([normal.id], label="普通用户账号", api_key=""),
         follow_redirects=False,
     )
-    assert rejected.status_code == 400
-    assert "必须全部是管理员" in rejected.text
+    assert reassigned.status_code == 303
     with SessionLocal() as db:
         account = db.get(RunningHubExecutionAccount, account_id)
         assert account is not None
-        assert account.label == "夜间批量账号"
+        assert account.label == "普通用户账号"
         assert {membership.admin_user_id for membership in account.pool_memberships} == {
-            peer.id
+            normal.id
         }
 
 
@@ -707,6 +701,63 @@ def test_pool_admin_page_rejects_non_admin_user(client):
     response = client.get("/admin/runninghub-pool")
 
     assert response.status_code == 403
+
+
+def test_pool_admin_can_assign_an_active_normal_website_user(client):
+    administrator = create_user("pool-member-admin", is_admin=True)
+    normal = create_user("ly1-style-pool-member")
+    inactive = create_user("inactive-pool-member")
+    with SessionLocal() as db:
+        inactive_user = db.get(User, inactive.id)
+        assert inactive_user is not None
+        inactive_user.is_active = False
+        db.commit()
+
+    login(client, administrator.username)
+    created = client.post(
+        "/admin/runninghub-pool/accounts",
+        data={
+            "label": "普通用户可用账号",
+            "api_key": "normal-member-pool-key",
+            "base_url": "https://www.runninghub.cn",
+            "digital_human_ai_app_id": "normal-member-app",
+            "max_concurrent_tasks": "5",
+            "is_enabled": "true",
+        },
+        follow_redirects=False,
+    )
+
+    assert created.status_code == 303
+    with SessionLocal() as db:
+        account = db.query(RunningHubExecutionAccount).filter_by(
+            label="普通用户可用账号"
+        ).one()
+        account_id = account.id
+
+    edit_page = client.get(f"/admin/users/{normal.id}")
+    assert edit_page.status_code == 200
+    assert "普通用户可用账号" in edit_page.text
+    assigned = client.post(
+        f"/admin/users/{normal.id}",
+        data={
+            "username": normal.username,
+            "is_active": "true",
+            "runninghub_execution_account_ids": str(account_id),
+            "base_url": "https://www.runninghub.cn",
+            "ai_app_id": "2062251097452007426",
+            "instance_type": "plus",
+            "default_prompt": "测试提示词",
+            "max_concurrent_tasks": "2",
+        },
+        follow_redirects=False,
+    )
+    assert assigned.status_code == 303
+    with SessionLocal() as db:
+        assigned_user = db.get(User, normal.id)
+        assert [
+            membership.execution_account_id
+            for membership in assigned_user.runninghub_pool_memberships
+        ] == [account_id]
 
 
 def test_admin_selection_is_revalidated_and_saved_as_immutable_batch_snapshot():

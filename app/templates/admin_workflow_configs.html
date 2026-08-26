@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}RunningHub 工作流配置{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><h1>RunningHub 工作流配置</h1><p class="muted">每个工作流独立配置一次，所有 RunningHub Key 共用。这里只保留当前工作流已有字段。</p></div>
+  <a class="button secondary" href="/admin/runninghub-pool">返回执行账号</a>
+</section>
+{% if request.query_params.get("updated") %}<p class="success-notice">工作流配置已更新。</p>{% endif %}
+<section class="pool-account-list">
+{% for workflow in workflows %}
+  {% set config = configs[workflow.key] %}
+  <article class="panel pool-account-card">
+    <div class="pool-account-heading"><div><h2>{{ workflow.display_name }}</h2><p class="muted">{{ workflow.key }}</p></div></div>
+    <form method="post" action="/admin/runninghub-pool/workflows/{{ workflow.key }}" class="stack-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="two-columns">
+        <label>Workflow ID / AI App ID<input name="ai_app_id" required maxlength="100" value="{{ config.ai_app_id }}"></label>
+        <label>实例类型
+          <select name="instance_type"><option value="plus" {% if config.instance_type == 'plus' %}selected{% endif %}>plus（48G）</option><option value="default" {% if config.instance_type == 'default' %}selected{% endif %}>default（24G）</option></select>
+        </label>
+      </div>
+      {% if workflow.submission_type in ['workflow', 'raw-workflow'] %}
+      <label>工作流访问密码<input name="access_password" type="password" autocomplete="new-password" maxlength="500" placeholder="{{ '已加密保存，留空不修改' if config.settings.get('access_password_encrypted') else '未配置' }}"></label>
+      {% if config.settings.get('access_password_encrypted') %}<label class="inline-check"><input type="checkbox" name="clear_access_password"> 清除已保存的工作流访问密码</label>{% endif %}
+      {% endif %}
+      <label>默认提示词<textarea name="default_prompt" rows="5">{{ config.default_prompt }}</textarea></label>
+      <label class="inline-check"><input type="checkbox" name="is_enabled" {% if config.is_enabled %}checked{% endif %}> 启用此工作流</label>
+      <div class="button-row"><button type="submit">保存工作流配置</button></div>
+    </form>
+  </article>
+{% endfor %}
+</section>
+{% endblock %}

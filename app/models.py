@@ -528,6 +528,31 @@ class WorkflowConfig(Base):
     )
 
 
+class SystemWorkflowConfig(Base):
+    """One shared configuration row for one registered RunningHub workflow."""
+
+    __tablename__ = "system_workflow_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_key: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    ai_app_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    instance_type: Mapped[str] = mapped_column(String(20), nullable=False, default="plus")
+    default_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    settings_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "instance_type IN ('default', 'plus')",
+            name="ck_system_workflow_config_instance_type",
+        ),
+    )
+
+
 class RunningHubExecutionAccount(Base):
     """One real RunningHub credential used as an independent capacity pool member."""
 

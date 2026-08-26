@@ -371,10 +371,11 @@ python -m app.workers.task_worker
   默认 300 秒、`CONTENT_ANALYSIS_MAX_SCRIPT_CHARS` 默认 50000。
 
 用户级 RunningHub、MiniMax、豆包 Ark 和工作流 ID 通过管理员页面维护，不写入仓库环境模板。
-RunningHub 资源池中的 H3 能力按真实执行账号独立配置；私有工作流密码留空表示保留，清除必须
-使用显式复选框，管理页面和浏览器 API 只能展示是否已配置。
-H3 产品权限由 `users.h3_access_enabled` 在用户管理页显式控制，不再借用管理员身份或
-`RunningHubDualPoolGrant`。执行账号成员关系只决定已经开通 H3 的用户可选择哪些真实账号。
+RunningHub 配置分为三层：`system_workflow_configs` 按工作流保存一次 Workflow ID / AI App ID、
+实例、默认提示词及加密访问密码；执行账号保存 API Key、并发、状态和余额；用户页保存网站账号
+能使用哪些执行账号。私有工作流密码留空表示保留，清除必须使用显式复选框，浏览器只能看到
+是否已配置。`runninghub_pool_memberships.admin_user_id` 因升级兼容保留历史列名，语义已是网站
+用户 ID。H3 产品权限由 `users.h3_access_enabled` 单独控制。
 
 ## 7. 数据库与迁移
 

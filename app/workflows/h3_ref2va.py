@@ -82,7 +82,7 @@ class H3Ref2VAWorkflow:
     display_name = "MiniMax H3 多参考视频"
     # H3 workflow IDs are account capabilities and must be configured explicitly.
     default_ai_app_id = ""
-    default_prompt = "由 H3 PromptProfile v7 根据每段台词自动编译"
+    default_prompt = "由 H3 PromptProfile 根据每段台词自动编译"
     submission_type = "raw-workflow"
 
     def validate_parameters(

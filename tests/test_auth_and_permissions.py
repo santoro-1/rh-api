@@ -12,6 +12,7 @@ from app.models import (
     GenerationTask,
     MiniMaxConfig,
     TaskStatus,
+    SystemWorkflowConfig,
     User,
     WorkflowConfig,
 )
@@ -326,35 +327,24 @@ def test_admin_cannot_delete_self_or_account_with_active_task(client):
         assert db.get(User, target.id) is not None
 
 
-def test_admin_encrypts_preserves_and_clears_ltx_access_password(client):
+def test_admin_encrypts_preserves_and_clears_shared_ltx_access_password(client):
     create_user("password-admin", is_admin=True)
     login(client, "password-admin")
     create_response = client.post(
-        "/admin/users",
+        "/admin/runninghub-pool/workflows/ltx_lip_sync",
         data={
-            "username": "encrypted-workflow-user",
-            "password": "password123",
-            "is_active": "true",
-            "api_key": "new-test-key",
-            "base_url": "https://www.runninghub.cn",
-            "ai_app_id": "2062251097452007426",
-            "instance_type": "default",
-            "default_prompt": "默认提示词",
-            "max_concurrent_tasks": "1",
-            "ltx_enabled": "true",
-            "ltx_workflow_id": "2080551073030434817",
-            "ltx_instance_type": "plus",
-            "ltx_default_prompt": "对口型提示词",
-            "ltx_access_password": "private-workflow-password",
+            "ai_app_id": "2080551073030434817",
+            "instance_type": "plus",
+            "default_prompt": "对口型提示词",
+            "access_password": "private-workflow-password",
+            "is_enabled": "true",
         },
         follow_redirects=False,
     )
     assert create_response.status_code == 303
 
     with SessionLocal() as db:
-        user = db.query(User).filter_by(username="encrypted-workflow-user").one()
-        config = db.query(WorkflowConfig).filter_by(
-            user_id=user.id,
+        config = db.query(SystemWorkflowConfig).filter_by(
             workflow_key="ltx_lip_sync",
         ).one()
         settings = json.loads(config.settings_json or "{}")
@@ -364,39 +354,27 @@ def test_admin_encrypts_preserves_and_clears_ltx_access_password(client):
             decrypt_secret(encrypted, label="视频对口型工作流访问密码")
             == "private-workflow-password"
         )
-        user_id = user.id
 
-    edit_page = client.get(f"/admin/users/{user_id}")
+    edit_page = client.get("/admin/runninghub-pool/workflows")
     assert edit_page.status_code == 200
     assert "已加密保存，留空不修改" in edit_page.text
     assert "private-workflow-password" not in edit_page.text
-    assert "数字人运行实例" in edit_page.text
-    assert "default（24G）" in edit_page.text
-    assert "plus（48G）" in edit_page.text
-    assert 'name="instance_type" type="hidden"' not in edit_page.text
+    assert "视频对口型" in edit_page.text
 
     common_update = {
-        "username": "encrypted-workflow-user",
-        "is_active": "true",
-        "base_url": "https://www.runninghub.cn",
-        "ai_app_id": "2062251097452007426",
-        "instance_type": "default",
-        "default_prompt": "默认提示词",
-        "max_concurrent_tasks": "1",
-        "ltx_enabled": "true",
-        "ltx_workflow_id": "2080551073030434817",
-        "ltx_instance_type": "plus",
-        "ltx_default_prompt": "对口型提示词",
+        "ai_app_id": "2080551073030434817",
+        "instance_type": "plus",
+        "default_prompt": "对口型提示词",
+        "is_enabled": "true",
     }
     preserve_response = client.post(
-        f"/admin/users/{user_id}",
+        "/admin/runninghub-pool/workflows/ltx_lip_sync",
         data=common_update,
         follow_redirects=False,
     )
     assert preserve_response.status_code == 303
     with SessionLocal() as db:
-        config = db.query(WorkflowConfig).filter_by(
-            user_id=user_id,
+        config = db.query(SystemWorkflowConfig).filter_by(
             workflow_key="ltx_lip_sync",
         ).one()
         assert json.loads(config.settings_json or "{}")[
@@ -404,14 +382,13 @@ def test_admin_encrypts_preserves_and_clears_ltx_access_password(client):
         ] == encrypted
 
     clear_response = client.post(
-        f"/admin/users/{user_id}",
-        data={**common_update, "ltx_clear_access_password": "true"},
+        "/admin/runninghub-pool/workflows/ltx_lip_sync",
+        data={**common_update, "clear_access_password": "true"},
         follow_redirects=False,
     )
     assert clear_response.status_code == 303
     with SessionLocal() as db:
-        config = db.query(WorkflowConfig).filter_by(
-            user_id=user_id,
+        config = db.query(SystemWorkflowConfig).filter_by(
             workflow_key="ltx_lip_sync",
         ).one()
         assert "access_password_encrypted" not in json.loads(

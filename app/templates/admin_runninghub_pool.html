@@ -4,9 +4,9 @@
 <section class="page-heading">
   <div>
     <h1>RunningHub 执行账号资源池</h1>
-    <p class="muted">供新版工作台管理员和明确授权的受控测试账号使用。API Key 只在云端加密保存，页面不会显示或下发其值。</p>
+    <p class="muted">为每个网站账号分配可控制的 RunningHub 执行账号。API Key 只在云端加密保存，页面不会显示或下发其值。</p>
   </div>
-  <div class="button-row"><a class="button secondary" href="/admin/runninghub-pool/seedvr2">SeedVR2 账号池</a><a class="button secondary" href="/admin/users">返回用户管理</a></div>
+  <div class="button-row"><a class="button secondary" href="/admin/runninghub-pool/workflows">工作流配置</a><a class="button secondary" href="/admin/users">返回用户管理</a></div>
 </section>
 
 {% if request.query_params.get("created") == "1" %}<p class="success-notice">执行账号已新增。</p>{% endif %}
@@ -37,47 +37,13 @@
       <label>RunningHub API Key
         <input name="api_key" type="password" required maxlength="4096" autocomplete="new-password" placeholder="仅本次提交到云端加密保存">
       </label>
-      <label>Base URL
-        <input name="base_url" type="url" required maxlength="500" value="{{ default_base_url }}">
-      </label>
-      <label>数字人 AI App ID
-        <input name="digital_human_ai_app_id" required maxlength="100" placeholder="此 Key 可访问的数字人 AI App ID">
-      </label>
+      <input name="base_url" type="hidden" value="{{ default_base_url }}">
+      <input name="digital_human_ai_app_id" type="hidden" value="{{ digital_human_workflow_id }}">
       <label>最大并发
         <input name="max_concurrent_tasks" type="number" min="1" max="5" value="5" required>
       </label>
     </div>
-    <fieldset class="stack-form">
-      <legend>MiniMax H3 能力（可选）</legend>
-      <p class="muted">这里只配置该真实执行账号能否承接 H3，以及对应工作流、实例和并发；登录用户的 H3 开通状态请在“用户管理”中设置。</p>
-      <div class="two-columns">
-        <label>H3 Workflow ID
-          <input name="h3_workflow_id" maxlength="100" placeholder="启用 H3 时必填">
-        </label>
-        <label>H3 实例类型
-          <select name="h3_instance_type"><option value="plus" selected>plus（48G）</option><option value="default">default（24G）</option></select>
-        </label>
-        <label>H3 最大并发
-          <input name="h3_max_concurrent_tasks" type="number" min="1" max="5" value="3" required>
-        </label>
-        <label>H3 工作流访问密码
-          <input name="h3_access_password" type="password" autocomplete="new-password" maxlength="500" placeholder="仅加密工作流需要填写">
-          <span class="field-help">只在服务端加密保存，页面和任务快照均不返回原密码。</span>
-        </label>
-      </div>
-      <label>H3 安全备注
-        <input name="h3_safe_note" maxlength="500" placeholder="例如：仅运行审核后的 Ref2VA 模板">
-      </label>
-      <label class="inline-check"><input type="checkbox" name="h3_enabled"> 允许此执行账号承接 H3 任务</label>
-    </fieldset>
-    <div>
-      <strong>可使用此账号的管理员或双池授权用户</strong>
-      <div class="pool-member-list">
-        {% for administrator in administrators %}
-          <label><input type="checkbox" name="admin_user_ids" value="{{ administrator.id }}" {% if administrator.id == current_user.id %}checked{% endif %}> {{ administrator.username }}{% if not administrator.is_active %}（已停用）{% endif %}</label>
-        {% endfor %}
-      </div>
-    </div>
+    <p class="muted">工作流 ID、密码、实例和默认提示词在“工作流配置”中统一维护；用户分配在“用户管理”中维护。</p>
     <label class="inline-check"><input type="checkbox" name="is_enabled" checked> 全局启用，可供后续新版工作台操作选择</label>
     <div class="button-row"><button type="submit">新增执行账号</button></div>
   </form>
@@ -85,9 +51,7 @@
 
 <section class="pool-account-list">
   {% for account in accounts %}
-    {% set member_ids = account.pool_memberships | map(attribute='admin_user_id') | list %}
     {% set balance = balances.get(account.id) %}
-    {% set h3 = account.h3_capability %}
     <article class="panel pool-account-card">
       <div class="pool-account-heading">
         <div>
@@ -120,47 +84,11 @@
             <input name="api_key" type="password" maxlength="4096" autocomplete="new-password" placeholder="已加密保存，留空不修改">
             <span class="field-help">账号产生任务历史后禁止原地换 Key；应停用旧账号并新建账号。</span>
           </label>
-          <label>Base URL
-            <input name="base_url" type="url" required maxlength="500" value="{{ account.base_url }}">
-          </label>
-          <label>数字人 AI App ID
-            <input name="digital_human_ai_app_id" required maxlength="100" value="{{ account.digital_human_ai_app_id }}">
-          </label>
+          <input name="base_url" type="hidden" value="{{ account.base_url }}">
+          <input name="digital_human_ai_app_id" type="hidden" value="{{ account.digital_human_ai_app_id }}">
           <label>最大并发
             <input name="max_concurrent_tasks" type="number" min="1" max="5" value="{{ account.max_concurrent_tasks }}" required>
           </label>
-        </div>
-        <fieldset class="stack-form">
-          <legend>MiniMax H3 能力</legend>
-          <p class="muted">这里只配置执行能力，不控制用户开通。访问密码：{{ "已加密配置" if h3 and h3.access_password_encrypted else "未配置" }}。留空不会修改已保存密码。</p>
-          <div class="two-columns">
-            <label>H3 Workflow ID
-              <input name="h3_workflow_id" maxlength="100" value="{{ h3.workflow_id if h3 else '' }}" placeholder="启用 H3 时必填">
-            </label>
-            <label>H3 实例类型
-              <select name="h3_instance_type"><option value="plus" {% if not h3 or h3.instance_type == 'plus' %}selected{% endif %}>plus（48G）</option><option value="default" {% if h3 and h3.instance_type == 'default' %}selected{% endif %}>default（24G）</option></select>
-            </label>
-            <label>H3 最大并发
-              <input name="h3_max_concurrent_tasks" type="number" min="1" max="5" value="{{ h3.max_concurrent_tasks if h3 else 3 }}" required>
-            </label>
-            <label>更换 H3 工作流访问密码
-              <input name="h3_access_password" type="password" autocomplete="new-password" maxlength="500" placeholder="{{ '已加密保存，留空不修改' if h3 and h3.access_password_encrypted else '仅加密工作流需要填写' }}">
-              <span class="field-help">只在服务端加密保存，页面和任务快照均不返回原密码。</span>
-            </label>
-          </div>
-          <label>H3 安全备注
-            <input name="h3_safe_note" maxlength="500" value="{{ h3.safe_note if h3 else '' }}">
-          </label>
-          {% if h3 and h3.access_password_encrypted %}<label class="inline-check"><input type="checkbox" name="h3_clear_access_password"> 清除已保存的 H3 工作流访问密码</label>{% endif %}
-          <label class="inline-check"><input type="checkbox" name="h3_enabled" {% if h3 and h3.is_enabled %}checked{% endif %}> 允许此执行账号承接 H3 任务</label>
-        </fieldset>
-        <div>
-          <strong>可使用此账号的管理员或双池授权用户</strong>
-          <div class="pool-member-list">
-            {% for administrator in administrators %}
-              <label><input type="checkbox" name="admin_user_ids" value="{{ administrator.id }}" {% if administrator.id in member_ids %}checked{% endif %}> {{ administrator.username }}{% if not administrator.is_active %}（已停用）{% endif %}</label>
-            {% endfor %}
-          </div>
         </div>
         <label class="inline-check"><input type="checkbox" name="is_enabled" {% if account.is_enabled %}checked{% endif %}> 全局启用</label>
         <div class="button-row"><button type="submit">保存账号配置</button></div>

@@ -65,6 +65,7 @@ from app.services.h3_pool import (
     h3_execution_account_summary,
     validate_h3_account_selection,
 )
+from app.services.workflow_configs import get_system_workflow_config
 from app.services.alignment import get_alignment_provider
 from app.services.alignment.script_timestamps import AlignedScriptToken
 from app.services.media_segmentation import MediaSegmentationError
@@ -700,21 +701,11 @@ def _selected_instance_type(
     db: Session,
     account_ids: list[int],
 ) -> str:
-    accounts = list(
-        db.scalars(
-            select(RunningHubExecutionAccount).where(
-                RunningHubExecutionAccount.id.in_(account_ids)
-            )
-        ).all()
-    )
-    instance_types = {
-        account.h3_capability.instance_type
-        for account in accounts
-        if account.h3_capability is not None
-    }
-    if len(instance_types) != 1:
-        raise H3WorkbenchError("同一 H3 批次所选账号必须使用相同实例类型")
-    return next(iter(instance_types))
+    del account_ids
+    config = get_system_workflow_config(db, "minimax_h3_ref2va")
+    if not config.is_enabled or not config.ai_app_id:
+        raise H3WorkbenchError("H3 系统工作流未启用或未配置")
+    return config.instance_type
 
 
 def _batch_directory(settings: Settings, user_id: int, batch_id: str) -> Path:
