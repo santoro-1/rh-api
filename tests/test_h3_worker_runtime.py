@@ -2,13 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import GenerationTask, TaskStatus
+from app.models import (
+    GenerationTask,
+    H3HeadTrimJobStatus,
+    RunningHubExecutionAccount,
+    RunningHubPoolMembership,
+    TaskStatus,
+    User,
+)
+from app.services.h3_pool import configure_h3_capability
+from app.services.runninghub import RunningHubError
+from app.services.security import encrypt_secret, secret_fingerprint
 from app.services.h3.postprocess import (
     H3HeadTrimDecision,
     H3NormalizedResult,
@@ -197,6 +209,70 @@ def test_h3_worker_uses_h3_capability_and_persists_dynamic_graph_hash(
     assert segment_payload["normalized_video_download_url"] is None
 
 
+def test_h3_remote_mode_queues_asr_then_resumes_postprocess(
+    client,
+    monkeypatch,
+) -> None:
+    _prepare_confirmed_h3_task(client, monkeypatch, "h3-remote-asr-runtime")
+    fake = _FakeH3RunningHub()
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    remote_settings = replace(get_settings(), media_processing_mode="remote")
+    monkeypatch.setattr(task_worker, "get_settings", lambda: remote_settings)
+
+    def fake_postprocess(
+        source: Path,
+        *,
+        script_text: str,
+        head_trim_decision: H3HeadTrimDecision,
+        needs_continuity_anchor: bool,
+    ) -> H3NormalizedResult:
+        assert script_text
+        assert head_trim_decision.trim_seconds == 0.18
+        assert needs_continuity_anchor is False
+        video = source.with_name("remote-asr-normalized.mp4")
+        video.write_bytes(b"remote-asr-normalized")
+        return H3NormalizedResult(
+            video_path=video,
+            video_sha256=hashlib.sha256(video.read_bytes()).hexdigest(),
+            anchor_path=None,
+            anchor_sha256=None,
+            head_trim=head_trim_decision,
+            normalized_duration_seconds=5.7,
+        )
+
+    monkeypatch.setattr(task_worker, "postprocess_h3_result", fake_postprocess)
+    with SessionLocal() as db:
+        task_id = task_worker.claim_next_pending_task(db)
+        assert task_id is not None
+        task_worker.process_task(db, task_id)
+        task_worker.process_task(db, task_id)
+        db.expire_all()
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.RUNNING.value
+        assert task.h3_head_trim_job is not None
+        assert task.h3_head_trim_job.status == H3HeadTrimJobStatus.PENDING.value
+        assert (remote_settings.data_dir / task.h3_head_trim_job.source_video_path).is_file()
+
+        task.h3_head_trim_job.status = H3HeadTrimJobStatus.SUCCESS.value
+        task.h3_head_trim_job.decision_json = json.dumps(
+            {
+                "mode": "asr_adaptive",
+                "trimSeconds": 0.18,
+                "firstScriptTokenStartSeconds": 0.22,
+                "alignmentProvider": "funasr_http",
+                "alignmentMatchRatio": 1.0,
+                "matchedPrefixTokens": 3,
+                "fallbackReason": None,
+            }
+        )
+        db.commit()
+        task_worker.process_task(db, task_id)
+        db.expire_all()
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.SUCCESS.value
+        assert task.result_path.endswith("remote-asr-normalized.mp4")
+
+
 def test_h3_worker_decrypts_private_workflow_password_only_into_client(
     client,
     monkeypatch,
@@ -269,6 +345,94 @@ def test_h3_remote_failure_is_not_automatically_resubmitted(
         assert task.runninghub_auto_retry_after is None
         assert "不会自动重复付费" in task.error_message
         assert fake.submissions == 1
+
+
+def test_h3_insufficient_power_switches_only_failed_segment_to_frozen_account(
+    client,
+    monkeypatch,
+) -> None:
+    username = "h3-insufficient-power-failover"
+    _prepare_confirmed_h3_task(client, monkeypatch, username)
+
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(username=username).one()
+        task = db.query(GenerationTask).filter_by(
+            workflow_type="minimax_h3_ref2va"
+        ).first()
+        assert task is not None
+        first_account_id = json.loads(
+            task.segment.batch_item.runninghub_execution_account_ids_json
+        )[0]
+        second_key = "h3-runninghub-failover-second"
+        second = RunningHubExecutionAccount(
+            label="H3 余额切换二号",
+            api_key_encrypted=encrypt_secret(second_key),
+            credential_fingerprint=secret_fingerprint(second_key),
+            base_url="https://runninghub.example",
+            digital_human_ai_app_id="must-not-be-used-for-h3",
+            max_concurrent_tasks=5,
+            is_enabled=True,
+        )
+        db.add(second)
+        db.flush()
+        db.add(RunningHubPoolMembership(execution_account=second, admin_user=user))
+        db.add(
+            configure_h3_capability(
+                second,
+                workflow_id="h3-raw-workflow-test-second",
+                instance_type="plus",
+                max_concurrent_tasks=3,
+                is_enabled=True,
+            )
+        )
+        task.segment.batch_item.runninghub_execution_account_ids_json = json.dumps(
+            sorted([first_account_id, second.id])
+        )
+        second_account_id = second.id
+        task_id = task.id
+        db.commit()
+
+    class _NoPowerH3RunningHub(_FakeH3RunningHub):
+        def submit_task(self, payload: dict[str, object]) -> str:
+            self.last_payload = payload
+            self.submissions += 1
+            raise RunningHubError(
+                "提交 H3 动态工作流失败：TASK_CREATE_FAILED_BY_NOT_ENOUGH_POWER_VALUE",
+                error_code="TASK_CREATE_FAILED_BY_NOT_ENOUGH_POWER_VALUE",
+            )
+
+    first = _NoPowerH3RunningHub()
+    second = _FakeH3RunningHub()
+    clients = {first_account_id: first, second_account_id: second}
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: clients[config.id])
+
+    with SessionLocal() as db:
+        assert task_worker.claim_next_pending_task(db) == task_id
+        assert db.get(GenerationTask, task_id).execution_account_id == first_account_id
+        task_worker.process_task(db, task_id)
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.PENDING.value
+        assert task.runninghub_task_id is None
+        assert task.execution_account_id is None
+        assert task.runninghub_attempts[-1].error_code == (
+            "TASK_CREATE_FAILED_BY_NOT_ENOUGH_POWER_VALUE"
+        )
+        assert task.runninghub_attempts[-1].execution_account_id == first_account_id
+        task.runninghub_auto_retry_after = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+
+        assert task_worker.claim_next_pending_task(db) == task_id
+        assert db.get(GenerationTask, task_id).execution_account_id == second_account_id
+        task_worker.process_task(db, task_id)
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.SUBMITTED.value
+        assert task.runninghub_task_id == "h3-remote-task-001"
+        assert [attempt.execution_account_id for attempt in task.runninghub_attempts] == [
+            first_account_id,
+            second_account_id,
+        ]
+        assert first.submissions == 1
+        assert second.submissions == 1
 
 
 def test_h3_remote_cancel_uses_h3_workflow_id(client, monkeypatch) -> None:

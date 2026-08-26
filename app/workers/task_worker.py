@@ -25,6 +25,8 @@ from app.models import (
     GenerationTaskAttempt,
     GenerationTaskEnhancement,
     GenerationTaskEnhancementAttempt,
+    H3HeadTrimJob,
+    H3HeadTrimJobStatus,
     RunningHubConfig,
     RunningHubExecutionAccount,
     SeedVR2ExecutionAccount,
@@ -76,6 +78,8 @@ from app.services.h3.postprocess import (
     H3_HEAD_TRIM_PREROLL_SECONDS,
     H3_OUTPUT_CONTRACT_VERSION,
     H3PostprocessError,
+    fallback_h3_head_trim,
+    parse_h3_head_trim_decision,
     postprocess_h3_result,
 )
 from app.services.h3_workbench import (
@@ -715,6 +719,7 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
             selectinload(GenerationTask.enhancement).selectinload(
                 GenerationTaskEnhancement.seedvr2_execution_account
             ),
+            selectinload(GenerationTask.h3_head_trim_job),
             selectinload(GenerationTask.batch_item).selectinload(
                 GenerationBatchItem.batch
             ),
@@ -926,48 +931,90 @@ def _handle_remote_status(
         )
         db.commit()
         return
+    settings = get_settings()
     destination = (
         create_source_download_target(
-            get_settings(), task.user_id, task.id, output.extension
+            settings, task.user_id, task.id, output.extension
         )
         if task_uses_seedvr2_pipeline(task)
         else create_download_target(
-            get_settings(), task.user_id, task.id, output.extension
+            settings, task.user_id, task.id, output.extension
         )
     )
-    log_event(
-        logger,
-        "video.download_started",
-        "RunningHub 已返回结果，开始下载视频",
-        runninghub_task_id=task.runninghub_task_id,
-        **_video_log_context(task),
+    remote_h3_head_trim = bool(
+        task.workflow_type == "minimax_h3_ref2va"
+        and settings.media_processing_mode == "remote"
     )
-    try:
-        client.download_result(output.url, destination)
-    except RunningHubError as exc:
-        task.status = TaskStatus.DOWNLOAD_FAILED.value
-        task.error_code = "DOWNLOAD_FAILED"
-        task.error_message = str(exc)
-        task.completed_at = _now()
-        sync_h3_task_hierarchy(task)
-        finish_task_attempt(
-            task,
-            status="DOWNLOAD_FAILED",
-            error_code="DOWNLOAD_FAILED",
-            error_message=str(exc),
-        )
-        db.commit()
+    head_trim_job = task.h3_head_trim_job if remote_h3_head_trim else None
+    if head_trim_job is not None:
+        destination = safe_relative_path(head_trim_job.source_video_path, settings.data_dir)
+        if head_trim_job.status in {
+            H3HeadTrimJobStatus.PENDING.value,
+            H3HeadTrimJobStatus.RUNNING.value,
+        }:
+            return
+    else:
         log_event(
             logger,
-            "video.download_failed",
-            "视频结果下载失败",
-            level=logging.WARNING,
+            "video.download_started",
+            "RunningHub 已返回结果，开始下载视频",
             runninghub_task_id=task.runninghub_task_id,
-            error=str(exc),
-            **exc.log_details(),
             **_video_log_context(task),
         )
-        return
+        try:
+            client.download_result(output.url, destination)
+        except RunningHubError as exc:
+            task.status = TaskStatus.DOWNLOAD_FAILED.value
+            task.error_code = "DOWNLOAD_FAILED"
+            task.error_message = str(exc)
+            task.completed_at = _now()
+            sync_h3_task_hierarchy(task)
+            finish_task_attempt(
+                task,
+                status="DOWNLOAD_FAILED",
+                error_code="DOWNLOAD_FAILED",
+                error_message=str(exc),
+            )
+            db.commit()
+            log_event(
+                logger,
+                "video.download_failed",
+                "视频结果下载失败",
+                level=logging.WARNING,
+                runninghub_task_id=task.runninghub_task_id,
+                error=str(exc),
+                **exc.log_details(),
+                **_video_log_context(task),
+            )
+            return
+        if remote_h3_head_trim:
+            segment = task.segment
+            if segment is None:
+                _mark_failed(task, "H3_POSTPROCESS_FAILED", "H3 分段审计快照缺失")
+                db.commit()
+                return
+            head_trim_job = H3HeadTrimJob(
+                id=str(uuid.uuid4()),
+                generation_task_id=task.id,
+                source_video_path=to_relative_data_path(destination, settings),
+                source_video_name=destination.name,
+                script_text=segment.script_text,
+                status=H3HeadTrimJobStatus.PENDING.value,
+            )
+            task.h3_head_trim_job = head_trim_job
+            task.status = TaskStatus.RUNNING.value
+            segment.status = TaskStatus.RUNNING.value
+            db.add(head_trim_job)
+            db.commit()
+            log_event(
+                logger,
+                "video.h3_head_trim_queued",
+                "H3 原始成片已下载，等待远程媒体节点执行片头 ASR",
+                job_id=head_trim_job.id,
+                source_video_path=head_trim_job.source_video_path,
+                **_video_log_context(task),
+            )
+            return
     if task.workflow_type == "minimax_h3_ref2va":
         segment = task.segment
         if segment is None or segment.h3_config is None:
@@ -986,12 +1033,30 @@ def _handle_remote_status(
             and segment.segment_index < item.h3_config.segment_count - 1
         )
         try:
-            normalized = postprocess_h3_result(
-                destination,
-                script_text=segment.script_text,
-                alignment_provider=get_alignment_provider("funasr_http"),
-                needs_continuity_anchor=needs_anchor,
-            )
+            head_trim_decision = None
+            if head_trim_job is not None:
+                if head_trim_job.status == H3HeadTrimJobStatus.SUCCESS.value:
+                    head_trim_decision = parse_h3_head_trim_decision(
+                        head_trim_job.decision_json or ""
+                    )
+                elif head_trim_job.status == H3HeadTrimJobStatus.FAILED.value:
+                    head_trim_decision = fallback_h3_head_trim(
+                        head_trim_job.error_code or "remote_asr_failed"
+                    )
+            if remote_h3_head_trim:
+                normalized = postprocess_h3_result(
+                    destination,
+                    script_text=segment.script_text,
+                    head_trim_decision=head_trim_decision,
+                    needs_continuity_anchor=needs_anchor,
+                )
+            else:
+                normalized = postprocess_h3_result(
+                    destination,
+                    script_text=segment.script_text,
+                    alignment_provider=get_alignment_provider("funasr_http"),
+                    needs_continuity_anchor=needs_anchor,
+                )
             normalized_relative = to_relative_data_path(normalized.video_path, get_settings())
             segment.h3_config.normalized_video_path = normalized_relative
             segment.h3_config.normalized_video_sha256 = normalized.video_sha256
@@ -2174,6 +2239,41 @@ def process_task(db: Session, task_id: str) -> None:
                 reason="RunningHub 在提交时报告并发已满，任务将保留排队",
                 event_code="video.capacity_waiting",
                 release_pool_account=task.execution_account is not None,
+            )
+            return
+        if (
+            exc.is_insufficient_power
+            and task.workflow_type == "minimax_h3_ref2va"
+            and task_uses_execution_pool(task)
+            and task.execution_account is not None
+            and task.runninghub_task_id is None
+        ):
+            failed_account = task.execution_account
+            provider_code = str(
+                exc.error_code or "TASK_CREATE_FAILED_BY_NOT_ENOUGH_POWER_VALUE"
+            )
+            finish_task_attempt(
+                task,
+                status="PRE_SUBMISSION_FAILED",
+                error_code=provider_code,
+                error_message=str(exc),
+            )
+            cool_execution_account(
+                failed_account,
+                error_code=provider_code,
+                cooldown_seconds=REMOTE_CAPACITY_RECHECK_SECONDS,
+                unhealthy=True,
+            )
+            _handle_safe_pre_submission_failure(
+                db,
+                task,
+                code=provider_code,
+                message=(
+                    "当前 RunningHub 执行账号余额/算力不足；未创建远程任务，"
+                    "系统将仅为这个失败分段改用本批次已冻结的其他账号"
+                ),
+                diagnostics=exc.log_details(),
+                release_pool_account=True,
             )
             return
         if task.execution_account:

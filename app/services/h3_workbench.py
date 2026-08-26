@@ -788,6 +788,7 @@ def _reset_h3_task_runtime(
     status: str,
     now: datetime,
 ) -> None:
+    task.h3_head_trim_job = None
     if task_uses_execution_pool(task):
         task.execution_account_id = None
         task.execution_account = None
@@ -1954,6 +1955,8 @@ def confirm_h3_segment_retry(
         prepare_task_retry(task, settings, now=now)
     except TaskManagementError as exc:
         raise H3WorkbenchError(str(exc)) from exc
+    if task.runninghub_task_id is None:
+        task.h3_head_trim_job = None
     if task.status == TaskStatus.PENDING.value and segment.h3_config is not None:
         segment.h3_config.dynamic_workflow_sha256 = None
     segment.status = task.status

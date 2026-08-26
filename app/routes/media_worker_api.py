@@ -28,10 +28,16 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.models import (
+    H3HeadTrimJob,
+    H3HeadTrimJobStatus,
     LongAudioProject,
     LongAudioProjectStatus,
     LtxPreparationJob,
     LtxPreparationStatus,
+)
+from app.services.h3.postprocess import (
+    h3_head_trim_decision_payload,
+    parse_h3_head_trim_decision,
 )
 from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import log_event
@@ -96,6 +102,22 @@ def _recover_expired_leases(db: Session, now: datetime) -> None:
         )
         .values(
             status=LongAudioProjectStatus.PENDING_ANALYSIS.value,
+            remote_lease_id=None,
+            remote_worker_id=None,
+            remote_lease_expires_at=None,
+            remote_last_heartbeat_at=None,
+        )
+    )
+    db.execute(
+        update(H3HeadTrimJob)
+        .where(
+            H3HeadTrimJob.status == H3HeadTrimJobStatus.RUNNING.value,
+            H3HeadTrimJob.remote_lease_id.is_not(None),
+            H3HeadTrimJob.remote_lease_expires_at.is_not(None),
+            H3HeadTrimJob.remote_lease_expires_at < now,
+        )
+        .values(
+            status=H3HeadTrimJobStatus.PENDING.value,
             remote_lease_id=None,
             remote_worker_id=None,
             remote_lease_expires_at=None,
@@ -199,6 +221,46 @@ def _claim_next(
     return None
 
 
+def _claim_next_h3_head_trim(
+    db: Session,
+    settings: Settings,
+    *,
+    worker_id: str,
+) -> H3HeadTrimJob | None:
+    now = _now()
+    _recover_expired_leases(db, now)
+    rows = db.scalars(
+        select(H3HeadTrimJob.id)
+        .where(H3HeadTrimJob.status == H3HeadTrimJobStatus.PENDING.value)
+        .order_by(H3HeadTrimJob.created_at, H3HeadTrimJob.id)
+        .limit(10)
+    ).all()
+    for job_id in rows:
+        lease_id = str(uuid.uuid4())
+        result = db.execute(
+            update(H3HeadTrimJob)
+            .where(
+                H3HeadTrimJob.id == job_id,
+                H3HeadTrimJob.status == H3HeadTrimJobStatus.PENDING.value,
+            )
+            .values(
+                status=H3HeadTrimJobStatus.RUNNING.value,
+                error_code=None,
+                error_message=None,
+                remote_lease_id=lease_id,
+                remote_worker_id=worker_id,
+                remote_lease_expires_at=now
+                + timedelta(seconds=settings.media_worker_lease_seconds),
+                remote_last_heartbeat_at=now,
+            )
+        )
+        db.commit()
+        if result.rowcount != 1:
+            continue
+        return db.get(H3HeadTrimJob, job_id)
+    return None
+
+
 def _plan_payload(project: LongAudioProject) -> list[dict[str, Any]]:
     try:
         value = json.loads(project.plan_json or "[]")
@@ -242,6 +304,29 @@ def _job_payload(project: LongAudioProject, action: str) -> dict[str, Any]:
     }
 
 
+def _h3_head_trim_payload(job: H3HeadTrimJob) -> dict[str, Any]:
+    lease_id = job.remote_lease_id
+    return {
+        "jobId": job.id,
+        "action": "h3_head_trim",
+        "leaseId": lease_id,
+        "leaseExpiresAt": (
+            job.remote_lease_expires_at.isoformat()
+            if job.remote_lease_expires_at
+            else None
+        ),
+        "workflowType": "minimax_h3_ref2va",
+        "scriptText": job.script_text,
+        "source": {
+            "videoUrl": (
+                f"/api/media-worker/v1/h3-head-trim-jobs/{job.id}/source"
+                f"?leaseId={lease_id}"
+            ),
+            "videoName": job.source_video_name,
+        },
+    }
+
+
 def _leased_project(
     db: Session,
     project_id: str,
@@ -266,6 +351,25 @@ def _leased_project(
     if expected_status and project.status != expected_status:
         raise HTTPException(status_code=409, detail="媒体任务状态已经变化")
     return project
+
+
+def _leased_h3_head_trim_job(
+    db: Session,
+    job_id: str,
+    lease_id: str,
+    *,
+    expected_status: str | None = None,
+) -> H3HeadTrimJob:
+    job = db.get(H3HeadTrimJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="H3 片头 ASR 任务不存在")
+    if not lease_id or not hmac.compare_digest(
+        lease_id, job.remote_lease_id or ""
+    ):
+        raise HTTPException(status_code=409, detail="H3 片头 ASR 任务租约已失效")
+    if expected_status and job.status != expected_status:
+        raise HTTPException(status_code=409, detail="H3 片头 ASR 任务状态已经变化")
+    return job
 
 
 def _metrics_json(value: Any) -> str | None:
@@ -296,10 +400,26 @@ async def claim_job(
     capabilities = {
         str(item).strip().lower()
         for item in raw_capabilities
-        if str(item).strip().lower() in {"analysis", "cut"}
+        if str(item).strip().lower() in {"analysis", "cut", "h3_head_trim"}
     }
     if is_deployment_draining(settings):
         return Response(status_code=204)
+    if "h3_head_trim" in capabilities:
+        h3_job = _claim_next_h3_head_trim(
+            db,
+            settings,
+            worker_id=worker_id,
+        )
+        if h3_job is not None:
+            log_event(
+                logger,
+                "media.h3_head_trim_claimed",
+                "远程媒体节点已领取 H3 片头 ASR 任务",
+                job_id=h3_job.id,
+                generation_task_id=h3_job.generation_task_id,
+                worker_id=worker_id,
+            )
+            return _h3_head_trim_payload(h3_job)
     claimed = _claim_next(
         db,
         settings,
@@ -318,6 +438,133 @@ async def claim_job(
         action=action,
     )
     return _job_payload(project, action)
+
+
+@router.get("/h3-head-trim-jobs/{job_id}/source")
+def download_h3_head_trim_source(
+    job_id: str,
+    leaseId: str,
+    settings: Settings = Depends(_authorize_worker),
+    db: Session = Depends(get_db),
+):
+    job = _leased_h3_head_trim_job(db, job_id, leaseId)
+    path = safe_relative_path(job.source_video_path, settings.data_dir)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="H3 原始成片已清理")
+    return FileResponse(path, filename=job.source_video_name)
+
+
+@router.post("/h3-head-trim-jobs/{job_id}/heartbeat")
+async def heartbeat_h3_head_trim(
+    job_id: str,
+    request: Request,
+    settings: Settings = Depends(_authorize_worker),
+    db: Session = Depends(get_db),
+):
+    body = await request.json()
+    job = _leased_h3_head_trim_job(
+        db,
+        job_id,
+        str(body.get("leaseId") or ""),
+        expected_status=H3HeadTrimJobStatus.RUNNING.value,
+    )
+    now = _now()
+    job.remote_last_heartbeat_at = now
+    job.remote_lease_expires_at = now + timedelta(
+        seconds=settings.media_worker_lease_seconds
+    )
+    metrics = _metrics_json(body.get("metrics"))
+    if metrics is not None:
+        job.remote_metrics_json = metrics
+    db.commit()
+    return {"ok": True, "leaseExpiresAt": job.remote_lease_expires_at.isoformat()}
+
+
+@router.post("/h3-head-trim-jobs/{job_id}/complete")
+async def complete_h3_head_trim(
+    job_id: str,
+    request: Request,
+    settings: Settings = Depends(_authorize_worker),
+    db: Session = Depends(get_db),
+):
+    del settings
+    body = await request.json()
+    job = _leased_h3_head_trim_job(
+        db,
+        job_id,
+        str(body.get("leaseId") or ""),
+        expected_status=H3HeadTrimJobStatus.RUNNING.value,
+    )
+    try:
+        decision = parse_h3_head_trim_decision(body.get("decision"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    job.decision_json = json.dumps(
+        h3_head_trim_decision_payload(decision),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    job.status = H3HeadTrimJobStatus.SUCCESS.value
+    job.error_code = None
+    job.error_message = None
+    job.completed_at = _now()
+    metrics = _metrics_json(body.get("metrics"))
+    if metrics is not None:
+        job.remote_metrics_json = metrics
+    worker_id = job.remote_worker_id
+    job.remote_lease_id = None
+    job.remote_lease_expires_at = None
+    db.commit()
+    log_event(
+        logger,
+        "media.h3_head_trim_completed",
+        "远程媒体节点已完成 H3 片头 ASR",
+        job_id=job.id,
+        generation_task_id=job.generation_task_id,
+        worker_id=worker_id,
+        trim_mode=decision.mode,
+        trim_seconds=decision.trim_seconds,
+    )
+    return {"ok": True, "status": job.status}
+
+
+@router.post("/h3-head-trim-jobs/{job_id}/failed")
+async def fail_h3_head_trim(
+    job_id: str,
+    request: Request,
+    settings: Settings = Depends(_authorize_worker),
+    db: Session = Depends(get_db),
+):
+    del settings
+    body = await request.json()
+    job = _leased_h3_head_trim_job(
+        db,
+        job_id,
+        str(body.get("leaseId") or ""),
+        expected_status=H3HeadTrimJobStatus.RUNNING.value,
+    )
+    job.status = H3HeadTrimJobStatus.FAILED.value
+    job.error_code = "REMOTE_ASR_FAILED"
+    job.error_message = str(body.get("error") or "远程 ASR 处理失败")[:4000]
+    job.completed_at = _now()
+    metrics = _metrics_json(body.get("metrics"))
+    if metrics is not None:
+        job.remote_metrics_json = metrics
+    worker_id = job.remote_worker_id
+    job.remote_lease_id = None
+    job.remote_lease_expires_at = None
+    db.commit()
+    log_event(
+        logger,
+        "media.h3_head_trim_failed",
+        "远程媒体节点 H3 片头 ASR 失败，将由视频 Worker 安全降级",
+        level=logging.WARNING,
+        job_id=job.id,
+        generation_task_id=job.generation_task_id,
+        worker_id=worker_id,
+        error=job.error_message,
+    )
+    return {"ok": True, "status": job.status}
 
 
 @router.get("/jobs/{project_id}/source/{kind}")

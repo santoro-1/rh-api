@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -169,7 +170,7 @@ def extract_h3_audio_for_alignment(source: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _fallback_head_trim(reason: str) -> H3HeadTrimDecision:
+def fallback_h3_head_trim(reason: str) -> H3HeadTrimDecision:
     return H3HeadTrimDecision(
         mode="fallback_300ms",
         trim_seconds=H3_HEAD_TRIM_FALLBACK_SECONDS,
@@ -190,7 +191,7 @@ def decide_h3_head_trim(
     clean_script = str(script_text or "").strip()
     expected = tokenize_script(clean_script)
     if not expected:
-        return _fallback_head_trim("script_has_no_spoken_tokens")
+        return fallback_h3_head_trim("script_has_no_spoken_tokens")
     required = min(H3_HEAD_TRIM_PREFIX_TOKENS, len(expected))
     aligned_by_range = {
         (token.script_start, token.script_end): token for token in alignment.tokens
@@ -203,7 +204,7 @@ def decide_h3_head_trim(
         prefix.append(aligned)
     if len(prefix) < required:
         return replace(
-            _fallback_head_trim("script_prefix_not_matched"),
+            fallback_h3_head_trim("script_prefix_not_matched"),
             alignment_provider=alignment.provider,
             alignment_match_ratio=alignment.match_ratio,
             matched_prefix_tokens=len(prefix),
@@ -211,7 +212,7 @@ def decide_h3_head_trim(
     first_start = float(prefix[0].start_seconds)
     if not math.isfinite(first_start) or first_start < 0:
         return replace(
-            _fallback_head_trim("first_token_timestamp_invalid"),
+            fallback_h3_head_trim("first_token_timestamp_invalid"),
             alignment_provider=alignment.provider,
             alignment_match_ratio=alignment.match_ratio,
             matched_prefix_tokens=len(prefix),
@@ -235,7 +236,7 @@ def detect_h3_head_trim(
     """Run the existing ASR alignment, with a non-failing fixed-cut fallback."""
 
     if alignment_provider is None:
-        return _fallback_head_trim("alignment_provider_unavailable")
+        return fallback_h3_head_trim("alignment_provider_unavailable")
     alignment_audio = source.with_name(f"{source.stem}.head-align.wav")
     try:
         extract_h3_audio_for_alignment(source, alignment_audio)
@@ -248,13 +249,94 @@ def detect_h3_head_trim(
             exc,
         )
         return replace(
-            _fallback_head_trim(type(exc).__name__),
+            fallback_h3_head_trim(type(exc).__name__),
             alignment_provider=(
                 str(getattr(alignment_provider, "name", "") or "") or None
             ),
         )
     finally:
         alignment_audio.unlink(missing_ok=True)
+
+
+def h3_head_trim_decision_payload(
+    decision: H3HeadTrimDecision,
+) -> dict[str, object]:
+    return {
+        "mode": decision.mode,
+        "trimSeconds": decision.trim_seconds,
+        "firstScriptTokenStartSeconds": decision.first_script_token_start_seconds,
+        "alignmentProvider": decision.alignment_provider,
+        "alignmentMatchRatio": decision.alignment_match_ratio,
+        "matchedPrefixTokens": decision.matched_prefix_tokens,
+        "fallbackReason": decision.fallback_reason,
+    }
+
+
+def parse_h3_head_trim_decision(value: object) -> H3HeadTrimDecision:
+    """Strictly validate a trusted-node callback before it controls ffmpeg."""
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("H3 片头裁剪结果不是有效 JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("H3 片头裁剪结果格式错误")
+    mode = str(value.get("mode") or "")
+    if mode not in {"asr_adaptive", "fallback_300ms"}:
+        raise ValueError("H3 片头裁剪模式无效")
+    try:
+        trim_seconds = float(value["trimSeconds"])
+        matched_prefix_tokens = int(value.get("matchedPrefixTokens") or 0)
+        first_start = (
+            float(value["firstScriptTokenStartSeconds"])
+            if value.get("firstScriptTokenStartSeconds") is not None
+            else None
+        )
+        match_ratio = (
+            float(value["alignmentMatchRatio"])
+            if value.get("alignmentMatchRatio") is not None
+            else None
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("H3 片头裁剪数值格式错误") from exc
+    if not math.isfinite(trim_seconds) or not 0 <= trim_seconds <= 10:
+        raise ValueError("H3 片头裁剪时间超出范围")
+    if first_start is not None and (
+        not math.isfinite(first_start) or not 0 <= first_start <= 10
+    ):
+        raise ValueError("H3 首词时间超出范围")
+    if match_ratio is not None and (
+        not math.isfinite(match_ratio) or not 0 <= match_ratio <= 1
+    ):
+        raise ValueError("H3 ASR 匹配率超出范围")
+    if not 0 <= matched_prefix_tokens <= H3_HEAD_TRIM_PREFIX_TOKENS:
+        raise ValueError("H3 原稿前缀匹配数超出范围")
+    provider = str(value.get("alignmentProvider") or "").strip() or None
+    fallback_reason = str(value.get("fallbackReason") or "").strip() or None
+    if mode == "fallback_300ms":
+        if abs(trim_seconds - H3_HEAD_TRIM_FALLBACK_SECONDS) > 0.001:
+            raise ValueError("H3 降级裁剪时间必须为 300ms")
+    else:
+        if (
+            first_start is None
+            or provider is None
+            or matched_prefix_tokens < 1
+            or fallback_reason is not None
+        ):
+            raise ValueError("H3 ASR 自适应裁剪结果字段不完整")
+        expected_trim = max(0.0, first_start - H3_HEAD_TRIM_PREROLL_SECONDS)
+        if abs(trim_seconds - expected_trim) > 0.001:
+            raise ValueError("H3 ASR 自适应裁剪时间与首词时间不一致")
+    return H3HeadTrimDecision(
+        mode=mode,
+        trim_seconds=round(trim_seconds, 6),
+        first_script_token_start_seconds=first_start,
+        alignment_provider=provider,
+        alignment_match_ratio=match_ratio,
+        matched_prefix_tokens=matched_prefix_tokens,
+        fallback_reason=fallback_reason,
+    )
 
 
 def extract_last_visible_frame(source: Path, target: Path) -> None:
@@ -328,12 +410,15 @@ def postprocess_h3_result(
     source: Path,
     *,
     script_text: str,
-    alignment_provider: AudioAlignmentProvider | None,
     needs_continuity_anchor: bool,
+    alignment_provider: AudioAlignmentProvider | None = None,
+    head_trim_decision: H3HeadTrimDecision | None = None,
 ) -> H3NormalizedResult:
     normalized = source.with_name(f"{source.stem}.normalized.mp4")
     anchor = source.with_name(f"{source.stem}.last-visible.png")
-    head_trim = detect_h3_head_trim(source, script_text, alignment_provider)
+    head_trim = head_trim_decision or detect_h3_head_trim(
+        source, script_text, alignment_provider
+    )
     normalize_h3_video(
         source,
         normalized,

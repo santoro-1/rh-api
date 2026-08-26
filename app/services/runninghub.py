@@ -85,6 +85,9 @@ def runninghub_upload_diagnostics(size_bytes: int) -> dict[str, object]:
 
 class RunningHubError(RuntimeError):
     QUEUE_LIMIT_CODES = {"421", "1520", "TASK_QUEUE_MAXED"}
+    INSUFFICIENT_POWER_CODES = {
+        "TASK_CREATE_FAILED_BY_NOT_ENOUGH_POWER_VALUE",
+    }
     TASK_NOT_FOUND_CODES = {
         "423",
         "1004",
@@ -167,6 +170,25 @@ class RunningHubError(RuntimeError):
             or "concurrency limit reached" in normalized_message
             or "api 并发数已达" in normalized_message
             or "并发达到上限" in normalized_message
+        )
+
+    @property
+    def is_insufficient_power(self) -> bool:
+        """Return whether RunningHub explicitly rejected creation for no balance.
+
+        This is intentionally narrower than generic submission failures.  The
+        caller may safely choose another frozen pool account only when the
+        provider explicitly says that no task was created for this reason.
+        """
+
+        normalized_code = str(self.error_code or "").strip().upper()
+        normalized_message = str(self).upper()
+        return (
+            normalized_code in self.INSUFFICIENT_POWER_CODES
+            or any(
+                code in normalized_message
+                for code in self.INSUFFICIENT_POWER_CODES
+            )
         )
 
     @property

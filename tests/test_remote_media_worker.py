@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import json
+import uuid
 import zipfile
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -10,6 +12,8 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     GenerationTask,
+    H3HeadTrimJob,
+    H3HeadTrimJobStatus,
     LongAudioProject,
     LongAudioProjectStatus,
     User,
@@ -303,6 +307,84 @@ def test_expired_remote_lease_is_reclaimed(client, monkeypatch):
         },
     )
     assert stale.status_code == 409
+
+
+def test_remote_worker_claims_and_completes_h3_head_trim(client, monkeypatch):
+    settings = _remote_settings(monkeypatch)
+    create_user("remote-h3-head-trim-user")
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(username="remote-h3-head-trim-user").one()
+        source = settings.data_dir / "h3-head-trim-test" / "raw.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"\x00\x00\x00\x18ftypisomh3")
+        task = GenerationTask(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            workflow_type="minimax_h3_ref2va",
+            image_path="unused.png",
+            audio_path="unused.mp3",
+            image_original_name="unused.png",
+            audio_original_name="unused.mp3",
+            audio_duration_seconds=5.0,
+            start_seconds=0.0,
+            end_seconds=5.0,
+            prompt="测试",
+            status="RUNNING",
+        )
+        db.add(task)
+        db.flush()
+        job = H3HeadTrimJob(
+            id=str(uuid.uuid4()),
+            generation_task_id=task.id,
+            source_video_path=source.relative_to(settings.data_dir).as_posix(),
+            source_video_name="raw.mp4",
+            script_text="你好世界",
+            status=H3HeadTrimJobStatus.PENDING.value,
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    claim = client.post(
+        "/api/media-worker/v1/jobs/claim",
+        headers=_worker_headers(),
+        json={"workerId": "asr-node", "capabilities": ["h3_head_trim"]},
+    )
+    assert claim.status_code == 200, claim.text
+    payload = claim.json()
+    assert payload["jobId"] == job_id
+    assert payload["action"] == "h3_head_trim"
+    assert payload["scriptText"] == "你好世界"
+    source_response = client.get(
+        payload["source"]["videoUrl"], headers=_worker_headers()
+    )
+    assert source_response.status_code == 200
+    assert source_response.content.endswith(b"h3")
+
+    completed = client.post(
+        f"/api/media-worker/v1/h3-head-trim-jobs/{job_id}/complete",
+        headers=_worker_headers(),
+        json={
+            "leaseId": payload["leaseId"],
+            "decision": {
+                "mode": "asr_adaptive",
+                "trimSeconds": 0.18,
+                "firstScriptTokenStartSeconds": 0.22,
+                "alignmentProvider": "funasr_http",
+                "alignmentMatchRatio": 0.98,
+                "matchedPrefixTokens": 3,
+                "fallbackReason": None,
+            },
+            "metrics": {"phase": "h3_head_trim_completed"},
+        },
+    )
+    assert completed.status_code == 200, completed.text
+    with SessionLocal() as db:
+        job = db.get(H3HeadTrimJob, job_id)
+        assert job is not None
+        assert job.status == H3HeadTrimJobStatus.SUCCESS.value
+        assert json.loads(job.decision_json)["trimSeconds"] == 0.18
+        assert job.remote_lease_id is None
 
 
 def test_remote_digital_human_uses_audio_only_cut_archive(client, monkeypatch):

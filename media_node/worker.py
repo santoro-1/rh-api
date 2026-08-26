@@ -18,6 +18,11 @@ import requests
 
 from app.services.alignment.funasr_http import FunASRHTTPProvider
 from app.services.audio import inspect_audio_duration
+from app.services.h3.postprocess import (
+    decide_h3_head_trim,
+    extract_h3_audio_for_alignment,
+    h3_head_trim_decision_payload,
+)
 from app.services.media_segmentation import (
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
     DIGITAL_HUMAN_TARGET_SEGMENT_SECONDS,
@@ -30,7 +35,7 @@ from app.services.media_segmentation import (
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NODE_ROOT = Path(__file__).resolve().parent
-WORKER_VERSION = "2"
+WORKER_VERSION = "3"
 
 
 class RemoteWorkerError(RuntimeError):
@@ -159,7 +164,7 @@ class RemoteMediaClient:
             headers=self.headers,
             json={
                 "workerId": worker_id,
-                "capabilities": ["analysis", "cut"],
+                "capabilities": ["analysis", "cut", "h3_head_trim"],
             },
             timeout=(10, 60),
         )
@@ -204,11 +209,16 @@ class RemoteMediaClient:
         job_id: str,
         lease_id: str,
         metrics: dict[str, Any],
+        *,
+        action: str = "",
     ) -> None:
+        endpoint = (
+            f"/api/media-worker/v1/h3-head-trim-jobs/{job_id}/heartbeat"
+            if action == "h3_head_trim"
+            else f"/api/media-worker/v1/jobs/{job_id}/heartbeat"
+        )
         response = requests.post(
-            self._url(
-                f"/api/media-worker/v1/jobs/{job_id}/heartbeat"
-            ),
+            self._url(endpoint),
             headers=self.headers,
             json={"leaseId": lease_id, "metrics": metrics},
             timeout=(10, 30),
@@ -298,15 +308,46 @@ class RemoteMediaClient:
                 f"上传切割结果失败：{_response_error(response)}"
             )
 
+    def complete_h3_head_trim(
+        self,
+        job_id: str,
+        lease_id: str,
+        decision: dict[str, object],
+        metrics: dict[str, Any],
+    ) -> None:
+        response = requests.post(
+            self._url(
+                f"/api/media-worker/v1/h3-head-trim-jobs/{job_id}/complete"
+            ),
+            headers=self.headers,
+            json={
+                "leaseId": lease_id,
+                "decision": decision,
+                "metrics": metrics,
+            },
+            timeout=(10, 120),
+        )
+        if response.status_code >= 400:
+            raise RemoteWorkerError(
+                f"提交 H3 片头 ASR 结果失败：{_response_error(response)}"
+            )
+
     def fail(
         self,
         job_id: str,
         lease_id: str,
         error: str,
         metrics: dict[str, Any],
+        *,
+        action: str = "",
     ) -> None:
+        endpoint = (
+            f"/api/media-worker/v1/h3-head-trim-jobs/{job_id}/failed"
+            if action == "h3_head_trim"
+            else f"/api/media-worker/v1/jobs/{job_id}/failed"
+        )
         response = requests.post(
-            self._url(f"/api/media-worker/v1/jobs/{job_id}/failed"),
+            self._url(endpoint),
             headers=self.headers,
             json={
                 "leaseId": lease_id,
@@ -329,12 +370,14 @@ class HeartbeatLoop:
         lease_id: str,
         started: float,
         interval_seconds: int,
+        action: str = "",
     ) -> None:
         self.client = client
         self.job_id = job_id
         self.lease_id = lease_id
         self.started = started
         self.interval_seconds = interval_seconds
+        self.action = action
         self.stop_event = threading.Event()
         self.thread = threading.Thread(
             target=self._run,
@@ -357,6 +400,7 @@ class HeartbeatLoop:
                     self.job_id,
                     self.lease_id,
                     _metrics(phase="processing", started=self.started),
+                    action=self.action,
                 )
             except Exception as exc:
                 logger.warning("远程媒体任务续租暂时失败：%s", exc)
@@ -449,7 +493,11 @@ def process_job(
     lease_id = str(job.get("leaseId") or "")
     action = str(job.get("action") or "")
     workflow_type = str(job.get("workflowType") or "ltx_lip_sync")
-    if not job_id or not lease_id or action not in {"analysis", "cut"}:
+    if not job_id or not lease_id or action not in {
+        "analysis",
+        "cut",
+        "h3_head_trim",
+    }:
         raise RemoteWorkerError("服务器返回的任务格式错误")
     source = job.get("source")
     if not isinstance(source, dict):
@@ -476,11 +524,53 @@ def process_job(
             lease_id,
             started,
             heartbeat_seconds,
+            action,
         ):
-            audio_bytes = client.download(
-                str(source.get("audioUrl") or ""),
-                audio_path,
-            )
+            if action == "h3_head_trim":
+                video_bytes = client.download(
+                    str(source.get("videoUrl") or ""),
+                    video_path,
+                )
+                alignment_audio = job_directory / "head-align.wav"
+                extract_h3_audio_for_alignment(video_path, alignment_audio)
+                provider = FunASRHTTPProvider(
+                    base_url=os.getenv(
+                        "ASR_BASE_URL", "http://127.0.0.1:18084"
+                    ),
+                    shared_token=os.getenv("ASR_SHARED_TOKEN", ""),
+                    timeout_seconds=_env_int(
+                        "ASR_REQUEST_TIMEOUT_SECONDS", 1800
+                    ),
+                )
+                alignment = provider.align(
+                    alignment_audio,
+                    str(job.get("scriptText") or ""),
+                )
+                decision = decide_h3_head_trim(
+                    str(job.get("scriptText") or ""), alignment
+                )
+                metrics = _metrics(
+                    phase="h3_head_trim_completed",
+                    started=started,
+                    extra={
+                        "videoDownloadMb": round(
+                            video_bytes / 1024 / 1024, 1
+                        ),
+                        "trimMode": decision.mode,
+                        "trimSeconds": decision.trim_seconds,
+                    },
+                )
+                client.complete_h3_head_trim(
+                    job_id,
+                    lease_id,
+                    h3_head_trim_decision_payload(decision),
+                    metrics,
+                )
+            else:
+                audio_bytes = client.download(
+                    str(source.get("audioUrl") or ""),
+                    audio_path,
+                )
             if action == "analysis":
                 if workflow_type == "digital_human":
                     result_provider = "vad_silence"
@@ -538,7 +628,7 @@ def process_job(
                     tokens=result_tokens,
                     match_ratio=result_match_ratio,
                 )
-            else:
+            elif action == "cut":
                 video_bytes = 0
                 video_source = None
                 if workflow_type == "ltx_lip_sync":
@@ -591,7 +681,13 @@ def process_job(
             extra={"action": action},
         )
         try:
-            client.fail(job_id, lease_id, str(exc), metrics)
+            client.fail(
+                job_id,
+                lease_id,
+                str(exc),
+                metrics,
+                action=action,
+            )
         except Exception as report_exc:
             logger.warning("无法向服务器上报失败状态：%s", report_exc)
         raise

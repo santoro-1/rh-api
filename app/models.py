@@ -94,6 +94,13 @@ class LongAudioProjectStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class H3HeadTrimJobStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
 class LtxPreparationStatus(str, Enum):
     UPLOADED = "UPLOADED"
     ASR_PENDING = "ASR_PENDING"
@@ -895,6 +902,11 @@ class GenerationTask(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    h3_head_trim_job: Mapped[Optional["H3HeadTrimJob"]] = relationship(
+        back_populates="generation_task",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     __table_args__ = (
         Index(
@@ -963,6 +975,54 @@ class GenerationTaskAttempt(Base):
             "attempt_number",
             name="uq_generation_task_attempt_number",
         ),
+    )
+
+
+class H3HeadTrimJob(Base):
+    """Durable remote-ASR decision for one downloaded H3 result."""
+
+    __tablename__ = "h3_head_trim_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    generation_task_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_tasks.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    source_video_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_video_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    script_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=H3HeadTrimJobStatus.PENDING.value,
+        index=True,
+    )
+    decision_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    remote_lease_id: Mapped[Optional[str]] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    remote_worker_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    remote_lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    remote_last_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    remote_metrics_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    generation_task: Mapped[GenerationTask] = relationship(
+        back_populates="h3_head_trim_job"
     )
 
 

@@ -86,7 +86,8 @@ powershell -ExecutionPolicy Bypass -File .\media_node\install-media-node.ps1 `
    - `MEDIA_WORKER_SERVER_URL` 填主站地址；
    - `MEDIA_WORKER_TOKEN` 与服务器 `.env` 完全一致；
    - `MEDIA_WORKER_ID` 改成这台固定电脑的唯一名称；
-   - 默认 `ASR_DEVICE=cpu`，不会占用其他 GPU ASR 的显存。
+   - 默认 `ASR_DEVICE=cpu`，不会占用其他 GPU ASR 的显存；Worker v3 会声明
+     `h3_head_trim` 能力并领取 H3 成片片头识别任务。
 5. 双击 `启动媒体节点.cmd`。它会自动启动或复用兼容的本机 ASR，然后串行处理
    ASR、切音频和切视频任务。独立的“启动 ASR 服务”脚本不再需要。
 
@@ -102,6 +103,11 @@ powershell -ExecutionPolicy Bypass -File .\media_node\install-media-node.ps1 `
 4. 可选：复制旧 `.asr-runtime\models` 或 `media_node\.runtime\models`
    到新电脑的 `media_node\.runtime\models`，可避免重新下载模型。
 5. 双击新电脑的 `media_node\启动媒体节点.cmd`。主站无需改域名、Nginx或开放端口。
+
+节点启动后，H3 任务的正常日志顺序为 `video.h3_head_trim_queued`（服务器）、
+`media.h3_head_trim_claimed`（领取）、`media.h3_head_trim_completed`（回传）。节点断线时任务保持
+`PENDING`，租约中断时会从 `RUNNING` 自动回到 `PENDING`；远程 ASR 明确失败时服务器记录
+`REMOTE_ASR_FAILED` 并按输出合同固定同步裁剪 300ms，避免重复 H3 付费调用。
 
 同一时刻只建议运行一个正式媒体节点。任务租约可以处理意外断线，但同时运行多个
 节点会让任务在不同电脑之间分配，不利于观察资源占用。
