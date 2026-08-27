@@ -415,7 +415,7 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
         assert batch.h3_config.generation_tail_seconds == pytest.approx(0.1)
         assert (
             batch.h3_config.prompt_template_version
-            == "h3.prompt.ref2va.loop_anchor.v1"
+            == "h3.prompt.ref2va.loop_anchor.v2"
         )
         assert db.query(H3BatchConfig).count() == 1
         assert db.query(H3ItemConfig).count() == 1
@@ -423,7 +423,7 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
         assert {
             config.prompt_template_version
             for config in db.query(H3SegmentConfig).all()
-        } == {"h3.prompt.ref2va.loop_anchor.v1"}
+        } == {"h3.prompt.ref2va.loop_anchor.v2"}
         segment_configs = (
             db.query(H3SegmentConfig).order_by(H3SegmentConfig.segment_id).all()
         )

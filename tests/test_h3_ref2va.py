@@ -19,6 +19,7 @@ from app.services.h3.prompt import (
     H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION,
     H3_MANUAL_PROMPT_OVERRIDE_VERSION,
     H3_MAX_PROMPT_CHARS,
+    H3_PROMPT_TEMPLATE_VERSION,
     H3PromptRequest,
     compile_loop_anchor_ref2va_prompt,
     compile_ref2va_prompt,
@@ -237,6 +238,7 @@ def test_prompt_has_exact_six_sections_and_audio_dialogue() -> None:
     assert [prompt.index(section) for section in sections] == sorted(
         prompt.index(section) for section in sections
     )
+    assert H3_PROMPT_TEMPLATE_VERSION == "h3.prompt.ref2va.v9"
     assert prompt.count("subject_definitions:") == 1
     assert "<d>[Chinese] 真正的优势，是把复杂的事情长期做对。</d>" in prompt
     assert "</d> <cutoff>" in prompt
@@ -257,6 +259,8 @@ def test_prompt_has_exact_six_sections_and_audio_dialogue() -> None:
     assert "<Picture 1> (primary visual anchor): fully_preserved" in prompt
     assert "[keyframe completion + reference generation + audio reuse]" in prompt
     assert "The camera remains locked throughout the shot" in prompt
+    assert "Keep the character's clothing colors unchanged throughout." in prompt
+    assert "Keep the character's on-screen size unchanged throughout." in prompt
     assert "The frame remains clean, natural, and unobstructed" in prompt
     assert "subtitles" not in prompt
     assert "captions" not in prompt
@@ -313,6 +317,8 @@ def test_prompt_without_identity_images_does_not_invent_picture_roles() -> None:
     assert "<Picture" not in prompt
     assert "identity pictures" not in prompt
     assert "<Subject 1> is the same single person appearing in <Video 1>" in prompt
+    assert "Keep the character's clothing colors unchanged throughout." in prompt
+    assert "Keep the character's on-screen size unchanged throughout." in prompt
 
 
 def test_single_identity_image_only_supplements_video_guided_face_identity() -> None:
@@ -376,7 +382,7 @@ def test_loop_anchor_prompt_uses_picture_one_at_both_boundaries() -> None:
         )
     )
 
-    assert H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION == "h3.prompt.ref2va.loop_anchor.v1"
+    assert H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION == "h3.prompt.ref2va.loop_anchor.v2"
     assert prompt.count("subject_definitions:") == 1
     assert prompt.count("summary:") == 1
     assert prompt.count("retention_analysis:") == 1
@@ -387,6 +393,14 @@ def test_loop_anchor_prompt_uses_picture_one_at_both_boundaries() -> None:
     assert "The first visible frame corresponds to <Picture 1>." in prompt
     assert "The final visible frame corresponds to <Picture 1>" in prompt
     assert "during the remaining visual tail" in prompt
+    summary_section = prompt.split("summary:\n", 1)[1].split("\n\nretention_analysis:", 1)[0]
+    detailed_section = prompt.split("detailed_description:\n", 1)[1].split(
+        "\n\noverall_soundscape:", 1
+    )[0]
+    assert "Keep the character's clothing colors unchanged throughout." not in summary_section
+    assert "Keep the character's on-screen size unchanged throughout." not in summary_section
+    assert "Keep the character's clothing colors unchanged throughout." in detailed_section
+    assert "Keep the character's on-screen size unchanged throughout." in detailed_section
     assert "<d>[Chinese] 这一段中间动作可以自然变化，结尾回到封面。</d>" in prompt
     assert "<cutoff>" not in prompt
     assert "<Picture 6>" not in prompt

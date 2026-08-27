@@ -130,8 +130,8 @@ def test_admin_manages_shared_h3_workflow_password_without_exposing_it(
     page = client.get("/admin/runninghub-pool/workflows")
     assert page.status_code == 200
     assert "已加密保存，留空不修改" in page.text
-    assert "h3.prompt.ref2va.v8" in page.text
-    assert "h3.prompt.ref2va.loop_anchor.v1" in page.text
+    assert "h3.prompt.ref2va.v9" in page.text
+    assert "h3.prompt.ref2va.loop_anchor.v2" in page.text
     assert "此处不提供手工覆盖" in page.text
     assert password not in page.text
     assert original_ciphertext not in page.text

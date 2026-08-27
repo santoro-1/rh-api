@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from app.services.h3.duration import H3_MAX_REQUEST_SECONDS
 
 
-H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.v8"
-H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.loop_anchor.v1"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.v9"
+H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.loop_anchor.v2"
 H3_MANUAL_PROMPT_OVERRIDE_VERSION = "h3.prompt.manual-override.v1"
 H3_MAX_PROMPT_CHARS = 7000
 _RESERVED_PROMPT_SYNTAX = re.compile(
@@ -188,7 +188,8 @@ def _picture_guided_sections(
         f"[Shot 1] The shot begins from {opening_anchor}. <Subject 1> appears with the complete identity, hairstyle, "
         "wardrobe, accessories, body appearance, and current styling established by <Picture 1>, inside <Subject 2>. "
         "The camera remains locked throughout the shot. The viewpoint, shot size, framing, subject scale, and composition "
-        "remain stable and visually consistent. <Subject 3> guides the person's natural expression cadence, head-and-"
+        "remain stable and visually consistent. Keep the character's clothing colors unchanged throughout. Keep the "
+        "character's on-screen size unchanged throughout. <Subject 3> guides the person's natural expression cadence, head-and-"
         "shoulder movement, gesture habits, and coordinated upper-body performance. "
         f"{spoken_dialogue} Preserve the naturally balanced mouth proportions, facial identity, and "
         "distinctive smile characteristics. Clear Mandarin articulation uses restrained realistic motion. Maintain "
@@ -264,7 +265,8 @@ def _video_guided_sections(
     detailed = (
         "Use a realistic, polished natural-talking style in one continuous shot. [Shot 1] <Subject 1> appears inside "
         "<Subject 2>. The camera remains locked throughout the shot. The viewpoint, shot size, framing, subject scale, "
-        "and composition remain stable and visually consistent. <Subject 3> guides the person's natural expression "
+        "and composition remain stable and visually consistent. Keep the character's clothing colors unchanged throughout. "
+        "Keep the character's on-screen size unchanged throughout. <Subject 3> guides the person's natural expression "
         "cadence, head-and-shoulder movement, gesture habits, and coordinated upper-body performance. "
         f"{spoken_dialogue} Clear Mandarin articulation uses restrained realistic motion. Maintain breathing, "
         "eye motion, posture adjustment, and continuous natural upper-body micro-movement. Gestures respond naturally "
@@ -413,6 +415,7 @@ def compile_loop_anchor_ref2va_prompt(request: H3PromptRequest) -> str:
         "pose, expression, gaze direction, hand visibility, posture, and current styling established by <Picture 1>, "
         "inside <Subject 2>. The camera remains locked throughout the entire shot. The viewpoint, shot size, framing, "
         "subject scale, environment, lighting, and composition remain stable and visually consistent. "
+        "Keep the character's clothing colors unchanged throughout. Keep the character's on-screen size unchanged throughout. "
         "From the first audible moment, <Subject 1> (S1) physically speaks using <Audio 1> and says exactly, "
         f"<d>[Chinese] {segment_text}</d> The mouth, lips, jaw, cheeks, and subtle facial muscles follow every audible "
         "word, pause, rhythm, pace, tone, and delivery in <Audio 1> accurately and naturally. The reused audio must "
