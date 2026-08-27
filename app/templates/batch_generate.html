@@ -280,7 +280,12 @@
       </table>
     </div>
     <label>整批补充方向（可选）
-      <textarea id="h3-user-direction" rows="3" maxlength="1000" placeholder="留空使用系统固定 H3 提示词"></textarea>
+      <textarea id="h3-user-direction" rows="3" maxlength="1000" placeholder="仅在未填写人工总体提示词时生效"></textarea>
+      <span class="field-help">留空使用系统固定方向；填写人工总体提示词后，本字段不再追加。</span>
+    </label>
+    <label>人工总体提示词（可选，完整覆盖）
+      <textarea id="h3-prompt-override" rows="8" maxlength="7000" placeholder="留空使用系统自动编译的六段式 H3 Prompt；填写后每个自动分段都原样使用这里的完整 Prompt"></textarea>
+      <span class="field-help">这是完整覆盖，不是补充方向。启用后系统不会自动加入分段台词、音频复用、人物一致性或首尾同图等默认约束。</span>
     </label>
     <label class="inline-check batch-confirm">
       <input id="h3-input-confirm" type="checkbox">

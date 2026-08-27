@@ -28,7 +28,7 @@
         <strong>内置 PromptProfile</strong>
         <input value="{{ h3_prompt_template_version }}" readonly aria-label="H3 内置 PromptProfile 版本">
         <p class="field-help">首尾同图模式：{{ h3_loop_anchor_prompt_template_version }}</p>
-        <p class="field-help">系统会根据每段台词、人物图、参考视频、音频、画幅和衔接方式自动编译完整六段式 Ref2VA Prompt。此处不提供手工覆盖，前端补充方向仍会作为受约束的附加要求参与编译。</p>
+        <p class="field-help">系统会根据每段台词、人物图、参考视频、音频、画幅和衔接方式自动编译完整六段式 Ref2VA Prompt。此处不提供手工覆盖；老网页 H3 批次可按次填写人工总体提示词，未启用覆盖时前端补充方向仍会作为受约束的附加要求参与编译。</p>
       </div>
       {% else %}
       <label>默认提示词<textarea name="default_prompt" rows="5">{{ config.default_prompt }}</textarea></label>

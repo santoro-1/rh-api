@@ -73,7 +73,7 @@ def test_h3_remote_asr_migration_preserves_existing_head_trim_job() -> None:
                 "AND name='h3_head_trim_jobs'"
             ).fetchone()
         connection.close()
-        assert revision == "0046_h3_remote_asr_jobs"
+        assert revision == "0047_h3_prompt_override"
         assert migrated[:5] == (
             1,
             "h3-task",
@@ -105,6 +105,31 @@ def test_h3_remote_asr_migration_preserves_existing_head_trim_job() -> None:
         database.unlink(missing_ok=True)
 
 
+def test_h3_manual_prompt_override_migration_adds_nullable_frozen_field() -> None:
+    runtime = PROJECT_ROOT / "tests" / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    database = runtime / f"migration-h3-prompt-override-{uuid.uuid4().hex}.db"
+    try:
+        _run_alembic(database, "0046_h3_remote_asr_jobs")
+        _run_alembic(database, "head")
+        with sqlite3.connect(database) as connection:
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            columns = {
+                row[1]: row[3]
+                for row in connection.execute(
+                    "PRAGMA table_info('h3_batch_configs')"
+                )
+            }
+        connection.close()
+
+        assert revision == "0047_h3_prompt_override"
+        assert columns["prompt_override"] == 0
+    finally:
+        database.unlink(missing_ok=True)
+
+
 def test_h3_motion_reference_pool_migration_is_reversible() -> None:
     runtime = PROJECT_ROOT / "tests" / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -123,7 +148,7 @@ def test_h3_motion_reference_pool_migration_is_reversible() -> None:
                 )
             }
         connection.close()
-        assert revision == "0046_h3_remote_asr_jobs"
+        assert revision == "0047_h3_prompt_override"
         assert {
             "motion_reference_index",
             "motion_reference_path",
@@ -198,7 +223,7 @@ def test_h3_access_password_migration_preserves_existing_capability() -> None:
             ).fetchall()
         connection.close()
 
-        assert revision == "0046_h3_remote_asr_jobs"
+        assert revision == "0047_h3_prompt_override"
         assert "access_password_encrypted" in columns
         assert row == ("workflow", None)
         assert foreign_key_errors == []
@@ -282,7 +307,7 @@ def test_h3_user_access_migration_backfills_existing_h3_members() -> None:
             ).fetchall()
         connection.close()
 
-        assert revision == "0046_h3_remote_asr_jobs"
+        assert revision == "0047_h3_prompt_override"
         assert grants == [(1, 1), (2, 0)]
         assert foreign_key_errors == []
     finally:
@@ -426,7 +451,7 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('h3_remote_asr_jobs')"
             )
         }
-    assert revision == "0046_h3_remote_asr_jobs"
+    assert revision == "0047_h3_prompt_override"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -679,7 +704,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0046_h3_remote_asr_jobs"
+        assert version == "0047_h3_prompt_override"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -741,7 +766,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0046_h3_remote_asr_jobs"
+        assert revision == "0047_h3_prompt_override"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -914,7 +939,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0046_h3_remote_asr_jobs"
+        assert revision == "0047_h3_prompt_override"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -1051,7 +1076,7 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
             ).fetchall()
         connection.close()
 
-        assert revision == "0046_h3_remote_asr_jobs"
+        assert revision == "0047_h3_prompt_override"
         assert grant == (7, 1, 1)
         assert batch_snapshot == (None, None)
         assert foreign_key_errors == []
@@ -1144,7 +1169,7 @@ def test_item_execution_pool_migration_copies_legacy_batch_snapshots():
             ).fetchone()
         connection.close()
 
-        assert revision == "0046_h3_remote_asr_jobs"
+        assert revision == "0047_h3_prompt_override"
         assert snapshots == ("[3,5]", "[7]")
     finally:
         database.unlink(missing_ok=True)
@@ -1222,6 +1247,6 @@ def test_multi_camera_migration_bootstraps_only_exact_active_accounts(tmp_path):
         ).fetchall()
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert revision == "0046_h3_remote_asr_jobs"
+    assert revision == "0047_h3_prompt_override"
     assert grants == [(1, 1), (2, 1)]
     assert foreign_key_errors == []

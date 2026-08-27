@@ -8,6 +8,7 @@ from app.services.h3.duration import H3_MAX_REQUEST_SECONDS
 
 H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.v8"
 H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.loop_anchor.v1"
+H3_MANUAL_PROMPT_OVERRIDE_VERSION = "h3.prompt.manual-override.v1"
 H3_MAX_PROMPT_CHARS = 7000
 _RESERVED_PROMPT_SYNTAX = re.compile(
     r"(?i)(?:subject_definitions|summary|retention_analysis|detailed_description|"
@@ -32,6 +33,25 @@ def _normalized_free_text(value: object, field: str, *, max_length: int) -> str:
     if len(text) > max_length:
         raise ValueError(f"{field}不能超过 {max_length} 个字符")
     return text
+
+
+def normalize_h3_prompt_override(value: object) -> str:
+    """Normalize an explicitly selected full Prompt without flattening its layout."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if "\x00" in text:
+        raise ValueError("H3 人工总体提示词不能包含空字符")
+    if len(text) > H3_MAX_PROMPT_CHARS:
+        raise ValueError(
+            f"H3 人工总体提示词不能超过 {H3_MAX_PROMPT_CHARS} 个字符（当前 {len(text)}）"
+        )
+    return text
+
+
+def validate_h3_prompt_request(request: H3PromptRequest) -> None:
+    """Validate the non-Prompt inputs even when the system compiler is bypassed."""
+
+    _validate_request(request)
 
 
 def _validate_request(request: H3PromptRequest) -> tuple[str, str]:

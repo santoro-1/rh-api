@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import GenerationTask
+from app.models import GenerationBatch, GenerationTask
 from tests.conftest import create_user, login
 from tests.test_h3_workbench import (
     _enable_h3_pool,
@@ -15,6 +16,23 @@ from tests.test_h3_workbench import (
 
 
 SCRIPT = "真正的优势，是把复杂的事情长期做对。"
+MANUAL_PROMPT = """subject_definitions:
+<Audio 1> is the complete spoken track.
+
+summary:
+[audio reuse] Generate one stable talking shot.
+
+retention_analysis:
+<Audio 1>: fully_copy - preserve the complete track.
+
+detailed_description:
+[Shot 1] Keep one stable, natural talking shot.
+
+overall_soundscape:
+Only <Audio 1> is audible.
+
+non_diegetic_music:
+N/A"""
 
 
 def _stage(client, kind: str, name: str, content: bytes, content_type: str) -> str:
@@ -41,6 +59,8 @@ def test_h3_is_integrated_into_batch_page_only_for_entitled_users(client) -> Non
     assert page.status_code == 200
     assert "MiniMax H3 多参考生成" in page.text
     assert 'id="h3-audio-files"' in page.text
+    assert 'id="h3-prompt-override"' in page.text
+    assert "人工总体提示词（可选，完整覆盖）" in page.text
     assert "逐条成品音频" in page.text
 
 
@@ -110,6 +130,8 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
             "defaults": {
                 "continuity_mode": "fast",
                 "generation_tail_seconds": 0.5,
+                "prompt_override": MANUAL_PROMPT,
+                "user_direction": "人工覆盖启用后不应追加这条方向",
                 "resolution": {
                     "aspect_ratio": "9:16 (Portrait Widescreen)",
                     "megapixels": 1,
@@ -144,6 +166,14 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
     assert audio_download.content == b"ID3final-audio"
     with SessionLocal() as db:
         assert db.query(GenerationTask).count() == 0
+        batch = db.get(GenerationBatch, payload["batch_id"])
+        assert batch.h3_config.prompt_override == MANUAL_PROMPT
+        assert batch.h3_config.prompt_profile_id == "manual_prompt_override_v1"
+        assert batch.h3_config.prompt_template_version == "h3.prompt.manual-override.v1"
+        assert batch.items[0].h3_config.user_direction == ""
+        assert {segment.prompt for segment in batch.items[0].segments} == {
+            MANUAL_PROMPT
+        }
 
     confirmed = client.post(
         f"/api/h3-page/batches/{payload['batch_id']}/confirm",
@@ -162,6 +192,10 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
     with SessionLocal() as db:
         task = db.query(GenerationTask).one()
         assert task.workflow_type == "minimax_h3_ref2va"
+        assert task.prompt == MANUAL_PROMPT
+        parameters = json.loads(task.input_payload)["parameters"]
+        assert parameters["prompt"] == MANUAL_PROMPT
+        assert parameters["prompt_template_version"] == "h3.prompt.manual-override.v1"
 
 
 def test_h3_page_audio_alignment_is_claimed_by_remote_media_node(

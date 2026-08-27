@@ -17,6 +17,7 @@ from app.services.h3.graph import (
 )
 from app.services.h3.prompt import (
     H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION,
+    H3_MANUAL_PROMPT_OVERRIDE_VERSION,
     H3_MAX_PROMPT_CHARS,
     H3PromptRequest,
     compile_loop_anchor_ref2va_prompt,
@@ -512,6 +513,57 @@ def test_h3_adapter_is_registered_and_freezes_prompt_duration_and_versions() -> 
     assert parameters["workflow_template_sha256"] == H3_WORKFLOW_TEMPLATE_CANONICAL_SHA256
     assert len(parameters["prompt_sha256"]) == 64
     assert parameters["seedvr2_enabled"] is False
+
+
+def test_h3_adapter_uses_explicit_manual_prompt_as_the_complete_override() -> None:
+    manual_prompt = """subject_definitions:
+<Audio 1> is the complete spoken track.
+
+summary:
+[audio reuse] Use the supplied audio.
+
+retention_analysis:
+<Audio 1>: fully_copy - preserve the complete track.
+
+detailed_description:
+[Shot 1] Keep one stable talking shot.
+
+overall_soundscape:
+Only <Audio 1> is audible.
+
+non_diegetic_music:
+N/A"""
+    parameters = H3Ref2VAWorkflow().validate_parameters(
+        {
+            "segment_text": "这段台词不应由系统再次写入人工 Prompt。",
+            "segment_index": 0,
+            "segment_count": 1,
+            "continuity_mode": "fast",
+            "prompt_override": manual_prompt,
+            "user_direction": "这条补充方向应被人工覆盖模式忽略",
+        },
+        {
+            "audio_duration_seconds": 6,
+            "identity_image_count": 0,
+            "has_continuity_anchor": False,
+        },
+    )
+
+    assert parameters["prompt"] == manual_prompt
+    assert parameters["prompt_template_version"] == H3_MANUAL_PROMPT_OVERRIDE_VERSION
+    assert parameters["user_direction"] == ""
+    assert "这段台词不应由系统再次写入人工 Prompt" not in parameters["prompt"]
+    assert "这条补充方向应被人工覆盖模式忽略" not in parameters["prompt"]
+
+    with pytest.raises(ValueError, match="不能超过 7000 个字符"):
+        H3Ref2VAWorkflow().validate_parameters(
+            {
+                "segment_text": "测试。",
+                "continuity_mode": "fast",
+                "prompt_override": "x" * 7001,
+            },
+            {"audio_duration_seconds": 5, "identity_image_count": 0},
+        )
 
 
 def test_h3_adapter_builds_raw_workflow_with_anchor_in_last_effective_slot() -> None:

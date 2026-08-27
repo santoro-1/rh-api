@@ -49,7 +49,9 @@ from app.services.h3.motion_references import (
 )
 from app.services.h3.prompt import (
     H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION,
+    H3_MANUAL_PROMPT_OVERRIDE_VERSION,
     H3_PROMPT_TEMPLATE_VERSION,
+    normalize_h3_prompt_override,
 )
 from app.services.h3.remote_asr import (
     H3_ASR_ACTION_AUDIO_ALIGNMENT,
@@ -115,6 +117,7 @@ from app.workflows.h3_ref2va import (
 H3_WORKFLOW = "minimax_h3_ref2va"
 H3_BATCH_SCHEMA = "jyd.h3-generation-batch.v1"
 H3_PROMPT_PROFILE_ID = "dual_reference_talking_v2"
+H3_MANUAL_PROMPT_PROFILE_ID = "manual_prompt_override_v1"
 H3_RAW_CUES_VERSION = "minimax.raw-cues.v1"
 H3_UPLOADED_AUDIO_CUES_VERSION = "funasr.aligned-cues.v1"
 H3_UPLOADED_AUDIO_BATCH_MARKER = "uploaded-audio"
@@ -555,7 +558,9 @@ def _clean_defaults(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise H3WorkbenchError("H3 批次默认参数必须是对象")
     if _FORBIDDEN_FIELDS.intersection(value):
-        raise H3WorkbenchError("H3 工作流 JSON 和完整 Prompt 不能由客户端提交")
+        raise H3WorkbenchError(
+            "H3 工作流 JSON 或 prompt 字段不受支持；人工总体提示词请使用 prompt_override"
+        )
     continuity_mode = str(
         value.get("continuity_mode") or H3_DEFAULT_CONTINUITY_MODE
     ).strip()
@@ -564,6 +569,14 @@ def _clean_defaults(value: object) -> dict[str, object]:
     user_direction = str(value.get("user_direction") or "").strip()
     if len(user_direction) > 1000:
         raise H3WorkbenchError("H3 用户补充方向不能超过 1000 个字符")
+    try:
+        prompt_override = normalize_h3_prompt_override(
+            value.get("prompt_override")
+        )
+    except ValueError as exc:
+        raise H3WorkbenchError(str(exc)) from exc
+    if prompt_override:
+        user_direction = ""
     try:
         tail = float(
             value.get(
@@ -576,12 +589,21 @@ def _clean_defaults(value: object) -> dict[str, object]:
     if not math.isfinite(tail) or not 0 <= tail <= 1:
         raise H3WorkbenchError("H3 生成尾部余量必须在 0 到 1 秒之间")
     return {
-        "prompt_profile_id": H3_PROMPT_PROFILE_ID,
-        "prompt_template_version": (
-            H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION
-            if continuity_mode == "loop_anchor"
-            else H3_PROMPT_TEMPLATE_VERSION
+        "prompt_profile_id": (
+            H3_MANUAL_PROMPT_PROFILE_ID
+            if prompt_override
+            else H3_PROMPT_PROFILE_ID
         ),
+        "prompt_template_version": (
+            H3_MANUAL_PROMPT_OVERRIDE_VERSION
+            if prompt_override
+            else (
+                H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION
+                if continuity_mode == "loop_anchor"
+                else H3_PROMPT_TEMPLATE_VERSION
+            )
+        ),
+        "prompt_override": prompt_override,
         "user_direction": user_direction,
         "continuity_mode": continuity_mode,
         "resolution": _clean_resolution(value.get("resolution")),
@@ -605,7 +627,9 @@ def _clean_rows(
         if not isinstance(raw, dict):
             raise H3WorkbenchError(f"第 {position} 行格式错误")
         if _FORBIDDEN_FIELDS.intersection(raw):
-            raise H3WorkbenchError("H3 工作流 JSON 和完整 Prompt 不能由客户端提交")
+            raise H3WorkbenchError(
+                "H3 工作流 JSON 或 prompt 字段不受支持；人工总体提示词请使用 prompt_override"
+            )
         row_id = str(raw.get("row_id") or raw.get("rowId") or "").strip()
         script_text = str(
             raw.get("script_text") or raw.get("scriptText") or ""
@@ -689,11 +713,13 @@ def _clean_rows(
         ).strip()
         if continuity not in H3_CONTINUITY_MODES:
             raise H3WorkbenchError(f"第 {position} 行连续性模式不合法")
-        user_direction = (
-            str(overrides["user_direction"]).strip()
-            if overrides.get("user_direction") is not None
-            else str(defaults["user_direction"])
-        )
+        user_direction = ""
+        if not defaults["prompt_override"]:
+            user_direction = (
+                str(overrides["user_direction"]).strip()
+                if overrides.get("user_direction") is not None
+                else str(defaults["user_direction"])
+            )
         if len(user_direction) > 1000:
             raise H3WorkbenchError(f"第 {position} 行补充方向不能超过 1000 个字符")
         resolution_override = {
@@ -1035,6 +1061,7 @@ def _prepare_segment(
             "segment_text": plan.script_text,
             "segment_index": plan.index,
             "segment_count": item_config_values["segment_count"],
+            "prompt_override": batch.h3_config.prompt_override,
             "user_direction": item_config_values["user_direction"],
             "continuity_mode": item_config_values["continuity_mode"],
             "generation_tail_seconds": batch.h3_config.generation_tail_seconds,
@@ -1246,8 +1273,9 @@ def prepare_h3_workbench_batch(
             batch=batch,
             contract_schema=H3_BATCH_SCHEMA,
             input_sha256="0" * 64,
-            prompt_profile_id=H3_PROMPT_PROFILE_ID,
+            prompt_profile_id=str(clean_defaults["prompt_profile_id"]),
             prompt_template_version=str(clean_defaults["prompt_template_version"]),
+            prompt_override=str(clean_defaults["prompt_override"]) or None,
             continuity_mode=str(clean_defaults["continuity_mode"]),
             aspect_ratio=str(clean_defaults["resolution"]["aspect_ratio"]),
             megapixels=float(clean_defaults["resolution"]["megapixels"]),
@@ -1738,6 +1766,7 @@ def _create_segment_task(
             "segment_text": segment.script_text,
             "segment_index": segment.segment_index,
             "segment_count": item.h3_config.segment_count,
+            "prompt_override": batch.h3_config.prompt_override,
             "user_direction": item.h3_config.user_direction,
             "continuity_mode": item.h3_config.continuity_mode,
             "generation_tail_seconds": batch.h3_config.generation_tail_seconds,

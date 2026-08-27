@@ -206,6 +206,7 @@
           defaults: {
             continuity_mode: byId("h3-continuity-mode").value,
             generation_tail_seconds: 0.1,
+            prompt_override: byId("h3-prompt-override").value,
             user_direction: byId("h3-user-direction").value.trim(),
             resolution: {
               aspect_ratio: byId("h3-aspect-ratio").value,
@@ -220,9 +221,11 @@
       if (!response.ok) throw new Error(errorMessage(payload, "H3 分段费用计算失败"));
       preparedBatchId = payload.batch_id;
       const fee = payload.fee_snapshot || {};
+      const manualPromptEnabled = Boolean(byId("h3-prompt-override").value.trim());
       byId("h3-fee-summary").textContent =
         `共 ${fee.segment_count || 0} 个分段；预计 ${fee.estimated_paid_calls || 0} 次付费调用；` +
-        `可直接复用 ${fee.reusable_result_count || 0} 个结果。`;
+        `可直接复用 ${fee.reusable_result_count || 0} 个结果。` +
+        (manualPromptEnabled ? "人工总体提示词覆盖已启用。" : "");
       byId("h3-fee-panel").classList.remove("hidden");
       byId("h3-fee-panel").scrollIntoView({behavior: "smooth", block: "start"});
     } catch (error) {
@@ -283,8 +286,10 @@
     state.scripts[Number(event.target.dataset.h3Script)] = event.target.value;
     resetQuote();
   });
-  ["h3-continuity-mode", "h3-aspect-ratio", "h3-megapixels", "h3-user-direction"]
+  ["h3-continuity-mode", "h3-aspect-ratio", "h3-megapixels"]
     .forEach((id) => byId(id).addEventListener("change", resetQuote));
+  ["h3-user-direction", "h3-prompt-override"]
+    .forEach((id) => byId(id).addEventListener("input", resetQuote));
   byId("h3-prepare-button").addEventListener("click", prepare);
   byId("h3-confirm-button").addEventListener("click", confirmCost);
   workflow.addEventListener("change", () => {

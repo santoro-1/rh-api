@@ -88,6 +88,7 @@ def _prepare_confirmed_h3_task(
     *,
     continuity_mode: str = "fast",
     workflow_access_password: str | None = None,
+    prompt_override: str = "",
 ) -> str:
     class _ControlledUploadDirectory:
         def __enter__(self) -> str:
@@ -144,7 +145,10 @@ def _prepare_confirmed_h3_task(
             "request_key": f"runtime-{username}",
             "reference_image_asset_ids": [image_id],
             "selected_account_ids": [account_id],
-            "defaults": {"continuity_mode": continuity_mode},
+            "defaults": {
+                "continuity_mode": continuity_mode,
+                "prompt_override": prompt_override,
+            },
             "rows": [
                 {
                     "row_id": "ROW-001",
@@ -471,11 +475,13 @@ def test_h3_soft_chain_preserves_full_av_then_unlocks_next_segment_with_last_slo
     client,
     monkeypatch,
 ) -> None:
+    manual_prompt = "Manual soft-chain H3 prompt used unchanged for every segment."
     batch_id = _prepare_confirmed_h3_task(
         client,
         monkeypatch,
         "h3-soft-chain-runtime",
         continuity_mode="soft_chain",
+        prompt_override=manual_prompt,
     )
     fake = _FakeH3RunningHub()
     monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
@@ -526,6 +532,7 @@ def test_h3_soft_chain_preserves_full_av_then_unlocks_next_segment_with_last_slo
         assert len(tasks) == 2
         first, second = tasks
         assert first.status == TaskStatus.SUCCESS.value
+        assert first.prompt == manual_prompt
         assert first.result_path.endswith("normalized.mp4")
         metadata = json.loads(first.output_metadata)
         assert metadata["output_contract_version"] == (
@@ -540,6 +547,7 @@ def test_h3_soft_chain_preserves_full_av_then_unlocks_next_segment_with_last_slo
         )
         assert metadata["normalized_timeline_duration_seconds"] == pytest.approx(5.7)
         assert second.status == TaskStatus.PENDING.value
+        assert second.prompt == manual_prompt
         second_payload = json.loads(second.input_payload)
         assert second_payload["assets"]["continuity_anchor"]["path"].endswith(
             "last-visible.png"
@@ -552,6 +560,7 @@ def test_h3_soft_chain_preserves_full_av_then_unlocks_next_segment_with_last_slo
         assert task_worker.claim_next_pending_task(db) == second.id
         task_worker.process_task(db, second.id)
         graph = json.loads(fake.last_payload["workflow"])
+        assert graph["83"]["inputs"]["text"] == manual_prompt
         assert graph["97"]["inputs"]["image"].startswith("openapi/")
         assert graph["178"]["inputs"]["image"].endswith("last-visible.png")
         assert graph["108"]["inputs"]["ref_images.ref_image_5"] == ["176", 0]
