@@ -131,6 +131,9 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
     payload = prepared.json()
     assert payload["status"] == "AWAITING_COST_CONFIRMATION"
     assert payload["fee_snapshot"]["estimated_paid_calls"] == 1
+    draft_history = client.get("/batches")
+    assert draft_history.status_code == 200
+    assert "上传音频 H3 批次" not in draft_history.text
     audio_url = payload["items"][0]["input_audio_download_url"]
     assert audio_url.endswith("/audio")
     audio_download = client.get(
@@ -148,6 +151,14 @@ def test_uploaded_audio_h3_prepare_and_confirm_are_separate_steps(
     )
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["status"] == "ACTIVE"
+    history = client.get("/batches")
+    assert history.status_code == 200
+    assert "上传音频 H3 批次" in history.text
+    assert "MiniMax H3 多参考生成" in history.text
+    assert f'href="/batches/{payload["batch_id"]}"' in history.text
+    detail = client.get(f'/batches/{payload["batch_id"]}')
+    assert detail.status_code == 200
+    assert "MiniMax H3 多参考生成" in detail.text
     with SessionLocal() as db:
         task = db.query(GenerationTask).one()
         assert task.workflow_type == "minimax_h3_ref2va"

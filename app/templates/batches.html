@@ -21,7 +21,15 @@
             <td>{{ batch.created_at|beijing_datetime }}</td>
             {% if current_user.is_admin %}<td>{{ batch.user.username }}</td>{% endif %}
             <td><a href="/batches/{{ batch.id }}">{{ batch.name }}</a><br><small>{{ batch.id }}</small></td>
-            <td>{{ "数字人视频" if batch.workflow_type == "digital_human" else "视频对口型" }}<br><small>{{ "脚本语音" if batch.audio_mode == "minimax" else "上传音频" }}</small></td>
+            <td>
+              {% if batch.workflow_type == "minimax_h3_ref2va" %}
+                MiniMax H3 多参考生成<br><small>H3 分段音频</small>
+              {% elif batch.workflow_type == "digital_human" %}
+                数字人视频<br><small>{{ "脚本语音" if batch.audio_mode == "minimax" else "上传音频" }}</small>
+              {% else %}
+                视频对口型<br><small>{{ "脚本语音" if batch.audio_mode == "minimax" else "上传音频" }}</small>
+              {% endif %}
+            </td>
             <td>{{ summary.finished }}/{{ summary.total }}（{{ summary.progress }}%）</td>
             <td>{{ {"ACTIVE":"处理中","SUCCESS":"全部成功","PARTIAL_FAILED":"部分失败","FAILED":"失败"}[summary.status] }}</td>
             <td>

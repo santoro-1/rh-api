@@ -6,8 +6,13 @@
     <h1>{{ batch.name }}</h1>
     <p class="muted">
       所属账号：<strong>{{ batch.user.username }}</strong> ·
-      {{ "数字人视频" if batch.workflow_type == "digital_human" else "视频对口型" }} ·
-      {{ "脚本生成语音" if batch.audio_mode == "minimax" else "上传音频" }} ·
+      {% if batch.workflow_type == "minimax_h3_ref2va" %}
+        MiniMax H3 多参考生成 · H3 分段音频 ·
+      {% elif batch.workflow_type == "digital_human" %}
+        数字人视频 · {{ "脚本生成语音" if batch.audio_mode == "minimax" else "上传音频" }} ·
+      {% else %}
+        视频对口型 · {{ "脚本生成语音" if batch.audio_mode == "minimax" else "上传音频" }} ·
+      {% endif %}
       {{ batch.created_at|beijing_datetime }}
     </p>
   </div>

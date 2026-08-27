@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import (
     AudioTaskStatus,
+    BATCH_SOURCE_H3_WORKBENCH,
     BATCH_SOURCE_LEGACY_WEB,
     GenerationBatch,
     GenerationSegment,
@@ -604,7 +605,15 @@ def batches_page(
 ):
     statement = (
         batch_query()
-        .where(GenerationBatch.source_channel == BATCH_SOURCE_LEGACY_WEB)
+        .where(
+            or_(
+                GenerationBatch.source_channel == BATCH_SOURCE_LEGACY_WEB,
+                and_(
+                    GenerationBatch.source_channel == BATCH_SOURCE_H3_WORKBENCH,
+                    GenerationBatch.status != "AWAITING_COST_CONFIRMATION",
+                ),
+            )
+        )
         .order_by(GenerationBatch.created_at.desc())
     )
     if not current_user.is_admin:
