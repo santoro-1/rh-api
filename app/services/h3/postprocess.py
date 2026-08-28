@@ -22,7 +22,8 @@ class H3PostprocessError(RuntimeError):
 logger = logging.getLogger(__name__)
 
 
-H3_OUTPUT_CONTRACT_VERSION = "h3.output.generated-av-head-trim.v3"
+H3_HEAD_TRIM_ENABLED = False
+H3_OUTPUT_CONTRACT_VERSION = "h3.output.generated-av-head-trim-disabled.v4"
 H3_HEAD_TRIM_FALLBACK_SECONDS = 0.300
 H3_HEAD_TRIM_PREROLL_SECONDS = 0.040
 H3_HEAD_TRIM_PREFIX_TOKENS = 3
@@ -179,6 +180,20 @@ def fallback_h3_head_trim(reason: str) -> H3HeadTrimDecision:
         alignment_match_ratio=None,
         matched_prefix_tokens=0,
         fallback_reason=reason,
+    )
+
+
+def disabled_h3_head_trim() -> H3HeadTrimDecision:
+    """Preserve the full H3 segment while retaining the head-trim implementation."""
+
+    return H3HeadTrimDecision(
+        mode="disabled",
+        trim_seconds=0.0,
+        first_script_token_start_seconds=None,
+        alignment_provider=None,
+        alignment_match_ratio=None,
+        matched_prefix_tokens=0,
+        fallback_reason="feature_disabled",
     )
 
 
@@ -413,12 +428,16 @@ def postprocess_h3_result(
     needs_continuity_anchor: bool,
     alignment_provider: AudioAlignmentProvider | None = None,
     head_trim_decision: H3HeadTrimDecision | None = None,
+    head_trim_enabled: bool = H3_HEAD_TRIM_ENABLED,
 ) -> H3NormalizedResult:
     normalized = source.with_name(f"{source.stem}.normalized.mp4")
     anchor = source.with_name(f"{source.stem}.last-visible.png")
-    head_trim = head_trim_decision or detect_h3_head_trim(
-        source, script_text, alignment_provider
-    )
+    if head_trim_enabled:
+        head_trim = head_trim_decision or detect_h3_head_trim(
+            source, script_text, alignment_provider
+        )
+    else:
+        head_trim = disabled_h3_head_trim()
     normalize_h3_video(
         source,
         normalized,

@@ -10,6 +10,7 @@ import pytest
 from app.services.h3.duration import plan_h3_duration
 from app.services.h3.graph import (
     H3_DEFAULT_TEMPLATE_PATH,
+    H3_SAMPLING_STEPS,
     H3_WORKFLOW_TEMPLATE_CANONICAL_SHA256,
     H3DynamicGraphBuilder,
     H3GraphBuildRequest,
@@ -74,6 +75,7 @@ def _request(image_count: int = 0, **overrides: object) -> H3GraphBuildRequest:
 def test_frozen_template_canonical_hash_matches_reviewed_source() -> None:
     template = json.loads(H3_DEFAULT_TEMPLATE_PATH.read_text(encoding="utf-8"))
     assert len(template) == 44
+    assert template["248"]["inputs"]["steps"] == H3_SAMPLING_STEPS == 4
     assert _canonical_sha256(template) == H3_WORKFLOW_TEMPLATE_CANONICAL_SHA256
 
 
@@ -123,6 +125,7 @@ def test_dynamic_graph_supports_tightly_connected_zero_to_five_identity_images(
     assert workflow["135"]["inputs"]["video"] == "uploads/per-script-reference.mp4"
     assert workflow["138"]["inputs"]["audio"] == "uploads/segment-001.wav"
     assert workflow["243"]["inputs"]["noise_seed"] == 42
+    assert workflow["248"]["inputs"]["steps"] == 4
     assert "387" in workflow
     assert workflow["387"]["inputs"]["save_output"] is True
 
@@ -238,33 +241,33 @@ def test_prompt_has_exact_six_sections_and_audio_dialogue() -> None:
     assert [prompt.index(section) for section in sections] == sorted(
         prompt.index(section) for section in sections
     )
-    assert H3_PROMPT_TEMPLATE_VERSION == "h3.prompt.ref2va.v9"
+    assert H3_PROMPT_TEMPLATE_VERSION == "h3.prompt.ref2va.v10"
     assert prompt.count("subject_definitions:") == 1
     assert "<d>[Chinese] 真正的优势，是把复杂的事情长期做对。</d>" in prompt
     assert "</d> <cutoff>" in prompt
     assert "<Audio 1>: fully_copy" in prompt
-    assert "<Picture 1> and <Picture 2>" in prompt
-    assert (
-        "<Subject 1> is the same single person defined jointly by <Picture 1> and <Picture 2>"
-        in prompt
-    )
-    assert "<Picture 1> establishes the complete on-screen identity" in prompt
-    assert "distinctive smiling appearance" in prompt
-    assert "<Subject 1> (appears throughout [Shot 1]): fully_preserved" in prompt
-    assert "<Subject 2> is the environment, lighting, viewpoint" in prompt
-    assert "<Subject 2> (appears throughout [Shot 1]): fully_preserved" in prompt
-    assert "<Subject 3> is the natural speaking-performance language demonstrated in <Video 1>" in prompt
-    assert "<Subject 3> (appears throughout [Shot 1]): partially_preserved" in prompt
+    assert "The supporting picture <Picture 2> refines facial identity and structure only" in prompt
+    assert "<Subject 1> is the same person established by <Picture 1>" in prompt
+    assert "<Subject 2> is the same wardrobe in <Picture 1>" in prompt
+    assert "<Subject 3> is the same accessories in <Picture 1>" in prompt
+    assert "<Subject 4> is the environment and camera-original rendering" in prompt
+    assert "<Subject 5> is the reference camera viewpoint and spatial state" in prompt
+    assert "<Subject 6> is the local speaking-performance language in <Video 1>" in prompt
+    assert "<Subject 1> (throughout [Shot 1]): fully_preserved" in prompt
+    assert "<Subject 2> (throughout [Shot 1]): fully_preserved" in prompt
+    assert "<Subject 6> (guides [Shot 1]): partially_preserved" in prompt
     assert "<Video 1> (whole-video structural reference)" not in prompt
-    assert "<Picture 1> (primary visual anchor): fully_preserved" in prompt
-    assert "[keyframe completion + reference generation + audio reuse]" in prompt
-    assert "The camera remains locked throughout the shot" in prompt
-    assert "Keep the character's clothing colors unchanged throughout." in prompt
-    assert "Keep the character's on-screen size unchanged throughout." in prompt
-    assert "The frame remains clean, natural, and unobstructed" in prompt
+    assert "<Picture 1> ([Shot 1] persistent anchor): fully_preserved" in prompt
+    assert "[reference generation + audio reuse]" in prompt
+    assert "The camera continuously retains <Subject 5>'s matched reference viewpoint" in prompt
+    assert "The upper-torso center stays within a stable, naturally narrow depth envelope" in prompt
+    assert "the same garments with established construction" in prompt
+    assert "base colors, and overall color appearance" in prompt
+    assert "Use a realistic, polished natural-talking style" not in prompt
     assert "subtitles" not in prompt
     assert "captions" not in prompt
     assert "No additional ambience" not in prompt
+    assert "The complete audible soundscape is <Audio 1>" in prompt
     assert "non_diegetic_music:\nN/A" in prompt
     assert len(prompt) <= H3_MAX_PROMPT_CHARS
 
@@ -285,13 +288,14 @@ def test_audio_only_dialogue_variant_removes_transcript_without_other_prompt_cha
     )
     transcript_block = (
         "From the first audible moment, <Subject 1> (S1) physically speaks using <Audio 1> and says exactly, "
-        "<d>[Chinese] 真正的优势，是把复杂的事情长期做对。</d> The mouth, lips, jaw, and subtle facial muscles "
-        "follow every audible word, pause, and rhythm accurately."
+        "<d>[Chinese] 真正的优势，是把复杂的事情长期做对。</d> The mouth, lips, jaw, cheeks, and facial muscles "
+        "follow every word, pause, rhythm, pace, tone, and delivery accurately, coordinated with expression, "
+        "breathing, head motion, and posture."
     )
     audio_only_block = (
         "From the first audible moment, <Subject 1> (S1) naturally speaks in precise synchronization with <Audio 1>. "
-        "The mouth, lips, jaw, and subtle facial muscles follow the supplied speech timing, pauses, rhythm, pace, "
-        "and delivery accurately and naturally."
+        "The mouth, lips, jaw, cheeks, and facial muscles follow the supplied speech timing, pauses, rhythm, pace, tone, "
+        "and delivery accurately, coordinated with expression, breathing, head motion, and posture."
     )
 
     assert transcript_block in transcript_prompt
@@ -299,7 +303,7 @@ def test_audio_only_dialogue_variant_removes_transcript_without_other_prompt_cha
     assert "<d>" not in audio_only_prompt
     assert "真正的优势，是把复杂的事情长期做对。" not in audio_only_prompt
     assert "<Audio 1>: fully_copy - reuse it 1:1 as the complete final audio track." in audio_only_prompt
-    assert "overall_soundscape:\n<Audio 1> is the complete final audio track." in audio_only_prompt
+    assert "overall_soundscape:\nThe complete audible soundscape is <Audio 1>" in audio_only_prompt
     assert transcript_prompt.replace(transcript_block, audio_only_block) == audio_only_prompt
 
 
@@ -321,7 +325,7 @@ def test_prompt_without_identity_images_does_not_invent_picture_roles() -> None:
     assert "Keep the character's on-screen size unchanged throughout." in prompt
 
 
-def test_single_identity_image_only_supplements_video_guided_face_identity() -> None:
+def test_single_identity_image_uses_picture_one_as_the_complete_c_version_anchor() -> None:
     prompt = compile_ref2va_prompt(
         H3PromptRequest(
             segment_text="继续把事情做好。",
@@ -332,12 +336,13 @@ def test_single_identity_image_only_supplements_video_guided_face_identity() -> 
         )
     )
 
-    assert "<Subject 1> is the same single person appearing in <Video 1>" in prompt
-    assert "<Picture 1> supplies additional high-detail evidence" in prompt
-    assert "it does not define wardrobe, environment, framing, pose, or the opening frame" in prompt
+    assert "<Subject 1> is the same person established by <Picture 1>" in prompt
+    assert "<Picture 1> is the authoritative persistent visual, rendering, viewpoint, and spatial anchor" in prompt
+    assert "supporting picture" not in prompt
+    assert "<Subject 2> is the same wardrobe in <Picture 1>" in prompt
     assert "[reference generation + audio reuse]" in prompt
     assert "[keyframe completion" not in prompt
-    assert "<Picture 1> (primary visual anchor)" not in prompt
+    assert "<Picture 1> ([Shot 1] persistent anchor): fully_preserved" in prompt
     assert "<cutoff>" not in prompt
 
 
@@ -355,7 +360,8 @@ def test_continuity_anchor_uses_sixth_slot_after_five_identity_images() -> None:
 
     assert "<Picture 6> is the previous segment's final visible frame" in prompt
     assert "<Picture 6> ([Shot 1] soft opening keyframe anchor" in prompt
-    assert "[keyframe completion + reference generation + audio reuse]" in prompt
+    assert "[reference generation + audio reuse]" in prompt
+    assert "The opening frame inherits the preceding pose and motion from <Picture 6>" in prompt
     assert "trimming away the provider-only tail" not in prompt
 
 
@@ -371,38 +377,32 @@ def test_prompt_rejects_section_or_reference_injection() -> None:
         )
 
 
-def test_loop_anchor_prompt_uses_picture_one_at_both_boundaries() -> None:
-    prompt = compile_loop_anchor_ref2va_prompt(
-        H3PromptRequest(
-            segment_text="这一段中间动作可以自然变化，结尾回到封面。",
-            segment_duration_seconds=9.5,
-            segment_index=0,
-            segment_count=3,
-            identity_image_count=1,
-        )
+def test_loop_anchor_prompt_reuses_the_picture_anchor_c_version() -> None:
+    request = H3PromptRequest(
+        segment_text="这一段中间动作可以自然变化，结尾回到封面。",
+        segment_duration_seconds=9.5,
+        segment_index=0,
+        segment_count=3,
+        identity_image_count=1,
     )
+    prompt = compile_loop_anchor_ref2va_prompt(request)
 
-    assert H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION == "h3.prompt.ref2va.loop_anchor.v2"
+    assert H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION == "h3.prompt.ref2va.loop_anchor.v3"
+    assert prompt == compile_ref2va_prompt(request)
     assert prompt.count("subject_definitions:") == 1
     assert prompt.count("summary:") == 1
     assert prompt.count("retention_analysis:") == 1
     assert prompt.count("detailed_description:") == 1
     assert prompt.count("overall_soundscape:") == 1
     assert prompt.count("non_diegetic_music:") == 1
-    assert "serves as both the first frame and the final frame" in prompt
-    assert "The first visible frame corresponds to <Picture 1>." in prompt
-    assert "The final visible frame corresponds to <Picture 1>" in prompt
-    assert "during the remaining visual tail" in prompt
-    summary_section = prompt.split("summary:\n", 1)[1].split("\n\nretention_analysis:", 1)[0]
-    detailed_section = prompt.split("detailed_description:\n", 1)[1].split(
-        "\n\noverall_soundscape:", 1
-    )[0]
-    assert "Keep the character's clothing colors unchanged throughout." not in summary_section
-    assert "Keep the character's on-screen size unchanged throughout." not in summary_section
-    assert "Keep the character's clothing colors unchanged throughout." in detailed_section
-    assert "Keep the character's on-screen size unchanged throughout." in detailed_section
+    assert "The opening frame adopts <Picture 1>'s reference viewpoint and composition" in prompt
+    assert "The final moments continue from the preceding motion and softly favor" in prompt
+    assert "<Subject 2> persists as the same garments" in prompt
+    assert "base colors, and overall color appearance" in prompt
+    assert "serves as both the first frame and the final frame" not in prompt
+    assert "The final visible frame corresponds to <Picture 1>" not in prompt
     assert "<d>[Chinese] 这一段中间动作可以自然变化，结尾回到封面。</d>" in prompt
-    assert "<cutoff>" not in prompt
+    assert "</d> <cutoff>" in prompt
     assert "<Picture 6>" not in prompt
     assert len(prompt) <= H3_MAX_PROMPT_CHARS
 
@@ -664,7 +664,7 @@ def test_h3_adapter_rejects_asset_snapshot_mismatch_and_fast_anchor() -> None:
         parameters["prompt_template_version"]
         == H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION
     )
-    assert "serves as both the first frame and the final frame" in parameters["prompt"]
+    assert "The final moments continue from the preceding motion and softly favor" in parameters["prompt"]
     with pytest.raises(ValueError, match="缺少 identity_image_1"):
         workflow.serialize_input(
             [_asset("video"), _asset("audio")],

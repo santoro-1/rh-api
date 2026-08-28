@@ -113,7 +113,7 @@ RunningHub 取消。取消成功后写入 `REMOTE_WATCHDOG_TIMEOUT` 终态；取
 受控的老网站多机位入口是独立例外，来源固定为 `multi_camera_web_v1`。它不改变上述旧批量
 和长音频规则，而是在 `/generate/multi-camera` 中把每条上传音频独立按自然停顿规划为不超过
 20 秒的片段，再根据冻结的 `1～N` 图片组为各片段选择机位。每段仍调用现有
-`digital_human` 适配器创建一张图片加一段音频的标准 `GenerationTask`，视频 Worker 无新分支。
+  `digital_human` 适配器创建一张图片加一段音频的标准 `GenerationTask`，视频 Worker 无新分支。
 批次行固定 `merged_video_status=NOT_APPLICABLE`，只交付有序片段和 `manifest.json`，不进入
 旧网页拼接或新版剪映工作台。权限由 `multi_camera_user_access.user_id` 判断；迁移只按精确
 用户名初始化当前环境的 `admin`、`Cx_ceshi` 用户 ID，其他管理员也不会自动获得权限。
@@ -737,10 +737,23 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - 输出合同版本必须进入分段内容摘要，使升级前已经成功的静音/换音轨结果不能被新任务命中。
 - JYD 交接由本地 H3 工作台完成：无损合并 H3 音画，再拆出从 0 秒开始的静音基础视频和 H3
   权威音频。字幕以 H3 实际分段窗口为硬边界，FunASR 只对齐冻结原稿到 H3 实际语音。
+- `h3_item_payload()` 对成功分段返回 `normalized_video_sha256` 与 `completed_at`，供 JYD 在稳定的
+  分段下载 URL 后识别主动重生成的新结果。字段只在当前未失效成功结果存在时返回，客户端不得
+  把 URL 本身当成不可变版本号。
 - A/B 脚本恢复旧检查点时只可从已经下载的节点 387 原始 MP4 零费用重建；任何新的远端提交仍
   必须通过累计付费调用上限。
 
 ## 27. H3 ASR 自适应片头裁剪（2026-08-24）
+
+2026-08-27 的真实成片复核决定暂时禁用该能力，但不是删除实现：
+
+- `app/services/h3/postprocess.py` 的 `H3_HEAD_TRIM_ENABLED = False` 是当前唯一启停开关。关闭时
+  `postprocess_h3_result()` 使用 `disabled` 决定、裁切量为 0，并通过 stream-copy 保留完整音画。
+- 远程媒体模式不会创建新的 `h3_head_trim` 任务，本地模式不会取得片头 ASR provider；上传音频
+  在生成前执行的 `h3_audio_alignment` 是另一条安全切段链路，继续正常工作。
+- 当前输出合同为 `h3.output.generated-av-head-trim-disabled.v4`，继续进入分段内容摘要，防止新任务
+  复用 v3 已裁切结果。以后重新启用时也必须升级合同版本。
+- 下列 v3 算法、远程 action、校验器和测试全部保留，打开开关后仍可使用。
 
 - 输出合同升级为 `h3.output.generated-av-head-trim.v3`，并继续进入 H3 分段内容摘要；v2 的完整
   未裁剪成功结果不能被新批次按相同输入复用。

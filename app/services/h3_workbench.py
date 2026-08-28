@@ -2607,6 +2607,28 @@ def h3_item_payload(item: GenerationBatchItem) -> dict[str, object]:
                     )
                     else None
                 ),
+                # JYD downloads successful segments incrementally.  The URL is
+                # stable across a manual regeneration, so consumers need an
+                # immutable result identity to avoid keeping the previous MP4.
+                "normalized_video_sha256": (
+                    segment.h3_config.normalized_video_sha256
+                    if (
+                        segment.h3_config.normalized_video_path
+                        and segment.h3_config.invalidated_at is None
+                        and segment.generation_task is not None
+                        and segment.generation_task.status == TaskStatus.SUCCESS.value
+                    )
+                    else None
+                ),
+                "completed_at": (
+                    segment.generation_task.completed_at.isoformat()
+                    if (
+                        segment.generation_task is not None
+                        and segment.generation_task.status == TaskStatus.SUCCESS.value
+                        and segment.generation_task.completed_at is not None
+                    )
+                    else None
+                ),
                 "error_code": (
                     segment.generation_task.error_code
                     if segment.generation_task is not None

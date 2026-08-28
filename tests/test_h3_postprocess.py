@@ -69,6 +69,7 @@ def test_h3_postprocess_uses_asr_prefix_to_trim_audio_and_video_then_extracts_an
         script_text=SCRIPT,
         alignment_provider=provider,
         needs_continuity_anchor=True,
+        head_trim_enabled=True,
     )
 
     extract_command, normalize_command, anchor_command = commands
@@ -115,6 +116,7 @@ def test_h3_postprocess_falls_back_to_fixed_300ms_when_asr_is_unavailable(
         script_text=SCRIPT,
         alignment_provider=provider,
         needs_continuity_anchor=False,
+        head_trim_enabled=True,
     )
 
     assert len(commands) == 2
@@ -127,6 +129,40 @@ def test_h3_postprocess_falls_back_to_fixed_300ms_when_asr_is_unavailable(
     assert result.head_trim.fallback_reason == "RuntimeError"
     assert result.normalized_duration_seconds == pytest.approx(0.9)
     assert result.anchor_path is None
+
+
+def test_h3_postprocess_preserves_the_full_segment_when_head_trim_is_disabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "provider.mp4"
+    source.write_bytes(b"provider-video")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], message: str) -> None:
+        del message
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"generated-output")
+
+    provider = _AlignmentProvider(_alignment())
+    monkeypatch.setattr(h3_postprocess, "_run", fake_run)
+    monkeypatch.setattr(h3_postprocess, "inspect_media_duration", lambda _path: 1.23)
+
+    result = h3_postprocess.postprocess_h3_result(
+        source,
+        script_text=SCRIPT,
+        alignment_provider=provider,
+        needs_continuity_anchor=False,
+    )
+
+    assert provider.calls == []
+    assert len(commands) == 1
+    assert "-filter_complex" not in commands[0]
+    assert commands[0][commands[0].index("-c") + 1] == "copy"
+    assert result.head_trim.mode == "disabled"
+    assert result.head_trim.trim_seconds == 0
+    assert result.head_trim.fallback_reason == "feature_disabled"
+    assert result.normalized_duration_seconds == pytest.approx(1.23)
 
 
 def test_prefix_mismatch_uses_fixed_300ms_instead_of_failing() -> None:

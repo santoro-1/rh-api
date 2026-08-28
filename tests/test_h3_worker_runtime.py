@@ -220,6 +220,7 @@ def test_h3_remote_mode_queues_asr_then_resumes_postprocess(
     _prepare_confirmed_h3_task(client, monkeypatch, "h3-remote-asr-runtime")
     fake = _FakeH3RunningHub()
     monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    monkeypatch.setattr(task_worker, "H3_HEAD_TRIM_ENABLED", True)
     remote_settings = replace(get_settings(), media_processing_mode="remote")
     monkeypatch.setattr(task_worker, "get_settings", lambda: remote_settings)
 
@@ -275,6 +276,87 @@ def test_h3_remote_mode_queues_asr_then_resumes_postprocess(
         task = db.get(GenerationTask, task_id)
         assert task.status == TaskStatus.SUCCESS.value
         assert task.result_path.endswith("remote-asr-normalized.mp4")
+
+
+def test_h3_remote_mode_skips_head_trim_queue_when_disabled(
+    client,
+    monkeypatch,
+) -> None:
+    _prepare_confirmed_h3_task(client, monkeypatch, "h3-head-trim-disabled-runtime")
+    fake = _FakeH3RunningHub()
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    monkeypatch.setattr(task_worker, "H3_HEAD_TRIM_ENABLED", False)
+    remote_settings = replace(get_settings(), media_processing_mode="remote")
+    monkeypatch.setattr(task_worker, "get_settings", lambda: remote_settings)
+
+    def fail_if_alignment_provider_is_requested(provider_name: str):
+        raise AssertionError(f"禁用 H3 片头裁切后不应请求 ASR provider：{provider_name}")
+
+    monkeypatch.setattr(
+        task_worker,
+        "get_alignment_provider",
+        fail_if_alignment_provider_is_requested,
+    )
+
+    def fake_postprocess(
+        source: Path,
+        *,
+        script_text: str,
+        alignment_provider,
+        needs_continuity_anchor: bool,
+    ) -> H3NormalizedResult:
+        assert script_text
+        assert alignment_provider is None
+        assert needs_continuity_anchor is False
+        video = source.with_name("head-trim-disabled-normalized.mp4")
+        video.write_bytes(b"head-trim-disabled-normalized")
+        decision = H3HeadTrimDecision(
+            mode="disabled",
+            trim_seconds=0.0,
+            first_script_token_start_seconds=None,
+            alignment_provider=None,
+            alignment_match_ratio=None,
+            matched_prefix_tokens=0,
+            fallback_reason="feature_disabled",
+        )
+        return H3NormalizedResult(
+            video_path=video,
+            video_sha256=hashlib.sha256(video.read_bytes()).hexdigest(),
+            anchor_path=None,
+            anchor_sha256=None,
+            head_trim=decision,
+            normalized_duration_seconds=6.0,
+        )
+
+    monkeypatch.setattr(task_worker, "postprocess_h3_result", fake_postprocess)
+    with SessionLocal() as db:
+        task_id = task_worker.claim_next_pending_task(db)
+        assert task_id is not None
+        task_worker.process_task(db, task_id)
+        task_worker.process_task(db, task_id)
+        db.expire_all()
+        task = db.get(GenerationTask, task_id)
+        assert task.status == TaskStatus.SUCCESS.value
+        assert task.h3_remote_asr_job is None
+        assert task.result_path.endswith("head-trim-disabled-normalized.mp4")
+        metadata = json.loads(task.output_metadata or "{}")
+        assert metadata["output_contract_version"] == (
+            "h3.output.generated-av-head-trim-disabled.v4"
+        )
+        assert metadata["provider_audio_head_trimmed"] is False
+        assert metadata["provider_duration_preserved"] is True
+        assert metadata["head_trim"] == {
+            "enabled": False,
+            "mode": "disabled",
+            "trim_seconds": 0.0,
+            "first_script_token_start_seconds": None,
+            "preroll_seconds": 0.04,
+            "fallback_seconds": 0.3,
+            "alignment_provider": None,
+            "alignment_match_ratio": None,
+            "matched_prefix_tokens": 0,
+            "fallback_reason": "feature_disabled",
+        }
 
 
 def test_h3_worker_decrypts_private_workflow_password_only_into_client(
@@ -494,7 +576,7 @@ def test_h3_soft_chain_preserves_full_av_then_unlocks_next_segment_with_last_slo
         needs_continuity_anchor: bool,
     ) -> H3NormalizedResult:
         assert script_text
-        assert alignment_provider is not None
+        assert alignment_provider is None
         assert needs_continuity_anchor is True
         video = source.with_name("normalized.mp4")
         anchor = source.with_name("last-visible.png")
@@ -506,13 +588,13 @@ def test_h3_soft_chain_preserves_full_av_then_unlocks_next_segment_with_last_slo
             anchor_path=anchor,
             anchor_sha256=hashlib.sha256(anchor.read_bytes()).hexdigest(),
             head_trim=H3HeadTrimDecision(
-                mode="asr_adaptive",
-                trim_seconds=0.18,
-                first_script_token_start_seconds=0.22,
-                alignment_provider="funasr_http",
-                alignment_match_ratio=1.0,
-                matched_prefix_tokens=3,
-                fallback_reason=None,
+                mode="disabled",
+                trim_seconds=0.0,
+                first_script_token_start_seconds=None,
+                alignment_provider=None,
+                alignment_match_ratio=None,
+                matched_prefix_tokens=0,
+                fallback_reason="feature_disabled",
             ),
             normalized_duration_seconds=5.7,
         )
@@ -536,14 +618,16 @@ def test_h3_soft_chain_preserves_full_av_then_unlocks_next_segment_with_last_slo
         assert first.result_path.endswith("normalized.mp4")
         metadata = json.loads(first.output_metadata)
         assert metadata["output_contract_version"] == (
-            "h3.output.generated-av-head-trim.v3"
+            "h3.output.generated-av-head-trim-disabled.v4"
         )
         assert metadata["provider_audio_preserved"] is True
-        assert metadata["provider_audio_head_trimmed"] is True
-        assert metadata["provider_duration_preserved"] is False
-        assert metadata["head_trim"]["trim_seconds"] == 0.18
+        assert metadata["provider_audio_head_trimmed"] is False
+        assert metadata["provider_duration_preserved"] is True
+        assert metadata["head_trim"]["enabled"] is False
+        assert metadata["head_trim"]["mode"] == "disabled"
+        assert metadata["head_trim"]["trim_seconds"] == 0
         assert metadata["speech_timeline_duration_seconds"] == pytest.approx(
-            first.audio_duration_seconds - 0.18
+            first.audio_duration_seconds
         )
         assert metadata["normalized_timeline_duration_seconds"] == pytest.approx(5.7)
         assert second.status == TaskStatus.PENDING.value
@@ -572,12 +656,16 @@ def test_h3_soft_chain_preserves_full_av_then_unlocks_next_segment_with_last_slo
         json={"access_token": token},
     )
     item_payload = status.json()["items"][0]
-    assert item_payload["segments"][0]["head_trim"]["trim_seconds"] == 0.18
+    assert item_payload["segments"][0]["head_trim"]["trim_seconds"] == 0
     assert item_payload["segments"][0][
         "normalized_timeline_duration_seconds"
     ] == pytest.approx(metadata["normalized_timeline_duration_seconds"])
     first_url = item_payload["segments"][0]["normalized_video_download_url"]
     assert first_url.endswith("/video")
+    assert item_payload["segments"][0]["normalized_video_sha256"] == hashlib.sha256(
+        b"generated-audio-video"
+    ).hexdigest()
+    assert item_payload["segments"][0]["completed_at"]
     downloaded = client.get(
         first_url,
         headers={"Authorization": f"Bearer {token}"},
@@ -638,7 +726,7 @@ def test_h3_postprocess_failure_preserves_frozen_sources_and_keeps_chain_blocked
         needs_continuity_anchor: bool,
     ) -> H3NormalizedResult:
         assert script_text
-        assert alignment_provider is not None
+        assert alignment_provider is None
         assert source.read_bytes() == b"h3-provider-video"
         assert needs_continuity_anchor is True
         raise H3PostprocessError("injected H3 mux failure")
@@ -693,7 +781,7 @@ def test_h3_successful_segment_regeneration_requires_quote_and_invalidates_chain
         needs_continuity_anchor: bool,
     ) -> H3NormalizedResult:
         assert script_text
-        assert alignment_provider is not None
+        assert alignment_provider is None
         nonlocal postprocess_count
         postprocess_count += 1
         video = source.with_name("normalized.mp4")
@@ -711,15 +799,15 @@ def test_h3_successful_segment_regeneration_requires_quote_and_invalidates_chain
                 else None
             ),
             head_trim=H3HeadTrimDecision(
-                mode="fallback_300ms",
-                trim_seconds=0.3,
+                mode="disabled",
+                trim_seconds=0.0,
                 first_script_token_start_seconds=None,
-                alignment_provider="funasr_http",
+                alignment_provider=None,
                 alignment_match_ratio=None,
                 matched_prefix_tokens=0,
-                fallback_reason="test_fallback",
+                fallback_reason="feature_disabled",
             ),
-            normalized_duration_seconds=5.5,
+            normalized_duration_seconds=5.8,
         )
 
     monkeypatch.setattr(task_worker, "postprocess_h3_result", fake_postprocess)

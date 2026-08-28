@@ -206,7 +206,7 @@
           defaults: {
             continuity_mode: byId("h3-continuity-mode").value,
             generation_tail_seconds: 0.1,
-            prompt_override: byId("h3-prompt-override").value,
+            prompt_override: byId("h3-prompt-override").value.trim(),
             user_direction: byId("h3-user-direction").value.trim(),
             resolution: {
               aspect_ratio: byId("h3-aspect-ratio").value,
@@ -225,7 +225,7 @@
       byId("h3-fee-summary").textContent =
         `共 ${fee.segment_count || 0} 个分段；预计 ${fee.estimated_paid_calls || 0} 次付费调用；` +
         `可直接复用 ${fee.reusable_result_count || 0} 个结果。` +
-        (manualPromptEnabled ? "人工总体提示词覆盖已启用。" : "");
+        (manualPromptEnabled ? " 人工总体提示词覆盖已启用。" : "");
       byId("h3-fee-panel").classList.remove("hidden");
       byId("h3-fee-panel").scrollIntoView({behavior: "smooth", block: "start"});
     } catch (error) {

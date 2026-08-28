@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from app.services.h3.duration import H3_MAX_REQUEST_SECONDS
 
 
-H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.v9"
-H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.loop_anchor.v2"
+H3_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.v10"
+H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION = "h3.prompt.ref2va.loop_anchor.v3"
 H3_MANUAL_PROMPT_OVERRIDE_VERSION = "h3.prompt.manual-override.v1"
 H3_MAX_PROMPT_CHARS = 7000
 _RESERVED_PROMPT_SYNTAX = re.compile(
@@ -119,96 +119,143 @@ def _picture_guided_sections(
     segment_text: str,
     user_direction: str,
 ) -> tuple[list[str], list[str], str, str]:
-    all_pictures = _picture_labels(1, request.identity_image_count)
-    facial_pictures = _picture_labels(2, request.identity_image_count)
-    facial_definition = (
-        f" {facial_pictures} provide additional high-detail evidence of the same person's facial identity and "
-        "distinctive smiling appearance, including eye shape while smiling, cheek movement, mouth-corner shape, "
-        "teeth appearance, and natural smile asymmetry."
-        if facial_pictures
-        else ""
-    )
-    picture_one_role = (
-        "<Picture 1> is the primary visual anchor for the complete target video. <Picture 6> provides the opening frame "
-        "of [Shot 1] for this continuous segment."
-        if request.has_continuity_anchor
-        else "<Picture 1> is the primary visual anchor for the complete target video and the first frame of [Shot 1]."
-    )
+    supporting_pictures = _picture_labels(2, request.identity_image_count)
     subject_lines = [
         (
-            f"<Subject 1> is the same single person defined jointly by {all_pictures}. <Picture 1> establishes the "
-            "complete on-screen identity, facial appearance, hairstyle, wardrobe, accessories, body appearance, and "
-            f"current styling.{facial_definition}"
+            "<Subject 1> is the same person established by <Picture 1>, including facial identity, proportions, "
+            "hairstyle, body proportions, and stable personal features."
         ),
         (
-            "<Subject 2> is the environment, lighting, viewpoint, shot size, framing, subject scale, and composition "
-            "established by <Picture 1>."
+            "<Subject 2> is the same wardrobe in <Picture 1>, including layers, sleeves, neckline, closure, panels, "
+            "seams, trim, markings, coverage, material, base colors, and overall color appearance."
         ),
         (
-            "<Subject 3> is the natural speaking-performance language demonstrated in <Video 1>, including facial-"
-            "expression cadence, natural eye and eyebrow changes, head-and-shoulder movement, gesture rhythm and "
-            "amplitude, hand-use habits, and coordinated upper-body movement. Exact expressions and gestures adapt "
-            "naturally to the new dialogue."
+            "<Subject 3> is the same accessories in <Picture 1>, including identity, count, shape, material, color, "
+            "orientation, attachment, placement, and wearing method."
         ),
-        picture_one_role,
+        (
+            "<Subject 4> is the environment and camera-original rendering in <Picture 1>, including background "
+            "geometry, lighting, exposure, white balance, contrast, saturation, skin tones, wardrobe colors, and "
+            "scene colors."
+        ),
+        (
+            "<Subject 5> is the reference camera viewpoint and spatial state established by <Picture 1>: position, "
+            "height, horizontal and vertical angles, focal-length appearance, perspective, image-plane orientation, "
+            "shot size, crop, framing, headroom, upper-body scale, upper-torso depth anchor, subject center, "
+            "background margins, and landmarks."
+        ),
+        (
+            "<Subject 6> is the local speaking-performance language in <Video 1>: expression, eye, head, shoulder, "
+            "breathing, hand, gesture, and posture rhythms adapted within <Picture 1>'s state."
+        ),
+        "<Picture 1> is the authoritative persistent visual, rendering, viewpoint, and spatial anchor for [Shot 1].",
         (
             "<Audio 1> is the complete uploaded Mandarin segment audio physically spoken by <Subject 1> (S1) and "
-            "reused as the complete final audio track with its exact dialogue, voice, pauses, rhythm, pace, tone, "
+            "reused as the complete final track with its original dialogue, voice, pauses, rhythm, pace, tone, "
             "and delivery."
         ),
     ]
+    if supporting_pictures:
+        picture_word = "pictures" if request.identity_image_count > 2 else "picture"
+        refine_word = "refine" if request.identity_image_count > 2 else "refines"
+        subject_lines.insert(
+            1,
+            (
+                f"The supporting {picture_word} {supporting_pictures} {refine_word} facial identity and structure "
+                "only; <Picture 1> remains authoritative for hairstyle, body presentation, skin-tone rendering, "
+                "wardrobe, accessories, environment, camera-original rendering, camera geometry, framing, and "
+                "spatial scale."
+            ),
+        )
     retention_lines = [
+        "<Subject 1> (throughout [Shot 1]): fully_preserved - the same person persists.",
+        "<Subject 2> (throughout [Shot 1]): fully_preserved - the same garments and colors persist.",
+        "<Subject 3> (throughout [Shot 1]): fully_preserved - the same accessories and attachments persist.",
+        "<Subject 4> (throughout [Shot 1]): fully_preserved - the environment and rendering persist.",
         (
-            "<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the complete appearance and current "
-            "styling established by <Picture 1>, with the same person's facial identity and distinctive smiling "
-            "characteristics informed by all supplied pictures."
+            "<Subject 5> (throughout [Shot 1]): fully_preserved - the matched viewpoint, framing, scale, depth anchor, "
+            "and landmarks persist."
         ),
         (
-            "<Subject 2> (appears throughout [Shot 1]): fully_preserved - retain the environment, lighting, viewpoint, "
-            "shot size, framing, subject scale, and composition established by <Picture 1>."
+            "<Subject 6> (guides [Shot 1]): partially_preserved - local performance is adapted within <Picture 1>'s "
+            "state."
         ),
         (
-            "<Subject 3> (appears throughout [Shot 1]): partially_preserved - retain the natural expression cadence, "
-            "head-and-shoulder movement, gesture habits, and upper-body coordination demonstrated in <Video 1>, while "
-            "adapting the performance to <Audio 1>."
-        ),
-        (
-            "<Picture 1> (primary visual anchor): fully_preserved - retain its complete person, styling, environment, "
-            "lighting, viewpoint, framing, subject scale, and composition."
+            "<Picture 1> ([Shot 1] persistent anchor): fully_preserved - its authoritative role persists."
         ),
     ]
-    opening_anchor = "<Picture 6>" if request.has_continuity_anchor else "<Picture 1>"
-    spoken_dialogue = _spoken_dialogue_description(
-        segment_text,
-        include_dialogue_transcript=request.include_dialogue_transcript,
-        is_final_segment=request.segment_index == request.segment_count - 1,
+    endpoint = "" if request.segment_index == request.segment_count - 1 else " <cutoff>"
+    if request.include_dialogue_transcript:
+        spoken_dialogue = (
+            "From the first audible moment, <Subject 1> (S1) physically speaks using <Audio 1> and says exactly, "
+            f"<d>[Chinese] {segment_text}</d>{endpoint} The mouth, lips, jaw, cheeks, and facial muscles follow every "
+            "word, pause, rhythm, pace, tone, and delivery accurately, coordinated with expression, breathing, head "
+            "motion, and posture."
+        )
+    else:
+        spoken_dialogue = (
+            "From the first audible moment, <Subject 1> (S1) naturally speaks in precise synchronization with "
+            "<Audio 1>. The mouth, lips, jaw, cheeks, and facial muscles follow the supplied speech timing, pauses, "
+            "rhythm, pace, tone, and delivery accurately, coordinated with expression, breathing, head motion, and "
+            f"posture.{endpoint}"
+        )
+    opening_description = (
+        "The opening frame inherits the preceding pose and motion from <Picture 6> while retaining <Picture 1>'s "
+        "reference viewpoint and composition."
+        if request.has_continuity_anchor
+        else (
+            "The opening frame adopts <Picture 1>'s reference viewpoint and composition, matching its camera position, "
+            "height, horizontal and vertical angles, focal-length appearance, perspective, image-plane orientation, "
+            "shot size, crop, framing, headroom, subject scale, and landmarks."
+        )
     )
     detailed = (
-        "Use a realistic, polished natural-talking style in one continuous shot. "
-        f"[Shot 1] The shot begins from {opening_anchor}. <Subject 1> appears with the complete identity, hairstyle, "
-        "wardrobe, accessories, body appearance, and current styling established by <Picture 1>, inside <Subject 2>. "
-        "The camera remains locked throughout the shot. The viewpoint, shot size, framing, subject scale, and composition "
-        "remain stable and visually consistent. Keep the character's clothing colors unchanged throughout. Keep the "
-        "character's on-screen size unchanged throughout. <Subject 3> guides the person's natural expression cadence, head-and-"
-        "shoulder movement, gesture habits, and coordinated upper-body performance. "
-        f"{spoken_dialogue} Preserve the naturally balanced mouth proportions, facial identity, and "
-        "distinctive smile characteristics. Clear Mandarin articulation uses restrained realistic motion. Maintain "
-        "breathing, eye motion, posture adjustment, and continuous natural upper-body micro-movement. The performance "
-        "is mature, confident, composed, positive, energetic, and naturally authoritative, with steady camera-facing "
-        "gaze. Gestures respond naturally to meaning and rhythm. Movement continues through the final frame while "
-        "identity, styling, scene, composition, and quality remain stable. The frame remains clean, natural, and "
-        "unobstructed."
+        "The target retains <Picture 1>'s camera-original appearance and composition.\n\n"
+        f"[Shot 1] {opening_description} This matched viewpoint remains the persistent camera state through the final "
+        "frame as the segment develops in one continuous shot. The person begins from a living, natural state close to "
+        "<Picture 1>'s body orientation, expression, gaze, hand visibility, and posture.\n\n"
+        "<Subject 1>, hairstyle, <Subject 2>, <Subject 3>, and <Subject 4> persist as the same physical entities. Each "
+        "frame inherits their identity, construction, attachments, and defining appearance from the preceding frame. "
+        "Motion, cloth deformation, occlusion, breathing, and lighting response develop with physical and temporal "
+        "continuity.\n\n"
+        "The camera continuously retains <Subject 5>'s matched reference viewpoint. Shot size, digital crop, principal "
+        "body extent, headroom, upper-body scale, subject center, background margins, and landmarks remain perceptually "
+        "constant. The upper-torso center stays within a stable, naturally narrow depth envelope around <Picture 1>'s "
+        "anchor. Sentence boundaries, emphasis, emotions, and gestures are expressed through local performance inside "
+        "this inherited frame state.\n\n"
+        "Expression, gaze, head and shoulder rotation, torso turns, lateral posture adjustment, arm movement, hand "
+        "gestures, breathing, and posture variation develop naturally with speech. Local depth changes and "
+        "foreshortening develop around the stable upper-torso anchor while overall scale, crop, headroom, framing, and "
+        "perspective retain <Picture 1>'s state.\n\n"
+        "<Subject 6> contributes local timing for expression, gaze, head, shoulders, breathing, hands, gestures, and "
+        "posture. Each action is re-grounded in <Picture 1>'s body position, depth anchor, scale, framing, and "
+        "composition. <Picture 1> remains authoritative for identity, wardrobe, accessories, environment, rendering, "
+        "camera viewpoint, shot size, crop, scale, and composition.\n\n"
+        "<Subject 2> persists as the same garments with established construction, coverage, material, base colors, and "
+        "overall color appearance. Movement creates continuous folds, tension, occlusion, highlights, and shadows "
+        "across these garments. <Subject 3> retains its identity, count, color, orientation, attachment, placement, and "
+        "wearing method while moving with the body. <Subject 4> retains its background geometry, lighting, skin tones, "
+        "wardrobe colors, and scene color relationships.\n\n"
+        f"{spoken_dialogue}\n\n"
+        "All visible content belongs to the clean camera-original physical scene established by <Picture 1>. "
+        "Communication is carried by <Audio 1>, synchronized facial articulation, gaze, expression, and natural "
+        "gesture.\n\n"
+        "The final moments continue from the preceding motion and softly favor a natural pose, gaze, expression, hand "
+        "visibility, and posture close to <Picture 1>. Physical continuity, the matched reference viewpoint, persistent "
+        "framing, stable upper-torso depth, rendering, and spatial state retain the highest priority through the final "
+        "frame."
     )
     summary = (
-        "[keyframe completion + reference generation + audio reuse] A locked-camera single-shot spoken performance "
-        "using <Picture 1> as the primary visual anchor. <Subject 1> and <Subject 2> define the stable visual result, "
-        "while <Subject 3> guides the adapted natural performance. <Audio 1> is the complete final track for segment "
-        f"{request.segment_index + 1} of {request.segment_count}."
+        "[reference generation + audio reuse] The target is a single continuous speaking shot that adopts <Picture 1>'s "
+        f"reference viewpoint as its persistent camera state for segment {request.segment_index + 1} of "
+        f"{request.segment_count}. <Picture 1> governs appearance and composition, <Audio 1> governs speech and timing, "
+        "and <Subject 6> contributes local performance."
     )
     if user_direction:
         detailed += (
-            f" Additional user direction: {user_direction}. This direction remains subordinate to the established "
-            "identity, styling, scene, locked composition, audio reuse, and natural performance."
+            f"\n\nAdditional user direction: {user_direction}. This direction refines the current performance only and remains "
+            "subordinate to the established identity, wardrobe, accessories, environment, camera-original rendering, "
+            "persistent spatial composition, upper-torso depth anchor, audio reuse, and physical continuity."
         )
     return subject_lines, retention_lines, summary, detailed
 
@@ -290,7 +337,7 @@ def compile_ref2va_prompt(request: H3PromptRequest) -> str:
     """Compile the frozen single-speaker Ref2VA profile into six official sections."""
 
     segment_text, user_direction = _validate_request(request)
-    if request.identity_image_count >= 2:
+    if request.identity_image_count >= 1:
         subject_lines, retention_lines, summary, detailed = _picture_guided_sections(
             request, segment_text, user_direction
         )
@@ -300,9 +347,10 @@ def compile_ref2va_prompt(request: H3PromptRequest) -> str:
         )
 
     if request.has_continuity_anchor:
-        subject_lines.append(
+        subject_lines.insert(
+            -1,
             "<Picture 6> is the previous segment's final visible frame and a soft [Shot 1] opening anchor for pose, "
-            "expression, framing, and environment."
+            "expression, framing, and environment.",
         )
         retention_lines.append(
             "<Picture 6> ([Shot 1] soft opening keyframe anchor): partially_preserved - begin close to its pose, "
@@ -310,13 +358,19 @@ def compile_ref2va_prompt(request: H3PromptRequest) -> str:
         )
     retention_lines.append("<Audio 1>: fully_copy - reuse it 1:1 as the complete final audio track.")
 
+    overall_soundscape = (
+        "The complete audible soundscape is <Audio 1> with its original spoken content, voice, pauses, rhythm, pace, "
+        "tone, delivery, and timing."
+        if request.identity_image_count >= 1
+        else "<Audio 1> is the complete final audio track."
+    )
     prompt = "\n\n".join(
         [
             "subject_definitions:\n" + "\n".join(subject_lines),
             "summary:\n" + summary,
             "retention_analysis:\n" + "\n".join(retention_lines),
             "detailed_description:\n" + detailed,
-            "overall_soundscape:\n<Audio 1> is the complete final audio track.",
+            "overall_soundscape:\n" + overall_soundscape,
             "non_diegetic_music:\nN/A",
         ]
     )
@@ -328,139 +382,11 @@ def compile_ref2va_prompt(request: H3PromptRequest) -> str:
 
 
 def compile_loop_anchor_ref2va_prompt(request: H3PromptRequest) -> str:
-    """Compile the Ref2VA profile that uses Picture 1 at both boundaries."""
+    """Compile loop-anchor requests with the shared Picture 1 C-version profile."""
 
-    segment_text, user_direction = _validate_request(request)
+    _validate_request(request)
     if request.identity_image_count < 1:
         raise ValueError("H3 首尾同图模式至少需要 1 张参考图")
     if request.has_continuity_anchor:
         raise ValueError("H3 首尾同图模式不能同时使用 soft_chain 连续性锚点")
-
-    all_pictures = _picture_labels(1, request.identity_image_count)
-    supporting_pictures = _picture_labels(2, request.identity_image_count)
-    supporting_description = (
-        f" {supporting_pictures} provide additional high-detail evidence of the same person's facial identity only; "
-        "they must not override the wardrobe, accessories, environment, lighting, viewpoint, framing, pose, or "
-        "composition established by <Picture 1>."
-        if supporting_pictures
-        else ""
-    )
-    subject_lines = [
-        (
-            f"<Subject 1> is the same single person defined jointly by {all_pictures}. <Picture 1> establishes the "
-            "complete target appearance, including facial identity, hairstyle, wardrobe, accessories, body "
-            f"appearance, and current styling.{supporting_description}"
-        ),
-        (
-            "<Subject 2> is the environment, lighting, viewpoint, shot size, framing, subject scale, and composition "
-            "established by <Picture 1>."
-        ),
-        (
-            "<Subject 3> is the natural speaking-performance language demonstrated in <Video 1>, including facial-"
-            "expression cadence, natural eye and eyebrow changes, head-and-shoulder movement, gesture rhythm and "
-            "amplitude, hand-use habits, and coordinated upper-body movement. Exact expressions, poses, and gestures "
-            "are not required to match the reference video and may adapt naturally to the new dialogue."
-        ),
-        (
-            "<Picture 1> is the primary visual anchor for the complete target video and serves as both the first frame "
-            "and the final frame of [Shot 1]. It establishes the shared visual boundary for every generated segment, "
-            "including the same person, facial appearance, hairstyle, wardrobe, accessories, environment, lighting, "
-            "viewpoint, framing, subject scale, pose, expression, gaze direction, hand visibility, posture, and overall "
-            "composition."
-        ),
-        (
-            "<Audio 1> is the complete uploaded Mandarin segment audio physically spoken by <Subject 1> (S1) and "
-            "reused as the complete final audio track with its exact dialogue, voice, pauses, rhythm, pace, tone, "
-            "and delivery."
-        ),
-    ]
-    summary = (
-        "[keyframe completion + reference generation + audio reuse] A locked-camera single-shot spoken performance "
-        "that begins from <Picture 1>, permits a free and natural speaking performance in the middle, and returns "
-        "smoothly to <Picture 1> at the final frame. <Subject 1> and <Subject 2> define the stable visual identity, "
-        "wardrobe, environment, and composition, while <Subject 3> guides the adapted natural performance. <Audio 1> "
-        f"is reused as the complete final audio track for segment {request.segment_index + 1} of {request.segment_count}."
-    )
-    retention_lines = [
-        (
-            "<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the same person's facial identity, "
-            "hairstyle, wardrobe, accessories, body appearance, and current styling established by <Picture 1>. "
-            "Additional supplied pictures provide supporting facial-identity evidence only and must not override the "
-            "wardrobe, accessories, environment, lighting, framing, pose, or composition established by <Picture 1>."
-        ),
-        (
-            "<Subject 2> (appears throughout [Shot 1]): fully_preserved - retain the environment, lighting, viewpoint, "
-            "shot size, framing, subject scale, and composition established by <Picture 1>."
-        ),
-        (
-            "<Subject 3> (appears throughout [Shot 1]): partially_preserved - retain the natural expression cadence, "
-            "head-and-shoulder movement, gesture habits, hand-use habits, and upper-body coordination demonstrated in "
-            "<Video 1>, while freely adapting the exact actions and performance to <Audio 1>."
-        ),
-        (
-            "<Picture 1> ([Shot 1] first-frame and final-frame anchor): fully_preserved - the target video must begin "
-            "from and end on the same person, facial appearance, hairstyle, wardrobe, accessories, environment, "
-            "lighting, viewpoint, framing, subject scale, pose, expression, gaze direction, hand visibility, posture, "
-            "and overall composition established by <Picture 1>."
-        ),
-        (
-            "<Audio 1>: fully_copy - reuse it 1:1 as the complete final audio track without truncation, retiming, "
-            "replacement, added dialogue, or added music."
-        ),
-    ]
-    detailed = (
-        "Use a realistic, polished natural-talking style in one continuous shot. "
-        "[Shot 1] The shot begins directly from <Picture 1>. The first visible frame corresponds to <Picture 1>. "
-        "<Subject 1> appears with the complete facial identity, hairstyle, wardrobe, accessories, body appearance, "
-        "pose, expression, gaze direction, hand visibility, posture, and current styling established by <Picture 1>, "
-        "inside <Subject 2>. The camera remains locked throughout the entire shot. The viewpoint, shot size, framing, "
-        "subject scale, environment, lighting, and composition remain stable and visually consistent. "
-        "Keep the character's clothing colors unchanged throughout. Keep the character's on-screen size unchanged throughout. "
-        "From the first audible moment, <Subject 1> (S1) physically speaks using <Audio 1> and says exactly, "
-        f"<d>[Chinese] {segment_text}</d> The mouth, lips, jaw, cheeks, and subtle facial muscles follow every audible "
-        "word, pause, rhythm, pace, tone, and delivery in <Audio 1> accurately and naturally. The reused audio must "
-        "remain complete and unchanged. During the spoken portion, <Subject 3> guides the person's natural expression "
-        "cadence, eye movement, eyebrow movement, head-and-shoulder movement, gesture habits, hand-use habits, posture "
-        "adjustment, breathing, and coordinated upper-body performance. The exact expressions, poses, head movements, "
-        "hand movements, and gestures in the middle of the shot are not required to match <Picture 1> or <Video 1>. "
-        "They may develop freely and naturally according to the meaning and rhythm of <Audio 1>, provided that the "
-        "same person's identity, hairstyle, wardrobe, accessories, environment, lighting, camera viewpoint, framing, "
-        "subject scale, and visual quality remain stable. Clear Mandarin articulation uses restrained and realistic "
-        "facial motion. The performance is mature, confident, composed, positive, energetic, and naturally "
-        "authoritative, with a generally camera-facing gaze. Gestures respond naturally to the meaning and rhythm of "
-        "the speech. Avoid exaggerated head turns, extreme body movement, large changes in subject position, leaving "
-        "the frame, camera movement, scene changes, wardrobe changes, accessory changes, background changes, lighting "
-        "changes, or changes in shot scale. After the final audible word of <Audio 1>, during the remaining visual tail, "
-        "<Subject 1> smoothly reduces the amplitude of all facial, head, hand, shoulder, and upper-body movement. The "
-        "person naturally settles back toward the pose, expression, gaze direction, mouth state, hand visibility, "
-        "posture, subject position, and subject scale established by <Picture 1>. The environment, lighting, viewpoint, "
-        "framing, and composition remain unchanged. The final visible frame corresponds to <Picture 1> and forms the "
-        "same stable visual boundary as the opening frame. The return must be gradual, physically plausible, and "
-        "visually continuous. It must not truncate, retime, replace, or interfere with <Audio 1>. Do not use a cut, "
-        "dissolve, transition, inserted still frame, freeze-frame effect, teleportation, abrupt pose change, sudden "
-        "facial change, sudden hand movement, rapid recentering, or visible snap to reach the ending frame. The frame "
-        "remains clean, natural, stable, and unobstructed through the end."
-    )
-    if user_direction:
-        detailed += (
-            f" Additional user direction: {user_direction}. This direction remains subordinate to the established "
-            "identity, styling, scene, locked composition, complete audio reuse, and first-and-final-frame anchor."
-        )
-    prompt = "\n\n".join(
-        [
-            "subject_definitions:\n" + "\n".join(subject_lines),
-            "summary:\n" + summary,
-            "retention_analysis:\n" + "\n".join(retention_lines),
-            "detailed_description:\n" + detailed,
-            (
-                "overall_soundscape:\n<Audio 1> is the complete final audio track. Do not add, remove, replace, extend, "
-                "shorten, or retime any dialogue, ambience, sound effect, or other audible element."
-            ),
-            "non_diegetic_music:\nN/A",
-        ]
-    )
-    if len(prompt) > H3_MAX_PROMPT_CHARS:
-        raise ValueError(
-            f"H3 编译后 Prompt 不能超过 {H3_MAX_PROMPT_CHARS} 个字符（当前 {len(prompt)}）"
-        )
-    return prompt
+    return compile_ref2va_prompt(request)
