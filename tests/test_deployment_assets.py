@@ -437,9 +437,11 @@ def test_backup_rotate_only_keeps_latest_managed_archives_and_unrelated_files(tm
         "runninghub-video-20260814T010000Z.tar.gz",
     ]
     code_archives = [
-        "runninghub-video-code-pre-aaaaaaaaaaaa-20260812T010000Z.tar.gz",
+        # Commit hashes deliberately sort in the opposite order from time.
+        # Rotation must keep the latest timestamp, not the largest hash.
+        "runninghub-video-code-pre-ffffffffffff-20260812T010000Z.tar.gz",
         "runninghub-video-code-pre-bbbbbbbbbbbb-20260813T010000Z.tar.gz",
-        "runninghub-video-code-pre-cccccccccccc-20260814T010000Z.tar.gz",
+        "runninghub-video-code-pre-111111111111-20260814T010000Z.tar.gz",
     ]
     protected_files = [
         "runninghub-video-code-pre-deadbee-20260814T010000Z.tar.gz",

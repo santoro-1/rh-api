@@ -56,7 +56,10 @@ rotate_code_backups() {
     mapfile -t code_backups < <(
         find "$BACKUP_DIR" -maxdepth 1 -regextype posix-extended -type f \
             -regex '.*/runninghub-video-code-pre-[0-9a-f]{12}-[0-9]{8}T[0-9]{6}Z\.tar\.gz' \
-            -printf '%f\n' | LC_ALL=C sort
+            -printf '%f\n' |
+            awk -F- '{ print $NF "\t" $0 }' |
+            LC_ALL=C sort -k1,1 |
+            cut -f2-
     )
     remove_count=$((${#code_backups[@]} - BACKUP_KEEP_COUNT))
     for ((index = 0; index < remove_count; index++)); do
