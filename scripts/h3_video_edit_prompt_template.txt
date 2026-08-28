@@ -1,0 +1,23 @@
+subject_definitions:
+<Video 1> is the direct source video for the target video edit. Its original person, visual timeline, subject placement, clothing appearance, environment, lighting, camera viewpoint, framing, crop, and apparent subject scale define the visual state to preserve.
+<Subject 1> is the same single person appearing in <Video 1>, including the person's facial identity, hairstyle, clothing colors, accessories, body proportions, posture, and complete visible styling.
+<Subject 2> is the continuous environment, lighting, camera viewpoint, shot size, framing, crop, subject scale, and composition appearing in <Video 1>.
+<Audio 1> is the complete uploaded Mandarin segment audio physically spoken by <Subject 1> (S1) and reused as the complete final audio track with its exact dialogue, voice, pauses, rhythm, pace, tone, and delivery.
+
+summary:
+[video editing + audio reuse] The target video is an edited version of <Video 1>. Preserve the original visual appearance and spatial composition of <Video 1> as closely as possible. Modify only the speaking performance required to synchronize <Subject 1> with <Audio 1>. <Audio 1> is the complete final track for segment {{SEGMENT_INDEX}} of {{SEGMENT_COUNT}}.
+
+retention_analysis:
+<Video 1> (direct editing source throughout [Shot 1]): fully_preserved - preserve its original visual timeline, person, clothing appearance, environment, lighting, subject placement, camera viewpoint, framing, crop, subject scale, and composition. Modify only the speaking motion required by <Audio 1>.
+<Subject 1> (appears throughout [Shot 1]): fully_preserved - retain the same facial identity, hairstyle, clothing colors, accessories, body proportions, posture, position, and complete visible styling from <Video 1>.
+<Subject 2> (appears throughout [Shot 1]): fully_preserved - retain the environment, lighting, camera viewpoint, shot size, framing, crop, subject scale, and composition from <Video 1>.
+<Audio 1>: fully_copy - reuse it 1:1 as the complete final audio track.
+
+detailed_description:
+Use a realistic and seamless video-editing result in one continuous shot. [Shot 1] Treat <Video 1> as the direct visual source for the edit. Preserve its original frame state, person, scene, lighting, camera viewpoint, framing, crop, and composition as closely as possible. The camera remains locked throughout the shot. Keep the character's clothing colors unchanged throughout. Keep the character's on-screen size unchanged throughout. Preserve the same head size, headroom, shoulder width, body position, and lower-torso crop established by <Video 1>. Retain the original head, shoulder, upper-body, and hand movement from <Video 1> without introducing new meaning-driven gestures or noticeable forward or backward body movement. The only visual modifications are the mouth, lips, jaw, and subtle facial-muscle movements required to synchronize the speaking performance with <Audio 1>, together with minimal natural blinking and breathing. From the first audible moment, <Subject 1> (S1) physically speaks using <Audio 1> and says exactly, <d>[Chinese] {{SEGMENT_TEXT}}</d>{{CUTOFF_IF_NOT_FINAL}} The mouth, lips, jaw, and subtle facial muscles follow every audible word, pause, rhythm, pace, tone, and delivery accurately. The person's identity, clothing colors, apparent size, position, posture, environment, lighting, framing, crop, and visual quality remain stable through the final frame.
+
+overall_soundscape:
+<Audio 1> is the complete final audio track without additional dialogue, ambience, sound effects, or other audible elements.
+
+non_diegetic_music:
+N/A
