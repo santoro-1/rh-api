@@ -17,10 +17,13 @@ from app.services.h3.graph import (
 )
 from app.services.h3.prompt import (
     H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION,
+    H3_MANUAL_PROMPT_OVERRIDE_VERSION,
     H3_PROMPT_TEMPLATE_VERSION,
     H3PromptRequest,
     compile_loop_anchor_ref2va_prompt,
     compile_ref2va_prompt,
+    normalize_h3_prompt_override,
+    validate_h3_prompt_request,
 )
 from app.workflows.base import WorkflowAsset, WorkflowOutput
 
@@ -92,6 +95,9 @@ class H3Ref2VAWorkflow:
     ) -> dict[str, Any]:
         segment_text = str(parameters.get("segment_text") or "").strip()
         user_direction = str(parameters.get("user_direction") or "").strip()
+        prompt_override = normalize_h3_prompt_override(
+            parameters.get("prompt_override")
+        )
         try:
             audio_duration_seconds = float(
                 asset_metadata.get("audio_duration_seconds") or 0
@@ -136,6 +142,8 @@ class H3Ref2VAWorkflow:
             raise ValueError("H3 尾帧参考只允许用于 soft_chain 模式")
         if has_continuity_anchor and segment_index == 0:
             raise ValueError("H3 第一段不能使用上一段尾帧参考")
+        if continuity_mode == "loop_anchor" and identity_image_count < 1:
+            raise ValueError("H3 首尾同图模式至少需要 1 张参考图")
 
         instance_type = str(
             parameters.get("instance_type") or H3_DEFAULT_INSTANCE_TYPE
@@ -171,9 +179,14 @@ class H3Ref2VAWorkflow:
             segment_count=segment_count,
             identity_image_count=identity_image_count,
             has_continuity_anchor=has_continuity_anchor,
-            user_direction=user_direction,
+            user_direction="" if prompt_override else user_direction,
         )
-        if continuity_mode == "loop_anchor":
+        effective_user_direction = prompt_request.user_direction
+        if prompt_override:
+            validate_h3_prompt_request(prompt_request)
+            prompt = prompt_override
+            prompt_template_version = H3_MANUAL_PROMPT_OVERRIDE_VERSION
+        elif continuity_mode == "loop_anchor":
             prompt = compile_loop_anchor_ref2va_prompt(prompt_request)
             prompt_template_version = H3_LOOP_ANCHOR_PROMPT_TEMPLATE_VERSION
         else:
@@ -206,7 +219,7 @@ class H3Ref2VAWorkflow:
             "segment_text": segment_text,
             "segment_index": segment_index,
             "segment_count": segment_count,
-            "user_direction": user_direction,
+            "user_direction": effective_user_direction,
             "continuity_mode": continuity_mode,
             "identity_image_count": identity_image_count,
             "has_continuity_anchor": has_continuity_anchor,

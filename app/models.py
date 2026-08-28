@@ -1349,6 +1349,7 @@ class H3BatchConfig(Base):
     input_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     prompt_profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_template_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_override: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     continuity_mode: Mapped[str] = mapped_column(String(30), nullable=False)
     aspect_ratio: Mapped[str] = mapped_column(String(100), nullable=False)
     megapixels: Mapped[float] = mapped_column(Float, nullable=False)

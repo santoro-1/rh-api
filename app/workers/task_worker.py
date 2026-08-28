@@ -74,6 +74,7 @@ from app.services.logging_config import (
 from app.services.audio import add_silence_tail
 from app.services.alignment import get_alignment_provider
 from app.services.h3.postprocess import (
+    H3_HEAD_TRIM_ENABLED,
     H3_HEAD_TRIM_FALLBACK_SECONDS,
     H3_HEAD_TRIM_PREROLL_SECONDS,
     H3_OUTPUT_CONTRACT_VERSION,
@@ -945,6 +946,7 @@ def _handle_remote_status(
     remote_h3_head_trim = bool(
         task.workflow_type == "minimax_h3_ref2va"
         and settings.media_processing_mode == "remote"
+        and H3_HEAD_TRIM_ENABLED
     )
     head_trim_job = task.h3_remote_asr_job if remote_h3_head_trim else None
     if head_trim_job is not None:
@@ -1067,7 +1069,11 @@ def _handle_remote_status(
                 normalized = postprocess_h3_result(
                     destination,
                     script_text=segment.script_text,
-                    alignment_provider=get_alignment_provider("funasr_http"),
+                    alignment_provider=(
+                        get_alignment_provider("funasr_http")
+                        if H3_HEAD_TRIM_ENABLED
+                        else None
+                    ),
                     needs_continuity_anchor=needs_anchor,
                 )
             normalized_relative = to_relative_data_path(normalized.video_path, get_settings())
@@ -1078,7 +1084,11 @@ def _handle_remote_status(
             task.result_path = normalized_relative
             task.output_metadata = json.dumps(
                 {
-                    "quality_variant": "h3_generated_av_head_trimmed",
+                    "quality_variant": (
+                        "h3_generated_av_head_trimmed"
+                        if H3_HEAD_TRIM_ENABLED
+                        else "h3_generated_av_head_trim_disabled"
+                    ),
                     "output_contract_version": H3_OUTPUT_CONTRACT_VERSION,
                     "source": output.metadata,
                     "input_audio_duration_seconds": task.audio_duration_seconds,
@@ -1098,6 +1108,7 @@ def _handle_remote_status(
                         normalized.normalized_duration_seconds
                     ),
                     "head_trim": {
+                        "enabled": H3_HEAD_TRIM_ENABLED,
                         "mode": normalized.head_trim.mode,
                         "trim_seconds": normalized.head_trim.trim_seconds,
                         "first_script_token_start_seconds": (

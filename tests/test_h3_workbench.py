@@ -415,7 +415,7 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
         assert batch.h3_config.generation_tail_seconds == pytest.approx(0.1)
         assert (
             batch.h3_config.prompt_template_version
-            == "h3.prompt.ref2va.loop_anchor.v1"
+            == "h3.prompt.ref2va.loop_anchor.v3"
         )
         assert db.query(H3BatchConfig).count() == 1
         assert db.query(H3ItemConfig).count() == 1
@@ -423,7 +423,7 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
         assert {
             config.prompt_template_version
             for config in db.query(H3SegmentConfig).all()
-        } == {"h3.prompt.ref2va.loop_anchor.v1"}
+        } == {"h3.prompt.ref2va.loop_anchor.v3"}
         segment_configs = (
             db.query(H3SegmentConfig).order_by(H3SegmentConfig.segment_id).all()
         )
@@ -543,7 +543,7 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
         assert source_task.batch_item.audio_status == source_audio_status
 
 
-def test_h3_prepare_rejects_client_prompt_and_mixed_audio_script(client) -> None:
+def test_h3_prepare_rejects_undeclared_prompt_field_and_mixed_audio_script(client) -> None:
     username = "h3-contract-user"
     create_user(username)
     token = _token(client, username)
@@ -573,7 +573,7 @@ def test_h3_prepare_rejects_client_prompt_and_mixed_audio_script(client) -> None
         },
     )
     assert response.status_code == 400
-    assert "完整 Prompt 不能由客户端提交" in response.json()["detail"]
+    assert "人工总体提示词请使用 prompt_override" in response.json()["detail"]
 
     mismatched_script = client.post(
         "/api/workbench/h3-batches/prepare",
