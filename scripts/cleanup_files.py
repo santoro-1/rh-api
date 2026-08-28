@@ -7,8 +7,10 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
+    BATCH_SOURCE_H3_WORKBENCH,
     AudioGenerationTask,
     AudioTaskStatus,
+    GenerationBatch,
     GenerationTask,
     LongAudioProject,
     LongAudioProjectStatus,
@@ -45,7 +47,7 @@ def main() -> None:
         TaskStatus.CANCELLED.value,
     ]
     removed_uploads = removed_outputs = removed_staged_assets = removed_voice_sources = 0
-    removed_long_audio_projects = 0
+    removed_long_audio_projects = removed_h3_drafts = 0
     with SessionLocal() as db:
         expired_long_audio_projects = db.scalars(
             select(LongAudioProject).where(
@@ -60,11 +62,36 @@ def main() -> None:
             )
         ).all()
         for project in expired_long_audio_projects:
+            # The LTX preparation row has a required FK to this temporary
+            # project. Delete it explicitly so SQLAlchemy does not try to
+            # null the non-nullable FK before SQLite applies ON DELETE CASCADE.
+            if project.ltx_preparation_job is not None:
+                db.delete(project.ltx_preparation_job)
             remove_directory(
                 long_audio_project_dir(settings, project.user_id, project.id)
             )
             db.delete(project)
             removed_long_audio_projects += 1
+
+        h3_draft_cutoff = now - timedelta(
+            hours=settings.staged_asset_retention_hours
+        )
+        expired_h3_drafts = db.scalars(
+            select(GenerationBatch).where(
+                GenerationBatch.source_channel == BATCH_SOURCE_H3_WORKBENCH,
+                GenerationBatch.status == "AWAITING_COST_CONFIRMATION",
+                GenerationBatch.created_at < h3_draft_cutoff,
+            )
+        ).all()
+        for batch in expired_h3_drafts:
+            remove_directory(
+                settings.data_dir
+                / "h3-workbench"
+                / str(batch.user_id)
+                / batch.id
+            )
+            db.delete(batch)
+            removed_h3_drafts += 1
 
         staged_assets = db.scalars(
             select(StagedAsset).where(StagedAsset.expires_at < now)
@@ -240,7 +267,8 @@ def main() -> None:
         f"已清理暂存素材 {removed_staged_assets} 个、上传目录 "
         f"{removed_uploads} 个、输出目录 {removed_outputs} 个、"
         f"声音参考目录 {removed_voice_sources} 个、长音频预处理项目 "
-        f"{removed_long_audio_projects} 个。"
+        f"{removed_long_audio_projects} 个、超时未确认 H3 草稿 "
+        f"{removed_h3_drafts} 个。"
     )
 
 
