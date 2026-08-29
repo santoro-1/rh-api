@@ -274,16 +274,16 @@
                                 {% if child and child.status == "SUCCESS" %}<a href="/api/tasks/{{ child.id }}/download">直接下载视频</a>{% endif %}
                               </div>
                               {% if child and child.status in retryable_statuses %}
-                                <form method="post" action="/tasks/{{ child.id }}/retry" class="compact-inline-form">
+                                <form method="post" action="/tasks/{{ child.id }}/retry" class="compact-inline-form"
+                                  onsubmit="return confirm('重试此段会重新进入队列；除仅重新下载外，可能再次调用 RunningHub 并产生费用。确定重试吗？');">
                                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                  <button type="submit">仅重试本段</button>
+                                  <button type="submit">重试此段</button>
                                 </form>
-                              {% endif %}
-                              {% if child and child.status == "SUCCESS" and item.merged_video_status in ["AWAITING_VIDEO_REVIEW", "PREVIEW_READY", "READY"] %}
+                              {% elif child and child.status == "SUCCESS" %}
                                 <form method="post" action="/batches/{{ batch.id }}/segments/{{ segment.id }}/regenerate" class="compact-inline-form"
-                                  onsubmit="return confirm('重新生成会删除本段当前结果、再次调用 RunningHub 并产生费用，完整视频也会在新结果完成后重新拼接。确认继续吗？');">
+                                  onsubmit="return confirm('重试此段会替换本段当前结果、再次调用 RunningHub 并产生费用，完整视频也会在新结果完成后重新拼接。确定重试吗？');">
                                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                  <button class="button danger" type="submit">重新生成本段</button>
+                                  <button class="button danger" type="submit">重试此段</button>
                                 </form>
                               {% endif %}
                             </td>

@@ -39,11 +39,18 @@ def _segmented_batch(
         "merge-review-user" if review_required else "merge-auto-user"
     )
     settings = get_settings()
+    image_relative_path = f"uploads/{user.id}/placeholder.png"
+    image_path = settings.data_dir / image_relative_path
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"image")
     sources = []
     for index in (1, 2):
         source = settings.outputs_dir / str(user.id) / f"source-{index}.mp4"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(f"segment-{index}".encode())
+        audio_path = settings.data_dir / f"uploads/{user.id}/audio-{index}.mp3"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(f"audio-{index}".encode())
         sources.append(source)
 
     batch_id = "merge-review-batch" if review_required else "merge-auto-batch"
@@ -73,6 +80,7 @@ def _segmented_batch(
             merged_video_status="MERGE_PENDING",
         )
         for index, source in enumerate(sources, start=1):
+            audio_relative_path = f"uploads/{user.id}/audio-{index}.mp3"
             segment = GenerationSegment(
                 id=f"{item_id}-segment-{index}",
                 batch_item=item,
@@ -80,7 +88,7 @@ def _segmented_batch(
                 script_text=f"第 {index} 段",
                 start_seconds=float((index - 1) * 30),
                 end_seconds=float(index * 30),
-                audio_path=f"uploads/{user.id}/audio-{index}.mp3",
+                audio_path=audio_relative_path,
                 prompt=f"第 {index} 段",
                 status="TASK_CREATED",
             )
@@ -91,7 +99,18 @@ def _segmented_batch(
                 workflow_type="digital_human",
                 input_payload=json.dumps(
                     {
-                        "assets": [],
+                        "assets": {
+                            "image": {
+                                "kind": "image",
+                                "path": image_relative_path,
+                                "original_name": "placeholder.png",
+                            },
+                            "audio": {
+                                "kind": "audio",
+                                "path": audio_relative_path,
+                                "original_name": f"audio-{index}.mp3",
+                            },
+                        },
                         "parameters": {
                             **(
                                 {"generation_tail_seconds": 2.0}
@@ -107,10 +126,10 @@ def _segmented_batch(
                         },
                     }
                 ),
-                image_path="placeholder.png",
-                audio_path="placeholder.mp3",
+                image_path=image_relative_path,
+                audio_path=audio_relative_path,
                 image_original_name="placeholder.png",
-                audio_original_name="placeholder.mp3",
+                audio_original_name=f"audio-{index}.mp3",
                 audio_duration_seconds=30,
                 start_seconds=0,
                 end_seconds=30,
@@ -248,6 +267,48 @@ def test_legacy_video_review_flag_does_not_turn_preview_into_a_finished_video(
     login(client, "merge-review-user")
     detail = client.get(f"/batches/{batch_id}")
     assert "快速拼接预览 · 仅用于检查片段顺序，仍需人工粗剪" in detail.text
+
+
+def test_legacy_batch_detail_can_retry_any_successful_segment_after_merge(
+    client, monkeypatch
+):
+    batch_id, item_id = _segmented_batch(review_required=False)
+    monkeypatch.setattr(
+        "app.services.video_merge.merge_segment_videos",
+        _fake_legacy_merge,
+    )
+    with SessionLocal() as db:
+        assert process_pending_video_merges(db, get_settings()) == 1
+        item = db.get(GenerationBatchItem, item_id)
+        assert item.merged_video_status == MERGED_PREVIEW_READY
+        assert item.merged_video_path
+
+    login(client, "merge-auto-user")
+    detail = client.get(f"/batches/{batch_id}")
+    assert detail.status_code == 200
+    assert detail.text.count(">重试此段</button>") == 2
+    target_segment_id = f"{item_id}-segment-1"
+    assert (
+        f'action="/batches/{batch_id}/segments/{target_segment_id}/regenerate"'
+        in detail.text
+    )
+
+    response = client.post(
+        f"/batches/{batch_id}/segments/{target_segment_id}/regenerate",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/batches/{batch_id}"
+    with SessionLocal() as db:
+        item = db.get(GenerationBatchItem, item_id)
+        retried = db.get(GenerationTask, f"{item_id}-task-1")
+        untouched = db.get(GenerationTask, f"{item_id}-task-2")
+        assert retried.status == TaskStatus.PENDING.value
+        assert retried.result_path is None
+        assert untouched.status == TaskStatus.SUCCESS.value
+        assert untouched.result_path
+        assert item.merged_video_status == MERGE_PENDING
+        assert item.merged_video_path is None
 
 
 def test_new_workbench_single_segment_is_normalized_as_base_video(monkeypatch):
