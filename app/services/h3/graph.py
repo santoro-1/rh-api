@@ -12,15 +12,15 @@ from typing import Any, Iterator
 from app.services.h3.duration import H3DurationPlan, plan_h3_duration
 
 
-H3_WORKFLOW_TEMPLATE_ID = "minimax_h3_ref2va_6image_4step_20260827"
-H3_WORKFLOW_TEMPLATE_VERSION = "h3.workflow.ref2va.20260827.v2"
+H3_WORKFLOW_TEMPLATE_ID = "minimax_h3_ref2va_6image_6step_20260829"
+H3_WORKFLOW_TEMPLATE_VERSION = "h3.workflow.ref2va.20260829.v3"
 H3_WORKFLOW_TEMPLATE_CANONICAL_SHA256 = (
-    "13146c4aabd9da9b0ec5d05e8a392b720a3921fe5020a8d6fab1b3b828b3830b"
+    "f2e76ecc53e11ed739903d238be4b2eca1d4726ac5dbb92459d179dd548037b6"
 )
-H3_ADAPTER_VERSION = "h3.runninghub.raw.v4"
+H3_ADAPTER_VERSION = "h3.runninghub.raw.v5"
 H3_OUTPUT_NODE_ID = "387"
 H3_OUTPUT_TYPE = "mp4"
-H3_SAMPLING_STEPS = 4
+H3_SAMPLING_STEPS = 6
 H3_DEFAULT_TEMPLATE_PATH = (
     Path(__file__).with_name("templates")
     / "minimax_h3_ref2va_6image_20260822.json"

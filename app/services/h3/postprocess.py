@@ -383,6 +383,36 @@ def extract_last_visible_frame(source: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def extract_last_visible_frame_from_url(source_url: str, target: Path) -> None:
+    """Extract the soft-chain anchor through HTTP range reads without saving MP4."""
+
+    from app.services.h3.delivery import validate_h3_provider_video_url
+
+    clean_url = validate_h3_provider_video_url(source_url)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f"{target.stem}.part{target.suffix}")
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-sseof",
+        "-0.050",
+        "-i",
+        clean_url,
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        str(temporary),
+    ]
+    try:
+        _run(command, "从 RunningHub 结果抽取 H3 最后可见帧失败")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def extract_reference_frame(source: Path, target: Path) -> None:
     """Extract a deterministic early frame for the multi-image Picture 1 anchor."""
 

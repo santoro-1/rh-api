@@ -36,6 +36,7 @@ from app.services.audio import inspect_audio_duration
 from app.services.audio_review import current_attempt
 from app.services.batch_assets import load_available_assets
 from app.services.h3.duration import plan_h3_duration
+from app.services.h3.delivery import parse_h3_direct_delivery
 from app.services.h3.graph import (
     H3_ADAPTER_VERSION,
     H3_WORKFLOW_TEMPLATE_CANONICAL_SHA256,
@@ -74,6 +75,7 @@ from app.services.h3.segmentation import (
 from app.services.h3_pool import (
     H3PoolValidationError,
     h3_execution_account_summary,
+    refresh_h3_execution_account_balances,
     validate_h3_account_selection,
 )
 from app.services.workflow_configs import get_system_workflow_config
@@ -894,6 +896,53 @@ def _json_object(value: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def h3_segment_video_delivery(
+    segment: GenerationSegment,
+) -> dict[str, Any] | None:
+    """Describe the current result without requiring a server-owned MP4."""
+
+    task = segment.generation_task
+    config = segment.h3_config
+    if (
+        task is None
+        or config is None
+        or task.status != TaskStatus.SUCCESS.value
+        or config.invalidated_at is not None
+    ):
+        return None
+    direct = parse_h3_direct_delivery(task.output_metadata)
+    if direct is not None:
+        return {
+            "mode": direct["mode"],
+            "download_url": direct["download_url"],
+            "result_signature": direct["result_signature"],
+            "provider_task_id": direct.get("provider_task_id"),
+            "received_at": direct.get("received_at"),
+        }
+    if not config.normalized_video_path:
+        return None
+    result_signature = str(config.normalized_video_sha256 or "").strip().lower()
+    if not result_signature:
+        result_signature = _content_digest(
+            {
+                "segment_id": segment.id,
+                "normalized_video_path": config.normalized_video_path,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            }
+        )
+    return {
+        "mode": "auth_center",
+        "download_url": f"/api/workbench/h3-segments/{segment.id}/video",
+        "result_signature": result_signature,
+        "provider_task_id": task.runninghub_task_id,
+        "received_at": task.completed_at.isoformat() if task.completed_at else None,
+    }
+
+
+def _h3_segment_has_current_result(segment: GenerationSegment) -> bool:
+    return h3_segment_video_delivery(segment) is not None
+
+
 def _h3_segment_output_value(segment: GenerationSegment, key: str) -> object:
     task = segment.generation_task
     if task is None:
@@ -911,7 +960,28 @@ def _archive_h3_task_result(
     """Move owned outputs into immutable history before a paid regeneration."""
 
     config = segment.h3_config
-    if config is None or not config.normalized_video_path:
+    if config is None:
+        raise H3WorkbenchError("H3 当前成功分段缺少结果配置，不能主动重生成")
+    direct = parse_h3_direct_delivery(task.output_metadata)
+    if direct is not None:
+        payload = _json_object(task.input_payload)
+        history = payload.get("_h3_regeneration_history")
+        if not isinstance(history, list):
+            history = []
+        history.append(
+            {
+                "archived_at": now.isoformat(),
+                "task_status": task.status,
+                "remote_task_id": task.runninghub_task_id,
+                "normalized_video_path": None,
+                "normalized_video_sha256": None,
+                "provider_result_signature": direct["result_signature"],
+                "output_metadata": _json_object(task.output_metadata),
+            }
+        )
+        payload["_h3_regeneration_history"] = history
+        return payload
+    if not config.normalized_video_path:
         raise H3WorkbenchError("H3 当前成功分段缺少标准化结果，不能主动重生成")
     try:
         normalized = safe_relative_path(config.normalized_video_path, settings.data_dir)
@@ -992,7 +1062,7 @@ def _reusable_task_for_input(
     user: User,
     input_sha256: str,
 ) -> GenerationTask | None:
-    return db.scalar(
+    candidates = db.scalars(
         select(GenerationTask)
         .join(GenerationSegment, GenerationTask.segment_id == GenerationSegment.id)
         .join(H3SegmentConfig, H3SegmentConfig.segment_id == GenerationSegment.id)
@@ -1000,11 +1070,18 @@ def _reusable_task_for_input(
             GenerationTask.user_id == user.id,
             GenerationTask.workflow_type == H3_WORKFLOW,
             GenerationTask.status == TaskStatus.SUCCESS.value,
-            GenerationTask.result_path.is_not(None),
             H3SegmentConfig.input_sha256 == input_sha256,
             H3SegmentConfig.invalidated_at.is_(None),
         )
         .order_by(GenerationTask.completed_at.desc())
+    ).all()
+    return next(
+        (
+            task
+            for task in candidates
+            if task.result_path or parse_h3_direct_delivery(task.output_metadata)
+        ),
+        None,
     )
 
 
@@ -1788,6 +1865,15 @@ def _create_segment_task(
         {"audio_duration_seconds": audio_duration_seconds},
     )
     now = datetime.now(timezone.utc)
+    reused_metadata = None
+    if reused_task is not None:
+        reused_metadata = _json_object(reused_task.output_metadata)
+        reused_metadata.update(
+            {
+                "reused_from_task_id": reused_task.id,
+                "reuse_reason": "identical_h3_input_sha256",
+            }
+        )
     task = GenerationTask(
         id=str(uuid.uuid4()),
         workflow_type=H3_WORKFLOW,
@@ -1804,13 +1890,7 @@ def _create_segment_task(
         status=(TaskStatus.SUCCESS.value if reused_task else TaskStatus.PENDING.value),
         result_path=reused_task.result_path if reused_task else None,
         output_metadata=(
-            json.dumps(
-                {
-                    "reused_from_task_id": reused_task.id,
-                    "reuse_reason": "identical_h3_input_sha256",
-                },
-                ensure_ascii=False,
-            )
+            json.dumps(reused_metadata, ensure_ascii=False)
             if reused_task
             else None
         ),
@@ -1900,7 +1980,7 @@ def prepare_h3_segment_regeneration(
             or task.status != TaskStatus.SUCCESS.value
             or candidate.status != TaskStatus.SUCCESS.value
             or config.invalidated_at is not None
-            or not config.normalized_video_path
+            or not _h3_segment_has_current_result(candidate)
         ):
             raise H3WorkbenchError(
                 "主动重生成前，目标段及受影响的连续下游段必须全部成功且仍为当前版本"
@@ -1912,6 +1992,9 @@ def prepare_h3_segment_regeneration(
                 "task_id": task.id,
                 "task_status": task.status,
                 "normalized_video_sha256": config.normalized_video_sha256,
+                "result_signature": (
+                    h3_segment_video_delivery(candidate) or {}
+                ).get("result_signature"),
                 "attempt_count": len(task.runninghub_attempts),
                 "completed_at": (
                     task.completed_at.isoformat() if task.completed_at else None
@@ -2471,19 +2554,25 @@ def confirm_h3_workbench_batch(
                 reused_config = (
                     reused.segment.h3_config if reused.segment is not None else None
                 )
-                if (
-                    reused_config is None
-                    or not reused_config.normalized_video_path
-                    or not reused_config.normalized_video_sha256
-                ):
-                    raise H3WorkbenchError("H3 可复用任务缺少标准化结果快照")
-                segment.h3_config.normalized_video_path = (
-                    reused_config.normalized_video_path
-                )
-                segment.h3_config.normalized_video_sha256 = (
-                    reused_config.normalized_video_sha256
-                )
-                segment.video_path = reused_config.normalized_video_path
+                direct = parse_h3_direct_delivery(reused.output_metadata)
+                if direct is not None:
+                    segment.h3_config.normalized_video_path = None
+                    segment.h3_config.normalized_video_sha256 = None
+                    segment.video_path = None
+                else:
+                    if (
+                        reused_config is None
+                        or not reused_config.normalized_video_path
+                        or not reused_config.normalized_video_sha256
+                    ):
+                        raise H3WorkbenchError("H3 可复用任务缺少标准化结果快照")
+                    segment.h3_config.normalized_video_path = (
+                        reused_config.normalized_video_path
+                    )
+                    segment.h3_config.normalized_video_sha256 = (
+                        reused_config.normalized_video_sha256
+                    )
+                    segment.video_path = reused_config.normalized_video_path
                 reused_count += 1
             else:
                 paid_calls += 1
@@ -2583,7 +2672,7 @@ def h3_item_payload(item: GenerationBatchItem) -> dict[str, object]:
                     and segment.generation_task.status == TaskStatus.SUCCESS.value
                     and segment.status == TaskStatus.SUCCESS.value
                     and segment.h3_config.invalidated_at is None
-                    and segment.h3_config.normalized_video_path
+                    and _h3_segment_has_current_result(segment)
                 ),
                 "can_retry": bool(
                     segment.generation_task is not None
@@ -2599,14 +2688,10 @@ def h3_item_payload(item: GenerationBatchItem) -> dict[str, object]:
                 ),
                 "normalized_video_download_url": (
                     f"/api/workbench/h3-segments/{segment.id}/video"
-                    if (
-                        segment.h3_config.normalized_video_path
-                        and segment.h3_config.invalidated_at is None
-                        and segment.generation_task is not None
-                        and segment.generation_task.status == TaskStatus.SUCCESS.value
-                    )
+                    if _h3_segment_has_current_result(segment)
                     else None
                 ),
+                "video_delivery": h3_segment_video_delivery(segment),
                 # JYD downloads successful segments incrementally.  The URL is
                 # stable across a manual regeneration, so consumers need an
                 # immutable result identity to avoid keeping the previous MP4.
@@ -2672,6 +2757,7 @@ def h3_batch_payload(batch: GenerationBatch) -> dict[str, object]:
 
 def h3_account_payload(db: Session, user: User) -> dict[str, object]:
     try:
+        refresh_h3_execution_account_balances(db, user)
         payload = h3_execution_account_summary(db, user)
     except H3PoolValidationError as exc:
         raise H3WorkbenchError(str(exc)) from exc

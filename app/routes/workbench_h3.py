@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import requests
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,6 +24,7 @@ from app.services.h3_workbench import (
     h3_account_payload,
     h3_audio_sources_payload,
     h3_batch_payload,
+    h3_segment_video_delivery,
     prepare_h3_workbench_batch,
     prepare_h3_segment_regeneration,
     prepare_h3_segment_retry,
@@ -32,6 +34,58 @@ from app.services.storage import safe_relative_path
 
 
 router = APIRouter(tags=["workbench-h3"])
+
+
+def _stream_h3_provider_video(url: str, request: Request) -> StreamingResponse:
+    headers = {"Accept": "video/mp4,*/*"}
+    range_header = str(request.headers.get("range") or "").strip()
+    if range_header:
+        headers["Range"] = range_header
+    try:
+        upstream = requests.get(
+            url,
+            headers=headers,
+            stream=True,
+            timeout=(15, 600),
+            # The stored provider URL is already the final HTTPS object URL.
+            # Do not let a later redirect turn this compatibility proxy into
+            # a request to an unvalidated destination.
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="RunningHub H3 视频地址暂时无法访问",
+        ) from exc
+    if upstream.status_code not in {200, 206}:
+        status_code = 404 if upstream.status_code in {403, 404} else 502
+        upstream.close()
+        raise HTTPException(status_code=status_code, detail="H3 远端视频暂不可用")
+
+    response_headers = {"Cache-Control": "private, no-store"}
+    for source, target in (
+        ("Content-Length", "Content-Length"),
+        ("Content-Range", "Content-Range"),
+        ("Accept-Ranges", "Accept-Ranges"),
+        ("ETag", "ETag"),
+        ("Last-Modified", "Last-Modified"),
+    ):
+        value = upstream.headers.get(source)
+        if value:
+            response_headers[target] = value
+
+    def chunks():
+        try:
+            yield from upstream.iter_content(chunk_size=1024 * 1024)
+        finally:
+            upstream.close()
+
+    return StreamingResponse(
+        chunks(),
+        status_code=upstream.status_code,
+        media_type=str(upstream.headers.get("Content-Type") or "video/mp4"),
+        headers=response_headers,
+    )
 
 
 def _token_user(token: str, db: Session) -> User:
@@ -311,9 +365,13 @@ def download_h3_segment_video(
         or segment.batch_item.batch.user_id != user.id
         or segment.h3_config is None
         or segment.h3_config.invalidated_at is not None
-        or not segment.h3_config.normalized_video_path
     ):
-        raise HTTPException(status_code=404, detail="H3 标准化分段不存在")
+        raise HTTPException(status_code=404, detail="H3 分段视频不存在")
+    delivery = h3_segment_video_delivery(segment)
+    if delivery is None:
+        raise HTTPException(status_code=404, detail="H3 分段视频不存在")
+    if delivery["mode"] == "runninghub_direct":
+        return _stream_h3_provider_video(str(delivery["download_url"]), request)
     path = safe_relative_path(
         segment.h3_config.normalized_video_path,
         get_settings().data_dir,

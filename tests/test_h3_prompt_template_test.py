@@ -410,7 +410,7 @@ def test_prepare_preview_materializes_segment_audio_and_dynamic_prompts(
         "第二段。",
     ]
     assert state["input"]["visual_mode"] == VISUAL_MODE_PICTURE
-    assert state["input"]["sampling_steps"] == 4
+    assert state["input"]["sampling_steps"] == 6
     assert state["input"]["reference_images"][0]["path"] == str(image.resolve())
     assert state["input"]["reference_images"][0]["role"] == "primary_visual_spatial_anchor"
     assert len(graph_requests) == 2
@@ -429,6 +429,84 @@ def test_prepare_preview_materializes_segment_audio_and_dynamic_prompts(
     assert "segment 2 of 2" in final_prompt
     assert "<d>[Chinese] 第二段。</d> <cutoff>" not in final_prompt
     assert (run_dir / "prompts.txt").is_file()
+
+
+def test_prepare_preview_replays_frozen_historical_segment_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "motion-017.mp4"
+    image = tmp_path / "identity.jpg"
+    audio = tmp_path / "segment-004.mp3"
+    video.write_bytes(b"prepared-motion")
+    image.write_bytes(b"identity")
+    audio.write_bytes(b"frozen-audio")
+    script_text = (
+        "吃东西的时候呢，把这些胆汁，释放到肠道里面来帮助分解和吸收脂肪。"
+        "但如果你不吃早饭，胆囊已经憋了一晚上了，它想排呀，"
+    )
+    monkeypatch.setattr(
+        "scripts.run_h3_prompt_template_test.inspect_audio_duration",
+        lambda _path: 10.29,
+    )
+    monkeypatch.setattr(
+        "scripts.run_h3_prompt_template_test.inspect_media_duration",
+        lambda _path: 3.0,
+    )
+    monkeypatch.setattr(
+        "scripts.run_h3_prompt_template_test.plan_input_audio",
+        lambda *_args, **_kwargs: (
+            [H3TimestampedSegment(0, script_text, 0.0, 10.29, "strong")],
+            {"mode": "frozen_historical_segment"},
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.run_h3_prompt_template_test.split_h3_motion_reference",
+        lambda *_args, **_kwargs: pytest.fail("prepared motion clip must not be split"),
+    )
+    graph_requests = []
+    monkeypatch.setattr(
+        "scripts.run_h3_prompt_template_test.load_default_h3_graph_builder",
+        lambda: SimpleNamespace(
+            build=lambda request: (
+                graph_requests.append(request)
+                or SimpleNamespace(
+                    workflow_json=(
+                        '{"248":{"inputs":{"scheduler":"beta","steps":6}}}'
+                    ),
+                    dynamic_graph_sha256="a" * 64,
+                )
+            )
+        ),
+    )
+
+    _run_dir, _checkpoint_path, state = prepare_preview(
+        H3TestInput(
+            reference_video=video,
+            reference_audio=audio,
+            script_text=script_text,
+            output_root=tmp_path / "outputs",
+            account_id=7,
+            aspect_ratio="9:16 (Portrait Widescreen)",
+            megapixels=1.0,
+            seed=1742814425646405909,
+            sampling_steps=8,
+            visual_mode=VISUAL_MODE_PICTURE,
+            reference_images=(image,),
+            prepared_motion_clip=True,
+            source_segment_index=3,
+            source_segment_count=8,
+        )
+    )
+
+    assert state["segment_count"] == 1
+    assert state["input"]["prepared_motion_clip"] is True
+    assert state["segments"][0]["reference_video_path"] == str(video.resolve())
+    assert state["segments"][0]["prompt_sha256"] == (
+        "96d36da39a00c6798baacee4b064e56c1c7e3697c0c8cca35b73741e50d5a51a"
+    )
+    assert len(graph_requests) == 1
+    assert graph_requests[0].seed == 1742814425646405909
 
 
 def test_execute_segments_fills_selected_account_concurrency_before_polling(

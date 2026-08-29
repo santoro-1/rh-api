@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.database import Base, SessionLocal, engine
 from app.main import create_app
 from app.models import RunningHubConfig, User
+from app.services.runninghub_pool import create_execution_account
 from app.services.security import encrypt_secret, hash_password
 
 
@@ -74,6 +75,25 @@ def create_user(
         db.refresh(user)
         db.expunge(user)
         return user
+
+
+def assign_runninghub_account(username: str) -> int:
+    """Assign one complete execution account to a test user."""
+
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(username=username).one()
+        account = create_execution_account(
+            db,
+            label=f"{username}-pool",
+            api_key=f"{username}-pool-key",
+            base_url="https://rh.example",
+            digital_human_ai_app_id=f"{username}-app",
+            max_concurrent_tasks=2,
+            is_enabled=True,
+            admin_user_ids=[user.id],
+        )
+        db.commit()
+        return account.id
 
 
 def login(client: TestClient, username: str, password: str = "password123") -> None:

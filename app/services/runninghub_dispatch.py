@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     BATCH_SOURCE_H3_WORKBENCH,
+    BATCH_SOURCE_LEGACY_WEB,
     BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatch,
     GenerationTask,
@@ -21,7 +22,7 @@ from app.services.runninghub_pool import (
     credential_active_count_subquery,
     credential_active_task_count,
     execution_account_configuration_ready,
-    item_execution_account_snapshot,
+    task_execution_account_snapshot,
 )
 
 
@@ -58,20 +59,33 @@ def task_batch(task: GenerationTask) -> GenerationBatch | None:
 def task_uses_execution_pool(task: GenerationTask) -> bool:
     """Return whether this task is inside the strictly gated pool path."""
 
-    item = task.batch_item or (task.segment.batch_item if task.segment else None)
-    batch = item.batch if item else None
-    if not batch or not item_execution_account_snapshot(item):
+    batch = task_batch(task)
+    if not task_execution_account_snapshot(task):
         return False
     return bool(
         (
-            batch.source_channel == BATCH_SOURCE_NEW_WORKBENCH
-            and task.workflow_type == "digital_human"
+            task.workflow_type == "digital_human"
+            and (
+                batch is None
+                or batch.source_channel
+                in {BATCH_SOURCE_LEGACY_WEB, BATCH_SOURCE_NEW_WORKBENCH}
+            )
         )
         or (
-            batch.source_channel == BATCH_SOURCE_H3_WORKBENCH
+            batch is not None
+            and batch.source_channel == BATCH_SOURCE_H3_WORKBENCH
             and task.workflow_type == "minimax_h3_ref2va"
         )
     )
+
+
+def task_is_legacy_web_digital_human(task: GenerationTask) -> bool:
+    """Identify old-web digital-human work without including other workbenches."""
+
+    if task.workflow_type != "digital_human":
+        return False
+    batch = task_batch(task)
+    return batch is None or batch.source_channel == BATCH_SOURCE_LEGACY_WEB
 
 
 def task_account_limit(
@@ -109,11 +123,7 @@ def reserve_pool_task(
 
     if not task_uses_execution_pool(task):
         return None
-    batch = task_batch(task)
-    assert batch is not None
-    item = task.batch_item or (task.segment.batch_item if task.segment else None)
-    assert item is not None
-    selected_ids = item_execution_account_snapshot(item)
+    selected_ids = task_execution_account_snapshot(task)
     if task.execution_account_id is not None:
         # Until per-attempt switching is implemented, an already bound retry
         # stays on its recorded account instead of overwriting history.

@@ -15,7 +15,7 @@ from app.services.alignment import AlignmentResult
 from app.services.media_segmentation import SegmentPlan
 from app.services.workflow_configs import save_workflow_config
 from app.workers.media_worker import process_next
-from tests.conftest import create_user, login
+from tests.conftest import assign_runninghub_account, create_user, login
 
 
 SCRIPT = "今天是星期四。我要吃肯德基。但是我下班很晚。"
@@ -285,6 +285,7 @@ def test_review_plan_rejects_gaps_and_missing_original_script(client, monkeypatc
 
 def test_digital_human_long_audio_auto_splits_without_asr(client, monkeypatch):
     create_user("digital-long-audio-user")
+    assign_runninghub_account("digital-long-audio-user")
     login(client, "digital-long-audio-user")
     monkeypatch.setattr(
         "app.services.long_audio.inspect_audio_duration",

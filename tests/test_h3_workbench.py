@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from decimal import Decimal
 from pathlib import Path
 import uuid
 
@@ -28,6 +29,8 @@ from app.models import (
 )
 from app.services.h3_pool import configure_h3_capability
 from app.services.h3.motion_references import H3MotionReference
+from app.services.runninghub import RunningHubAccountStatus
+from app.services.runninghub_balance import save_account_status
 from app.services.security import encrypt_secret, secret_fingerprint
 from app.services.speech.accounts import credential_fingerprint
 from app.services.storage import to_relative_data_path
@@ -309,6 +312,27 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
         lambda _name: pytest.fail("H3 预检不应调用云端本机 ASR"),
     )
 
+    def _refresh_balance(db, _user) -> None:
+        account = db.get(RunningHubExecutionAccount, account_id)
+        assert account is not None
+        save_account_status(
+            db,
+            credential_fingerprint=account.credential_fingerprint,
+            status=RunningHubAccountStatus(
+                current_task_count=0,
+                remain_coins=Decimal("72.5"),
+                remain_money=None,
+                currency=None,
+                api_type="NORMAL",
+            ),
+        )
+        db.commit()
+
+    monkeypatch.setattr(
+        "app.services.h3_workbench.refresh_h3_execution_account_balances",
+        _refresh_balance,
+    )
+
     accounts = client.post(
         "/api/workbench/h3-execution-accounts",
         json={"access_token": token},
@@ -316,6 +340,8 @@ def test_h3_prepare_quote_and_confirm_are_two_distinct_no_double_submit_steps(
     assert accounts.status_code == 200, accounts.text
     serialized_accounts = json.dumps(accounts.json(), ensure_ascii=False)
     assert accounts.json()["default_selected_account_ids"] == [account_id]
+    assert accounts.json()["accounts"][0]["balance"]["remain_coins"] == "72.5"
+    assert accounts.json()["accounts"][0]["selectable"] is True
     capability = accounts.json()["adapter_capability"]
     assert capability["max_user_reference_images"] == 4
     assert capability["max_effective_reference_images"] == 6

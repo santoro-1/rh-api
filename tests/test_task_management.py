@@ -14,11 +14,12 @@ from app.models import (
 from app.services.storage import task_output_dir, task_upload_dir
 from app.services.runninghub import RunningHubError
 from scripts import cleanup_files
-from tests.conftest import create_user, login
+from tests.conftest import assign_runninghub_account, create_user, login
 
 
 def _create_digital_task(client, monkeypatch, username: str) -> str:
     create_user(username)
+    assign_runninghub_account(username)
     login(client, username)
     monkeypatch.setattr(
         "app.routes.tasks.inspect_audio_duration",

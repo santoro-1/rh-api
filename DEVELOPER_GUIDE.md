@@ -124,6 +124,12 @@ RunningHub 取消。取消成功后写入 `REMOTE_WATCHDOG_TIMEOUT` 终态；取
 结果下载成功即结束，不建立清晰化记录。新版工作台 4A 始终开启 SeedVR2，
 SeedVR2 自身仍固定 `plus`（48G）。
 
+旧网页的上述三类数字人入口也必须从 `runninghub_pool_memberships` 读取当前用户获配且已启用、
+配置完整的 RunningHub 执行账号。单次任务冻结到任务级候选快照，批量和长音频冻结到批次/行
+快照；Worker 只能在快照内选号。历史 `legacy_web` 任务需要重新提交且没有快照时，人工重试会
+以当前用户分配首次补齐任务级快照并清除旧路径的偶发绑定；已有远程 ID 的下载失败仍按原凭据
+续下，避免换号查询。多机位、LTX 和 H3 各自保持现有路由规则。
+
 ### 3.3 MiniMax 完整流程
 
 “完整流程”每个清单行只提交一次完整脚本，避免分段生成造成音色、语速和情绪不一致。
@@ -194,8 +200,9 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 - `/admin/runninghub-pool` 的数据库持久化开关决定新 4A 操作的执行模式；
   `RUNNINGHUB_DUAL_POOL_ENABLED` 仅在网页尚未首次保存时提供初始默认值。关闭时冻结为
   `same_account_v1`：受控测试用户仍使用现有一控多执行账号池，每个分段的数字人与 SeedVR2
-  严格绑定同一执行账号；无授权普通用户才使用自己的单账号。开启后还必须同时满足用户 ID授权、`source_channel=new_workbench` 和
-  `digital_human` 才冻结为 `dual_pool_v1`。普通用户、旧网页、历史 `legacy_web` 和 LTX 不进入。
+  严格绑定同一执行账号；开启后还必须同时满足用户 ID授权、`source_channel=new_workbench` 和
+  `digital_human` 才冻结为 `dual_pool_v1`。旧网页和历史 `legacy_web` 不进入双池模式，但数字人
+  阶段仍使用用户管理页分配的 RunningHub 账号池；LTX 不进入数字人资源池。
 - 正式授权用户仍为管理员；迁移只把当时存在的 `Cx_ceshi` 用户 ID写入受控非管理员测试授权。
   运行时不得用用户名判断权限。模式一经绑定，后续开关/授权变化不得迁移已有批次。
 - `GenerationTask.user_id` 只表示业务所有者；`execution_account_id` 与逐次
@@ -217,7 +224,10 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 - `RunningHubClient.get_account_status()` 复用付费提交前已有的 `accountStatus` 容量查询，同时以
   `Decimal` 解析 `remainCoins/remainMoney`。`runninghub_credential_balances` 按凭据指纹共享
   精确文本缓存；管理员页面可显式刷新，工作台清单只返回 RH 币、辅助钱包字段、查询时间和
-  是否过期。第一版余额未知只显示提示，不阻断或迁移任务。
+  是否过期。H3 账号清单每次打开都强制刷新；只有本次明确读到 `remainCoins > 0` 的账号可勾选，
+  0、未知、认证错误和临时读取失败均禁选。视频 Worker 在每个尚未创建远程 ID 的资源池任务上传
+  前再次读取；余额为 0 时释放本地账号预留、保留任务排队且不增加自动重试计数，使下一次领取可
+  改用冻结快照内其他账号。该提交前保护不修改已有远程任务的查询账号。
 
 ### 3.6 取消与删除
 
@@ -379,7 +389,8 @@ RunningHub 配置分为三层：`system_workflow_configs` 按工作流保存一�
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0047_h3_prompt_override`。`0047` 为老网页 H3 批次增加可空的人工总体 Prompt
+当前迁移头为 `0048_legacy_task_runninghub_pool`。`0048` 为独立数字人任务增加可空的
+RunningHub 候选账号快照；`0047` 为老网页 H3 批次增加可空的人工总体 Prompt
 冻结字段；留空继续编译现有模板，填写后用独立版本标识覆盖节点 83 的完整 Prompt，并进入费用
 与幂等摘要。`0031` 新增双池基础实体、执行模式与
 阶段账号快照，`0032` 只新增网页运行模式单例控制表，`0033` 直接增加旧网页任务级 SeedVR2
@@ -740,6 +751,16 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - `h3_item_payload()` 对成功分段返回 `normalized_video_sha256` 与 `completed_at`，供 JYD 在稳定的
   分段下载 URL 后识别主动重生成的新结果。字段只在当前未失效成功结果存在时返回，客户端不得
   把 URL 本身当成不可变版本号。
+- `H3_DIRECT_DELIVERY_ENABLED` 默认 `false`。设为 `true` 且 `H3_HEAD_TRIM_ENABLED=False` 时，Worker
+  使用 `h3.output.runninghub-direct.v1` 交付合同，把已校验的 RunningHub HTTPS 地址和稳定的
+  `result_signature` 存入 `task.output_metadata`，成功任务不写 `normalized_video_path` 或服务器 MP4。
+  `soft_chain` 仅通过 ffmpeg 从远端对象提取 `continuity.last-visible.png`；该小图仍由服务端持久化。
+- `h3_item_payload()` 同时返回 `video_delivery`。新版 JYD 对 `runninghub_direct` 直接下载且不转发数字人
+  网站 Bearer Token，并在本机计算实际 SHA-256；旧 `auth_center` 交付保持不变。原 `/video` 路由可
+  对直达结果作流式兼容代理，只转发 `Range` / `Accept`，不得转发调用方凭据。
+- 无数据库迁移；直达合同复用 JSON `output_metadata`。安全启用顺序是：先以默认关闭版本升级数字人
+  服务，再升级 JYD，最后才灰度打开开关。回滚只需关闭开关；重新启用片头裁剪时会自动使用旧的
+  服务端落盘后处理路径。
 - A/B 脚本恢复旧检查点时只可从已经下载的节点 387 原始 MP4 零费用重建；任何新的远端提交仍
   必须通过累计付费调用上限。
 

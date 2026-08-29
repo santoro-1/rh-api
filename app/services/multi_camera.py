@@ -330,7 +330,11 @@ def build_plan(
     settings: Settings,
 ) -> PlannedBatch:
     normalized = normalize_request(payload)
-    ensure_user_can_create_workflow(user, WORKFLOW)
+    ensure_user_can_create_workflow(
+        user,
+        WORKFLOW,
+        require_assigned_execution_account=False,
+    )
     asset_ids = [
         asset_id
         for group in normalized["groups"]
@@ -590,6 +594,7 @@ def create_multi_camera_batch(
                         "seedvr2_enabled": normalized["seedvr2Enabled"],
                     },
                     {"audio_duration_seconds": segment_duration},
+                    require_assigned_execution_account=False,
                 )
                 item.segments.append(segment_entity)
                 prepared.append(

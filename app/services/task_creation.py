@@ -6,9 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.models import GenerationTask, TaskStatus, User
+from app.services.runninghub_pool import (
+    RunningHubPoolSelectionUnavailableError,
+    assigned_execution_account_ids,
+)
 from app.services.workflow_configs import get_user_workflow_config
 from app.workflows import get_workflow
 from app.workflows.base import WorkflowAsset
@@ -27,12 +31,29 @@ class ValidatedTaskInput:
     input_payload: dict[str, Any]
 
 
-def ensure_user_can_create_workflow(user: User, workflow_key: str) -> None:
+def ensure_user_can_create_workflow(
+    user: User,
+    workflow_key: str,
+    *,
+    require_assigned_execution_account: bool = True,
+    execution_account_snapshot_frozen: bool = False,
+) -> None:
     """Apply the same account and workflow checks to single and batch creation."""
 
-    account_config = user.runninghub_config
-    if not account_config or not account_config.api_key_encrypted:
-        raise TaskCreationError("当前账号尚未配置 RunningHub API Key")
+    if execution_account_snapshot_frozen:
+        pass
+    elif workflow_key == "digital_human" and require_assigned_execution_account:
+        db = object_session(user)
+        if db is None:
+            raise TaskCreationError("当前用户未绑定数据库会话")
+        try:
+            assigned_execution_account_ids(db, user)
+        except RunningHubPoolSelectionUnavailableError as exc:
+            raise TaskCreationError(str(exc)) from exc
+    else:
+        account_config = user.runninghub_config
+        if not account_config or not account_config.api_key_encrypted:
+            raise TaskCreationError("当前账号尚未配置 RunningHub API Key")
 
     workflow_config = get_user_workflow_config(user, workflow_key)
     if not workflow_config.is_enabled:
@@ -48,10 +69,18 @@ def validate_task_input(
     assets: list[WorkflowAsset],
     parameters: dict[str, Any],
     asset_metadata: dict[str, Any],
+    *,
+    require_assigned_execution_account: bool = True,
+    execution_account_snapshot_frozen: bool = False,
 ) -> ValidatedTaskInput:
     """Normalize adapter input without writing a database row."""
 
-    ensure_user_can_create_workflow(user, workflow_key)
+    ensure_user_can_create_workflow(
+        user,
+        workflow_key,
+        require_assigned_execution_account=require_assigned_execution_account,
+        execution_account_snapshot_frozen=execution_account_snapshot_frozen,
+    )
     workflow = get_workflow(workflow_key)
     try:
         validated_parameters = workflow.validate_parameters(
@@ -91,11 +120,27 @@ def create_generation_task(
 
     parameters = validated.parameters
     metadata = validated.asset_metadata
+    standalone_execution_account_ids_json = None
+    if (
+        validated.workflow_key == "digital_human"
+        and batch_item_id is None
+        and segment_id is None
+    ):
+        try:
+            assigned_ids = assigned_execution_account_ids(db, user)
+        except RunningHubPoolSelectionUnavailableError as exc:
+            raise TaskCreationError(str(exc)) from exc
+        standalone_execution_account_ids_json = json.dumps(
+            assigned_ids, ensure_ascii=False, separators=(",", ":")
+        )
     task = GenerationTask(
         id=task_id or str(uuid.uuid4()),
         user_id=user.id,
         batch_item_id=batch_item_id,
         segment_id=segment_id,
+        runninghub_execution_account_ids_json=(
+            standalone_execution_account_ids_json
+        ),
         workflow_type=validated.workflow_key,
         seedvr2_enabled=bool(parameters.get("seedvr2_enabled", False)),
         input_payload=json.dumps(validated.input_payload, ensure_ascii=False),

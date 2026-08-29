@@ -29,6 +29,8 @@ from app.models import (
 )
 from app.services.security import encrypt_secret
 from app.services.batch_generation import BatchPlan, BatchValidationError, create_batch
+from app.services.runninghub_pool import create_execution_account
+from app.services.runninghub_dispatch import task_uses_execution_pool
 from app.services.speech.accounts import credential_fingerprint
 from app.services.batch_manifests import parse_manifest
 from app.services.long_audio import (
@@ -97,6 +99,22 @@ def _configure_minimax(username: str) -> str:
         return voice.id
 
 
+def _assign_runninghub_pool(username: str) -> None:
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(username=username).one()
+        create_execution_account(
+            db,
+            label=f"{username}-pool",
+            api_key=f"{username}-pool-key",
+            base_url="https://rh.example",
+            digital_human_ai_app_id=f"{username}-app",
+            max_concurrent_tasks=2,
+            is_enabled=True,
+            admin_user_ids=[user.id],
+        )
+        db.commit()
+
+
 def test_legacy_batch_page_hides_new_workbench_batches(client):
     user = create_user("batch-source-isolation-user")
     login(client, user.username)
@@ -159,6 +177,38 @@ def test_idempotency_key_cannot_cross_batch_sources():
                 ),
             )
         assert "另一入口" in exc_info.value.errors[0]["message"]
+
+
+def test_legacy_batch_freezes_user_assigned_runninghub_accounts():
+    user = create_user("legacy-batch-pool-user")
+    with SessionLocal() as db:
+        account = create_execution_account(
+            db,
+            label="用户分配账号",
+            api_key="legacy-batch-pool-key",
+            base_url="https://rh.example",
+            digital_human_ai_app_id="legacy-batch-app",
+            max_concurrent_tasks=2,
+            is_enabled=True,
+            admin_user_ids=[user.id],
+        )
+        db.commit()
+        batch, _ = create_batch(
+            db,
+            db.get(User, user.id),
+            get_settings(),
+            name="旧网页账号快照",
+            request_key="legacy-batch-pool-snapshot",
+            plan=BatchPlan(
+                workflow_type="digital_human",
+                audio_mode="upload",
+                rows=[],
+                assets=[],
+                source_channel=BATCH_SOURCE_LEGACY_WEB,
+            ),
+        )
+
+        assert json.loads(batch.runninghub_execution_account_ids_json) == [account.id]
 
 
 def test_batch_page_and_templates_support_excel_and_csv(client):
@@ -259,6 +309,7 @@ def test_minimax_batch_creates_persistent_audio_tasks_before_video_tasks(
     client, monkeypatch
 ):
     create_user("speech-batch-user")
+    _assign_runninghub_pool("speech-batch-user")
     voice_id = _configure_minimax("speech-batch-user")
     login(client, "speech-batch-user")
     monkeypatch.setattr(
@@ -378,6 +429,7 @@ def test_digital_batch_rejects_dual_mode_while_unavailable(
     client, monkeypatch
 ):
     create_user("digital-batch-user")
+    _assign_runninghub_pool("digital-batch-user")
     login(client, "digital-batch-user")
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",
@@ -426,6 +478,7 @@ def test_direct_batch_request_cannot_bypass_disabled_dual_mode(
     client, monkeypatch
 ):
     create_user("sequence-binding-user")
+    _assign_runninghub_pool("sequence-binding-user")
     login(client, "sequence-binding-user")
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",
@@ -482,6 +535,7 @@ def test_digital_batch_reuses_one_image_for_multiple_audio_rows(
     client, monkeypatch
 ):
     create_user("digital-one-to-many-user")
+    _assign_runninghub_pool("digital-one-to-many-user")
     login(client, "digital-one-to-many-user")
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",
@@ -551,6 +605,7 @@ def test_digital_batch_reuses_one_image_for_multiple_audio_rows(
         assert tasks[0].image_path != tasks[1].image_path
         assert tasks[0].audio_path != tasks[1].audio_path
         assert all(task.seedvr2_enabled is False for task in tasks)
+        assert all(task_uses_execution_pool(task) for task in tasks)
         assert all(
             json.loads(task.input_payload)["parameters"]["seedvr2_enabled"]
             is False
@@ -886,6 +941,7 @@ def test_cancelling_long_audio_review_stays_local_and_updates_batch_page(
 
 def test_minimax_batch_reuses_one_primary_asset_for_multiple_scripts(client):
     create_user("speech-one-to-many-user")
+    _assign_runninghub_pool("speech-one-to-many-user")
     voice_id = _configure_minimax("speech-one-to-many-user")
     login(client, "speech-one-to-many-user")
     image_id = _stage(
@@ -943,6 +999,7 @@ def test_minimax_batch_reuses_one_primary_asset_for_multiple_scripts(client):
 
 def test_batch_validation_is_atomic(client, monkeypatch):
     create_user("invalid-batch-user")
+    _assign_runninghub_pool("invalid-batch-user")
     login(client, "invalid-batch-user")
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",
@@ -1106,6 +1163,7 @@ def test_ltx_minimax_prompt_is_generated_from_original_script(client):
 
 def test_batch_retry_and_terminal_delete(client, monkeypatch):
     create_user("batch-manage-user")
+    _assign_runninghub_pool("batch-manage-user")
     login(client, "batch-manage-user")
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",
@@ -1196,6 +1254,7 @@ def test_locally_stuck_batch_without_worker_task_can_be_deleted(
     monkeypatch,
 ):
     create_user("stuck-batch-delete-user")
+    _assign_runninghub_pool("stuck-batch-delete-user")
     login(client, "stuck-batch-delete-user")
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",
@@ -1303,6 +1362,7 @@ def test_locally_stuck_segment_batch_deletes_derived_upload_directory(client):
 
 def test_batch_navigation_detail_return_and_zip_download(client, monkeypatch):
     create_user("batch-download-user")
+    _assign_runninghub_pool("batch-download-user")
     login(client, "batch-download-user")
     monkeypatch.setattr(
         "app.services.batch_generation.inspect_audio_duration",

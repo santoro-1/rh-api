@@ -5,8 +5,9 @@ import json
 from app.database import SessionLocal
 from app.models import GenerationTask, TaskStatus, User
 from app.services.workflow_configs import save_workflow_config
+from app.services.runninghub_dispatch import task_uses_execution_pool
 
-from tests.conftest import create_user, login
+from tests.conftest import assign_runninghub_account, create_user, login
 
 
 def test_generate_page_uses_fixed_stable_mode_v2(client):
@@ -94,6 +95,7 @@ def test_direct_audio_inspection_rejects_more_than_speech_limit(
 
 def test_fractional_speech_limit_accepts_whole_second_end_time(client, monkeypatch):
     create_user("fractional-limit-user")
+    assign_runninghub_account("fractional-limit-user")
     login(client, "fractional-limit-user")
     monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda _path: 32.4)
 
@@ -110,7 +112,8 @@ def test_fractional_speech_limit_accepts_whole_second_end_time(client, monkeypat
 
 
 def test_task_creation_returns_immediately_without_calling_runninghub(client, monkeypatch):
-    create_user("creator")
+    create_user("creator", with_config=False)
+    assign_runninghub_account("creator")
     login(client, "creator")
     monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda path: 15.5)
     response = client.post(
@@ -138,6 +141,8 @@ def test_task_creation_returns_immediately_without_calling_runninghub(client, mo
         assert payload["parameters"]["instance_type"] == "plus"
         assert payload["parameters"]["seedvr2_enabled"] is False
         assert task.seedvr2_enabled is False
+        assert len(json.loads(task.runninghub_execution_account_ids_json)) == 1
+        assert task_uses_execution_pool(task) is True
         assert "overall_mode" not in payload["parameters"]
         assert "left_audio" not in payload["assets"]
         assert "right_audio" not in payload["assets"]
@@ -147,6 +152,7 @@ def test_digital_human_task_freezes_admin_instance_and_seedvr2_choice(
     client, monkeypatch
 ):
     create_user("digital-config-snapshot-user")
+    assign_runninghub_account("digital-config-snapshot-user")
     with SessionLocal() as db:
         user = db.query(User).filter_by(
             username="digital-config-snapshot-user"
@@ -170,7 +176,7 @@ def test_digital_human_task_freezes_admin_instance_and_seedvr2_choice(
             "startTime": "0:00",
             "endTime": "0:15",
             "prompt": "24G 且放大",
-            # A forged browser value cannot override the administrator setting.
+            # A forged browser value cannot override the system workflow setting.
             "instanceType": "plus",
             # The legacy page still allows an explicit per-task opt-in.
             "seedvr2Enabled": "true",
@@ -185,13 +191,14 @@ def test_digital_human_task_freezes_admin_instance_and_seedvr2_choice(
     with SessionLocal() as db:
         task = db.get(GenerationTask, response.json()["taskId"])
         payload = json.loads(task.input_payload)
-        assert payload["parameters"]["instance_type"] == "default"
+        assert payload["parameters"]["instance_type"] == "plus"
         assert payload["parameters"]["seedvr2_enabled"] is True
         assert task.seedvr2_enabled is True
 
 
 def test_digital_human_task_uses_plus_instance(client, monkeypatch):
     create_user("digital-plus-creator")
+    assign_runninghub_account("digital-plus-creator")
     login(client, "digital-plus-creator")
     monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda path: 15.5)
     response = client.post(
@@ -216,6 +223,7 @@ def test_digital_human_task_uses_plus_instance(client, monkeypatch):
 
 def test_tasks_beyond_concurrency_limit_are_saved_for_queue(client, monkeypatch):
     user = create_user("queued-creator")
+    assign_runninghub_account("queued-creator")
     login(client, "queued-creator")
     monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda path: 15.5)
     task_ids = []
@@ -258,6 +266,7 @@ def test_tasks_beyond_concurrency_limit_are_saved_for_queue(client, monkeypatch)
 
 def test_dual_person_task_is_disabled(client, monkeypatch):
     create_user("dual-creator")
+    assign_runninghub_account("dual-creator")
     login(client, "dual-creator")
     monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda path: 15.5)
     response = client.post(
@@ -282,6 +291,7 @@ def test_dual_person_task_is_disabled(client, monkeypatch):
 
 def test_dual_person_task_requires_both_person_audio_files(client, monkeypatch):
     create_user("incomplete-dual-creator")
+    assign_runninghub_account("incomplete-dual-creator")
     login(client, "incomplete-dual-creator")
     monkeypatch.setattr("app.routes.tasks.inspect_audio_duration", lambda path: 15.5)
     response = client.post(

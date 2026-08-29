@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import (
+    BATCH_SOURCE_LEGACY_WEB,
     BATCH_SOURCE_LTX_WORKBENCH,
     GenerationBatch,
     GenerationBatchItem,
@@ -36,6 +37,11 @@ from app.services.media_segmentation import (
     detect_silence_midpoints,
     inspect_media_duration,
     plan_silence_segments,
+)
+from app.services.runninghub_pool import (
+    RunningHubPoolSelectionUnavailableError,
+    assigned_execution_account_ids,
+    item_execution_account_snapshot,
 )
 from app.services.storage import (
     long_audio_project_dir,
@@ -575,9 +581,36 @@ def materialize_long_audio_project(
         or "人物自然地说话，表情自然，动作自然，镜头保持稳定。"
     ).strip()
 
+    assigned_ids: list[int] | None = None
+    if (
+        workflow_type == DIGITAL_HUMAN_WORKFLOW
+        and (
+            project.batch_item is None
+            or (
+                project.batch_item.batch.source_channel == BATCH_SOURCE_LEGACY_WEB
+                and item_execution_account_snapshot(project.batch_item) is None
+            )
+        )
+    ):
+        try:
+            assigned_ids = assigned_execution_account_ids(db, user)
+        except RunningHubPoolSelectionUnavailableError as exc:
+            raise LongAudioError(str(exc)) from exc
+    assigned_ids_json = (
+        json.dumps(assigned_ids, ensure_ascii=False, separators=(",", ":"))
+        if assigned_ids is not None
+        else None
+    )
+
     if project.batch_item is not None:
         item = project.batch_item
         batch = item.batch
+        if (
+            workflow_type == DIGITAL_HUMAN_WORKFLOW
+            and batch.source_channel == BATCH_SOURCE_LEGACY_WEB
+            and item_execution_account_snapshot(item) is None
+        ):
+            item.runninghub_execution_account_ids_json = assigned_ids_json
         item.status = "CREATING_SEGMENTS"
         item.audio_status = "SEGMENTING"
     else:
@@ -599,6 +632,8 @@ def materialize_long_audio_project(
             user_id=project.user_id,
             name=project.name,
             workflow_type=workflow_type,
+            runninghub_execution_account_ids_json=assigned_ids_json,
+            source_channel=BATCH_SOURCE_LEGACY_WEB,
             audio_mode="upload",
             review_required=False,
             request_key=request_key,
@@ -819,6 +854,10 @@ def materialize_long_audio_project(
                     "has_custom_audio": True,
                     "audio_duration_seconds": segment_duration,
                 },
+                execution_account_snapshot_frozen=(
+                    workflow_type == DIGITAL_HUMAN_WORKFLOW
+                    and item_execution_account_snapshot(item) is not None
+                ),
             )
             prepared_segments.append(
                 (

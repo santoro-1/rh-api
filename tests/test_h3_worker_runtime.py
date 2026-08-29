@@ -213,6 +213,172 @@ def test_h3_worker_uses_h3_capability_and_persists_dynamic_graph_hash(
     assert segment_payload["normalized_video_download_url"] is None
 
 
+def test_h3_direct_delivery_persists_url_without_server_mp4(
+    client,
+    monkeypatch,
+) -> None:
+    batch_id = _prepare_confirmed_h3_task(
+        client,
+        monkeypatch,
+        "h3-direct-runtime",
+        continuity_mode="fast",
+    )
+    fake = _FakeH3RunningHub()
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    direct_settings = replace(
+        get_settings(),
+        h3_direct_delivery_enabled=True,
+    )
+    monkeypatch.setattr(task_worker, "get_settings", lambda: direct_settings)
+
+    def reject_server_download(url: str, destination: Path) -> None:
+        raise AssertionError(f"H3 直达模式不应下载到服务器：{url} -> {destination}")
+
+    fake.download_result = reject_server_download  # type: ignore[method-assign]
+    with SessionLocal() as db:
+        task_id = task_worker.claim_next_pending_task(db)
+        assert task_id is not None
+        task_worker.process_task(db, task_id)
+        task_worker.process_task(db, task_id)
+        db.expire_all()
+        task = db.get(GenerationTask, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.SUCCESS.value
+        assert task.result_path is None
+        metadata = json.loads(task.output_metadata or "{}")
+        assert metadata["output_contract_version"] == (
+            "h3.output.runninghub-direct.v1"
+        )
+        assert metadata["delivery"]["mode"] == "runninghub_direct"
+        assert metadata["delivery"]["download_url"] == (
+            "https://example.invalid/h3.mp4"
+        )
+        assert len(metadata["delivery"]["result_signature"]) == 64
+        assert task.segment.h3_config.normalized_video_path is None
+        output_dir = direct_settings.outputs_dir / str(task.user_id) / task.id
+        assert not list(output_dir.rglob("*.mp4")) if output_dir.exists() else True
+
+    token = _token(client, "h3-direct-runtime")
+    status = client.post(
+        f"/api/workbench/h3-batches/{batch_id}",
+        json={"access_token": token},
+    )
+    segment_payload = status.json()["items"][0]["segments"][0]
+    assert segment_payload["can_regenerate"] is True
+    assert segment_payload["normalized_video_sha256"] is None
+    assert segment_payload["video_delivery"]["mode"] == "runninghub_direct"
+    assert segment_payload["video_delivery"]["download_url"] == (
+        "https://example.invalid/h3.mp4"
+    )
+
+    class _ProviderResponse:
+        status_code = 200
+        headers = {
+            "Content-Type": "video/mp4",
+            "Content-Length": "15",
+            "Accept-Ranges": "bytes",
+        }
+
+        def iter_content(self, chunk_size: int):
+            assert chunk_size == 1024 * 1024
+            yield b"provider-stream"
+
+        def close(self) -> None:
+            return None
+
+    def provider_get(url: str, **kwargs):
+        assert url == "https://example.invalid/h3.mp4"
+        assert kwargs["headers"] == {"Accept": "video/mp4,*/*"}
+        assert kwargs["allow_redirects"] is False
+        return _ProviderResponse()
+
+    monkeypatch.setattr("app.routes.workbench_h3.requests.get", provider_get)
+    proxied = client.get(
+        segment_payload["normalized_video_download_url"],
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert proxied.status_code == 200
+    assert proxied.content == b"provider-stream"
+
+    target_segment_id = segment_payload["segment_id"]
+    preview = client.post(
+        f"/api/workbench/h3-segments/{target_segment_id}/regeneration/prepare",
+        json={"access_token": token},
+    )
+    assert preview.status_code == 200, preview.text
+    confirmed = client.post(
+        f"/api/workbench/h3-segments/{target_segment_id}/regeneration/confirm",
+        json={
+            "access_token": token,
+            "request_key": "direct-regeneration-1",
+            "quote_token": preview.json()["quote_token"],
+            "cost_confirmed": True,
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["items"][0]["segments"][0]["status"] == "PENDING"
+    with SessionLocal() as db:
+        regenerated_task = db.get(GenerationTask, task_id)
+        history = json.loads(regenerated_task.input_payload)[
+            "_h3_regeneration_history"
+        ]
+        assert history[-1]["normalized_video_path"] is None
+        assert len(history[-1]["provider_result_signature"]) == 64
+
+
+def test_h3_direct_soft_chain_only_materializes_tail_anchor(
+    client,
+    monkeypatch,
+) -> None:
+    _prepare_confirmed_h3_task(
+        client,
+        monkeypatch,
+        "h3-direct-soft-chain",
+        continuity_mode="soft_chain",
+    )
+    fake = _FakeH3RunningHub()
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: fake)
+    direct_settings = replace(
+        get_settings(),
+        h3_direct_delivery_enabled=True,
+    )
+    monkeypatch.setattr(task_worker, "get_settings", lambda: direct_settings)
+
+    def fake_remote_anchor(url: str, target: Path) -> None:
+        assert url == "https://example.invalid/h3.mp4"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"remote-tail-anchor")
+
+    monkeypatch.setattr(
+        task_worker,
+        "extract_last_visible_frame_from_url",
+        fake_remote_anchor,
+    )
+    with SessionLocal() as db:
+        first_task_id = task_worker.claim_next_pending_task(db)
+        assert first_task_id is not None
+        task_worker.process_task(db, first_task_id)
+        task_worker.process_task(db, first_task_id)
+        db.expire_all()
+        tasks = (
+            db.query(GenerationTask)
+            .filter_by(workflow_type="minimax_h3_ref2va")
+            .order_by(GenerationTask.created_at)
+            .all()
+        )
+        first, second = tasks
+        assert first.status == TaskStatus.SUCCESS.value
+        assert first.result_path is None
+        assert second.status == TaskStatus.PENDING.value
+        anchor_path = direct_settings.data_dir / (
+            second.segment.h3_config.continuity_anchor_path or ""
+        )
+        assert anchor_path.read_bytes() == b"remote-tail-anchor"
+        first_output_dir = direct_settings.outputs_dir / str(first.user_id) / first.id
+        assert not list(first_output_dir.rglob("*.mp4"))
+        assert list(first_output_dir.rglob("*.png"))
+
+
 def test_h3_remote_mode_queues_asr_then_resumes_postprocess(
     client,
     monkeypatch,

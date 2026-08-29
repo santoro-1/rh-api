@@ -47,6 +47,7 @@ from app.services.media_segmentation import (
     inspect_media_duration,
     plan_timestamped_segments,
 )
+from app.services.runninghub_pool import item_execution_account_snapshot
 from app.services.security import decrypt_secret
 from app.services.speech.accounts import replicate_shared_custom_voice
 from app.services.speech.async_outputs import (
@@ -726,6 +727,10 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
             ],
             segment_parameters,
             metadata,
+            execution_account_snapshot_frozen=(
+                workflow_type == "digital_human"
+                and item_execution_account_snapshot(task.batch_item) is not None
+            ),
         )
         create_generation_task(
             db,

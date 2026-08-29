@@ -75,7 +75,7 @@ def _request(image_count: int = 0, **overrides: object) -> H3GraphBuildRequest:
 def test_frozen_template_canonical_hash_matches_reviewed_source() -> None:
     template = json.loads(H3_DEFAULT_TEMPLATE_PATH.read_text(encoding="utf-8"))
     assert len(template) == 44
-    assert template["248"]["inputs"]["steps"] == H3_SAMPLING_STEPS == 4
+    assert template["248"]["inputs"]["steps"] == H3_SAMPLING_STEPS == 6
     assert _canonical_sha256(template) == H3_WORKFLOW_TEMPLATE_CANONICAL_SHA256
 
 
@@ -125,7 +125,7 @@ def test_dynamic_graph_supports_tightly_connected_zero_to_five_identity_images(
     assert workflow["135"]["inputs"]["video"] == "uploads/per-script-reference.mp4"
     assert workflow["138"]["inputs"]["audio"] == "uploads/segment-001.wav"
     assert workflow["243"]["inputs"]["noise_seed"] == 42
-    assert workflow["248"]["inputs"]["steps"] == 4
+    assert workflow["248"]["inputs"]["steps"] == 6
     assert "387" in workflow
     assert workflow["387"]["inputs"]["save_output"] is True
 

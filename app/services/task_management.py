@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
+
+from sqlalchemy.orm import object_session
 
 from app.config import Settings
 from app.models import EnhancementStatus, GenerationTask, TaskStatus
@@ -13,7 +16,15 @@ from app.services.runninghub_attempts import (
     enhancement_has_uncertain_submission,
     task_has_uncertain_submission,
 )
-from app.services.runninghub_dispatch import task_uses_execution_pool
+from app.services.runninghub_dispatch import (
+    task_is_legacy_web_digital_human,
+    task_uses_execution_pool,
+)
+from app.services.runninghub_pool import (
+    RunningHubPoolSelectionUnavailableError,
+    assigned_execution_account_ids,
+    task_execution_account_snapshot,
+)
 from app.services.seedvr2_dispatch import (
     release_seedvr2_account_for_new_attempt,
     task_uses_dual_pool,
@@ -38,6 +49,27 @@ TERMINAL_TASK_STATUSES = {
     TaskStatus.DOWNLOAD_FAILED.value,
     TaskStatus.CANCELLED.value,
 }
+
+
+def _ensure_legacy_pool_snapshot(task: GenerationTask) -> None:
+    if (
+        not task_is_legacy_web_digital_human(task)
+        or task_execution_account_snapshot(task) is not None
+    ):
+        return
+    db = object_session(task)
+    if db is None:
+        raise TaskManagementError("任务未绑定数据库会话，无法冻结执行账号")
+    try:
+        assigned_ids = assigned_execution_account_ids(db, task.user)
+    except RunningHubPoolSelectionUnavailableError as exc:
+        raise TaskManagementError(str(exc)) from exc
+    task.runninghub_execution_account_ids_json = json.dumps(
+        assigned_ids, ensure_ascii=False, separators=(",", ":")
+    )
+    # Snapshot-less historical tasks came from the personal-key path. Do not
+    # let a stale incidental binding override the user's current assignment.
+    task.execution_account_id = None
 
 
 def prepare_task_retry(
@@ -115,6 +147,11 @@ def prepare_task_retry(
         task.output_metadata = None
         task.completed_at = None
         return
+    if not (
+        task.status == TaskStatus.DOWNLOAD_FAILED.value
+        and task.runninghub_task_id
+    ):
+        _ensure_legacy_pool_snapshot(task)
     if (
         task.status == TaskStatus.DOWNLOAD_FAILED.value
         and task.runninghub_task_id
@@ -175,6 +212,7 @@ def prepare_successful_segment_regeneration(
     if task.status != TaskStatus.SUCCESS.value or not task.segment_id:
         raise TaskManagementError("只有成功的分段视频可以重新生成")
     _ensure_task_assets(task, settings)
+    _ensure_legacy_pool_snapshot(task)
     retry_time = now or datetime.now(timezone.utc)
     remove_directory(task_output_dir(settings, task.user_id, task.id))
     task.enhancement = None

@@ -12,6 +12,7 @@ from app.models import (
     GenerationTask,
     MiniMaxConfig,
     MiniMaxVoiceAsset,
+    RunningHubPoolMembership,
     User,
     VoiceAssetStatus,
 )
@@ -19,7 +20,7 @@ from app.services.security import encrypt_secret
 from app.services.speech.accounts import credential_fingerprint
 from app.workers import audio_worker
 from tests.async_speech_fakes import make_async_speech_bundle
-from tests.conftest import create_user, login
+from tests.conftest import assign_runninghub_account, create_user, login
 
 
 def _stage(client, kind: str, name: str, content: bytes, mime: str) -> str:
@@ -87,6 +88,7 @@ def test_audio_worker_activates_voices_and_hands_off_to_video_queue(
     client, monkeypatch
 ):
     create_user("audio-worker-user")
+    assign_runninghub_account("audio-worker-user")
     with SessionLocal() as db:
         user = db.query(User).filter_by(username="audio-worker-user").one()
         config = MiniMaxConfig(
@@ -158,6 +160,10 @@ def test_audio_worker_activates_voices_and_hands_off_to_video_queue(
     }
     created = client.post("/api/batches", json=payload)
     assert created.status_code == 201, created.text
+    # Membership changes after creation must not invalidate the frozen batch.
+    with SessionLocal() as db:
+        db.query(RunningHubPoolMembership).delete()
+        db.commit()
 
     fake_client = FakeMiniMaxClient()
     monkeypatch.setattr(audio_worker, "_make_client", lambda task: fake_client)
@@ -206,6 +212,7 @@ def test_optional_audio_review_can_regenerate_then_approve(
     client, monkeypatch
 ):
     create_user("audio-review-user")
+    assign_runninghub_account("audio-review-user")
     with SessionLocal() as db:
         user = db.query(User).filter_by(username="audio-review-user").one()
         config = MiniMaxConfig(

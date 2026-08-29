@@ -31,8 +31,13 @@ from app.services.h3.graph import (  # noqa: E402
     load_default_h3_graph_builder,
 )
 from app.services.h3.motion_references import (  # noqa: E402
+    H3MotionReference,
     assign_h3_motion_references,
     split_h3_motion_reference,
+)
+from app.services.h3.prompt import (  # noqa: E402
+    H3PromptRequest,
+    compile_loop_anchor_ref2va_prompt,
 )
 from app.services.h3.segmentation import (  # noqa: E402
     H3TimestampedSegment,
@@ -41,6 +46,7 @@ from app.services.h3.segmentation import (  # noqa: E402
 from app.services.media_segmentation import (  # noqa: E402
     MediaSegmentationError,
     cut_audio_segment,
+    inspect_media_duration,
 )
 from app.services.runninghub import RunningHubClient, RunningHubError  # noqa: E402
 from app.services.runninghub_pool import (  # noqa: E402
@@ -115,9 +121,12 @@ class TestInput:
     aspect_ratio: str
     megapixels: float
     seed: int
-    sampling_steps: int = 4
+    sampling_steps: int = 6
     visual_mode: str = VISUAL_MODE_VIDEO
     reference_images: tuple[Path, ...] = ()
+    prepared_motion_clip: bool = False
+    source_segment_index: int | None = None
+    source_segment_count: int | None = None
 
 
 def utc_now() -> str:
@@ -257,6 +266,17 @@ def validate_reference_configuration(selection: TestInput) -> None:
     image_hashes = [sha256_file(path) for path in images]
     if len(image_hashes) != len(set(image_hashes)):
         raise ValueError("参考图片不能包含重复内容")
+    has_source_index = selection.source_segment_index is not None
+    has_source_count = selection.source_segment_count is not None
+    if has_source_index != has_source_count:
+        raise ValueError("历史复现必须同时指定 source_segment_index 和 source_segment_count")
+    if has_source_index:
+        assert selection.source_segment_index is not None
+        assert selection.source_segment_count is not None
+        if selection.visual_mode != VISUAL_MODE_PICTURE:
+            raise ValueError("历史 loop-anchor Prompt 复现只支持图片主锚点模式")
+        if not 0 <= selection.source_segment_index < selection.source_segment_count:
+            raise ValueError("历史 H3 分段序号不合法")
 
 
 def template_path_for(selection: TestInput) -> Path:
@@ -451,7 +471,7 @@ def collect_inputs_with_window(accounts: list[AccountSummary]) -> TestInput | No
     aspect_var = tk.StringVar(value="9:16 (Portrait Widescreen)")
     megapixels_var = tk.StringVar(value="1.0")
     seed_var = tk.StringVar(value="0")
-    sampling_steps_var = tk.StringVar(value="4")
+    sampling_steps_var = tk.StringVar(value="6")
     result: dict[str, TestInput | None] = {"value": None}
 
     outer = ttk.Frame(root, padding=16)
@@ -826,6 +846,9 @@ def prepare_preview(selection: TestInput) -> tuple[Path, Path, dict[str, Any]]:
             "megapixels": selection.megapixels,
             "seed": selection.seed,
             "sampling_steps": selection.sampling_steps,
+            "prepared_motion_clip": selection.prepared_motion_clip,
+            "source_segment_index": selection.source_segment_index,
+            "source_segment_count": selection.source_segment_count,
         },
         "segments": [],
     }
@@ -838,12 +861,26 @@ def prepare_preview(selection: TestInput) -> tuple[Path, Path, dict[str, Any]]:
             selection.reference_audio,
             duration,
         )
+        if selection.source_segment_index is not None and len(plans) != 1:
+            raise ValueError("历史 H3 分段复现要求输入音频只生成一个测试分段")
         state["alignment"] = alignment
         print("正在准备参考视频动作片段…", flush=True)
-        motion_clips = split_h3_motion_reference(
-            selection.reference_video,
-            run_dir / "motion-references",
-        )
+        if selection.prepared_motion_clip:
+            prepared_video = selection.reference_video.resolve()
+            motion_clips = [
+                H3MotionReference(
+                    index=0,
+                    start_seconds=0.0,
+                    end_seconds=inspect_media_duration(prepared_video),
+                    path=prepared_video,
+                    sha256=sha256_file(prepared_video),
+                )
+            ]
+        else:
+            motion_clips = split_h3_motion_reference(
+                selection.reference_video,
+                run_dir / "motion-references",
+            )
         assigned_clips = assign_h3_motion_references(
             motion_clips,
             len(plans),
@@ -881,13 +918,25 @@ def prepare_preview(selection: TestInput) -> tuple[Path, Path, dict[str, Any]]:
                 )
             probed_duration = inspect_audio_duration(segment_audio)
             duration_plan = plan_h3_duration(probed_duration, 0.1)
-            prompt = render_prompt_template(
-                template,
-                segment_text=plan.script_text,
-                segment_index=position,
-                segment_count=len(plans),
-                reference_image_count=len(reference_images),
-            )
+            if selection.source_segment_index is not None:
+                assert selection.source_segment_count is not None
+                prompt = compile_loop_anchor_ref2va_prompt(
+                    H3PromptRequest(
+                        segment_text=plan.script_text,
+                        segment_duration_seconds=probed_duration,
+                        segment_index=selection.source_segment_index,
+                        segment_count=selection.source_segment_count,
+                        identity_image_count=len(reference_images),
+                    )
+                )
+            else:
+                prompt = render_prompt_template(
+                    template,
+                    segment_text=plan.script_text,
+                    segment_index=position,
+                    segment_count=len(plans),
+                    reference_image_count=len(reference_images),
+                )
             prompt_path = segment_dir / "prompt.txt"
             prompt_path.write_text(prompt, encoding="utf-8")
             graph = builder.build(
@@ -1092,7 +1141,7 @@ def submit_remote_segment(
         )
     )
     sampling_steps = validate_sampling_steps(
-        int(state["input"].get("sampling_steps", 4))
+        int(state["input"].get("sampling_steps", 6))
     )
     workflow_json, dynamic_graph_sha256 = apply_test_sampling_steps(
         graph,
@@ -1209,7 +1258,7 @@ def execute_segments(
         )
         print(f"  自动分段：{len(segments)} 段", flush=True)
         print(
-            f"  节点 248 采样步数：{int(state['input'].get('sampling_steps', 4))}",
+            f"  节点 248 采样步数：{int(state['input'].get('sampling_steps', 6))}",
             flush=True,
         )
         visual_mode = str(
@@ -1395,8 +1444,23 @@ def parse_args() -> argparse.Namespace:
         "--sampling-steps",
         type=int,
         choices=SAMPLING_STEP_OPTIONS,
-        default=4,
+        default=6,
         help="本次测试覆盖节点 248 的采样步数",
+    )
+    parser.add_argument(
+        "--prepared-motion-clip",
+        action="store_true",
+        help="参考视频已经是目标动作切片，原样上传而不再次切割转码",
+    )
+    parser.add_argument(
+        "--source-segment-index",
+        type=int,
+        help="历史任务中的零基分段序号；必须与 --source-segment-count 同时使用",
+    )
+    parser.add_argument(
+        "--source-segment-count",
+        type=int,
+        help="历史任务中的总分段数；必须与 --source-segment-index 同时使用",
     )
     parser.add_argument("--poll-interval", type=float, default=8.0)
     return parser.parse_args()
@@ -1435,6 +1499,9 @@ def main() -> int:
             sampling_steps=args.sampling_steps,
             visual_mode=args.visual_mode,
             reference_images=tuple(path.resolve() for path in args.reference_image),
+            prepared_motion_clip=args.prepared_motion_clip,
+            source_segment_index=args.source_segment_index,
+            source_segment_count=args.source_segment_count,
         )
     else:
         selection = collect_inputs_with_window(accounts)

@@ -836,6 +836,9 @@ class GenerationTask(Base):
         nullable=True,
         index=True,
     )
+    runninghub_execution_account_ids_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
     workflow_type: Mapped[str] = mapped_column(
         String(100), nullable=False, default="digital_human", index=True
     )

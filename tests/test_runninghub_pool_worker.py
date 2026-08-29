@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
@@ -18,8 +19,8 @@ from app.models import (
     RunningHubExecutionAccount,
     TaskStatus,
 )
-from app.services.runninghub import RunningHubError
-from app.services.runninghub_dispatch import reserve_pool_task
+from app.services.runninghub import RunningHubAccountStatus, RunningHubError
+from app.services.runninghub_dispatch import reserve_pool_task, task_uses_execution_pool
 from app.services.runninghub_pool import create_execution_account
 from app.services.runninghub_pool import credential_active_task_count
 from app.services.security import encrypt_secret, secret_fingerprint
@@ -159,6 +160,69 @@ def _prepare_real_pool_task_files(task_id: str) -> None:
             ensure_ascii=False,
         )
         db.commit()
+
+
+def test_zero_balance_account_is_released_before_upload_and_task_uses_funded_account(
+    monkeypatch,
+):
+    admin = create_user("pool-zero-balance-admin", is_admin=True, with_config=False)
+    with SessionLocal() as db:
+        empty = _create_account(
+            db,
+            admin.id,
+            label="零余额",
+            api_key="pool-zero-balance-key",
+            max_concurrent_tasks=1,
+        )
+        funded = _create_account(
+            db,
+            admin.id,
+            label="有余额",
+            api_key="pool-funded-key",
+            max_concurrent_tasks=1,
+        )
+        db.commit()
+        empty_id, funded_id = empty.id, funded.id
+    _create_pool_tasks(admin.id, [empty_id, funded_id], ["pool-balance-task"])
+    _prepare_real_pool_task_files("pool-balance-task")
+
+    empty_client = FakeRunningHub(current_task_count=0)
+    empty_client.last_account_status = RunningHubAccountStatus(
+        current_task_count=0,
+        remain_coins=Decimal("0"),
+        remain_money=None,
+        currency=None,
+        api_type="NORMAL",
+    )
+    funded_client = FakeRunningHub(current_task_count=0)
+    funded_client.last_account_status = RunningHubAccountStatus(
+        current_task_count=0,
+        remain_coins=Decimal("100"),
+        remain_money=None,
+        currency=None,
+        api_type="NORMAL",
+    )
+    clients = {empty_id: empty_client, funded_id: funded_client}
+    monkeypatch.setattr(task_worker, "_make_client", lambda config: clients[config.id])
+
+    with SessionLocal() as db:
+        assert task_worker.claim_next_pending_task(db) == "pool-balance-task"
+        assert db.get(GenerationTask, "pool-balance-task").execution_account_id == empty_id
+        task_worker.process_task(db, "pool-balance-task")
+        task = db.get(GenerationTask, "pool-balance-task")
+        assert task.status == TaskStatus.PENDING.value
+        assert task.execution_account_id is None
+        assert task.runninghub_auto_retry_count == 0
+        assert empty_client.upload_calls == 0
+        assert empty_client.submissions == 0
+
+        assert task_worker.claim_next_pending_task(db) == "pool-balance-task"
+        assert db.get(GenerationTask, "pool-balance-task").execution_account_id == funded_id
+        task_worker.process_task(db, "pool-balance-task")
+        task = db.get(GenerationTask, "pool-balance-task")
+        assert task.execution_account_id == funded_id
+        assert task.status == TaskStatus.SUBMITTED.value
+        assert funded_client.submissions == 1
 
 
 def test_pool_dispatches_fifo_subtasks_across_independent_account_slots():
@@ -360,6 +424,46 @@ def test_manual_retry_keeps_cloud_accepted_pipeline_account():
         assert task.status == TaskStatus.PENDING.value
         assert task.runninghub_task_id is None
         assert task.execution_account_id == account_id
+
+
+def test_manual_retry_moves_snapshotless_legacy_task_to_current_user_pool():
+    user = create_user("legacy-retry-pool-user")
+    with SessionLocal() as db:
+        account = _create_account(
+            db,
+            user.id,
+            label="当前分配账号",
+            api_key="legacy-retry-current-key",
+        )
+        task = GenerationTask(
+            id="legacy-retry-pool-task",
+            user_id=user.id,
+            workflow_type="digital_human",
+            image_path="uploads/placeholder/image.png",
+            audio_path="uploads/placeholder/audio.mp3",
+            image_original_name="image.png",
+            audio_original_name="audio.mp3",
+            audio_duration_seconds=10,
+            start_seconds=0,
+            end_seconds=10,
+            prompt="测试",
+            status=TaskStatus.FAILED.value,
+        )
+        db.add(task)
+        db.commit()
+        account_id = account.id
+
+    _prepare_real_pool_task_files("legacy-retry-pool-task")
+    with SessionLocal() as db:
+        task = db.get(GenerationTask, "legacy-retry-pool-task")
+        prepare_task_retry(task, get_settings())
+
+        assert json.loads(task.runninghub_execution_account_ids_json) == [account_id]
+        assert task.execution_account_id is None
+        assert task_uses_execution_pool(task) is True
+        db.commit()
+        assert task_worker.claim_next_pending_task(db) == task.id
+        assert db.get(GenerationTask, task.id).execution_account_id == account_id
 
 
 def test_ambiguous_pool_submit_keeps_account_capacity_and_blocks_retry(monkeypatch):

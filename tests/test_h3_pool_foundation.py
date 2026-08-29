@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from app.database import SessionLocal
@@ -10,7 +12,10 @@ from app.services.h3_pool import (
     h3_capability_ready,
     h3_capability_snapshots_for_user,
     h3_execution_account_summary,
+    refresh_h3_execution_account_balances,
 )
+from app.services.runninghub import RunningHubAccountStatus
+from app.services.runninghub_balance import save_account_status
 from app.services.security import (
     decrypt_secret,
     encrypt_secret,
@@ -38,6 +43,20 @@ def _account(key: str, label: str) -> RunningHubExecutionAccount:
         digital_human_ai_app_id="digital-human-only",
         max_concurrent_tasks=5,
         is_enabled=True,
+    )
+
+
+def _save_balance(db, account: RunningHubExecutionAccount, coins: str) -> None:
+    save_account_status(
+        db,
+        credential_fingerprint=account.credential_fingerprint,
+        status=RunningHubAccountStatus(
+            current_task_count=0,
+            remain_coins=Decimal(coins),
+            remain_money=None,
+            currency=None,
+            api_type=None,
+        ),
     )
 
 
@@ -184,6 +203,7 @@ def test_user_management_h3_grant_is_independent_from_legacy_dual_pool_grant() -
                 is_enabled=True,
             )
         )
+        _save_balance(db, account, "25.5")
         db.commit()
 
         summary = h3_execution_account_summary(db, user)
@@ -226,6 +246,7 @@ def test_active_normal_user_can_use_only_assigned_h3_accounts() -> None:
                     is_enabled=True,
                 )
             )
+        _save_balance(db, allowed, "8")
         db.commit()
 
         summary = h3_execution_account_summary(db, user)
@@ -234,3 +255,67 @@ def test_active_normal_user_can_use_only_assigned_h3_accounts() -> None:
             "分配给普通用户"
         ]
         assert summary["default_selected_account_ids"] == [allowed.id]
+
+
+def test_zero_balance_h3_account_is_visible_but_not_selectable() -> None:
+    with SessionLocal() as db:
+        user = _user("h3-zero-balance-user")
+        account = _account("h3-zero-balance-key", "没有余额的 H3 账号")
+        db.add_all([user, account])
+        db.flush()
+        db.add(RunningHubPoolMembership(execution_account=account, admin_user=user))
+        db.add(
+            configure_h3_capability(
+                account,
+                workflow_id="zero-balance-workflow",
+                instance_type="plus",
+                max_concurrent_tasks=2,
+                is_enabled=True,
+            )
+        )
+        _save_balance(db, account, "0")
+        db.commit()
+
+        summary = h3_execution_account_summary(db, user)
+
+        assert summary["default_selected_account_ids"] == []
+        payload = summary["accounts"][0]
+        assert payload["selectable"] is False
+        assert payload["availability"] == "NO_BALANCE"
+        assert payload["balance"]["remain_coins"] == "0"
+        assert "api_key" not in repr(payload)
+
+
+def test_h3_account_balance_refresh_reads_each_enabled_assigned_account(
+    monkeypatch,
+) -> None:
+    refreshed: list[int] = []
+
+    def _refresh(db, account):
+        refreshed.append(account.id)
+        _save_balance(db, account, "36.75")
+
+    monkeypatch.setattr("app.services.h3_pool.refresh_pool_account_balance", _refresh)
+    with SessionLocal() as db:
+        user = _user("h3-live-balance-user")
+        account = _account("h3-live-balance-key", "实时余额账号")
+        db.add_all([user, account])
+        db.flush()
+        db.add(RunningHubPoolMembership(execution_account=account, admin_user=user))
+        db.add(
+            configure_h3_capability(
+                account,
+                workflow_id="live-balance-workflow",
+                instance_type="plus",
+                max_concurrent_tasks=2,
+                is_enabled=True,
+            )
+        )
+        db.commit()
+
+        refresh_h3_execution_account_balances(db, user)
+        summary = h3_execution_account_summary(db, user)
+
+        assert refreshed == [account.id]
+        assert summary["accounts"][0]["balance"]["remain_coins"] == "36.75"
+        assert summary["default_selected_account_ids"] == [account.id]

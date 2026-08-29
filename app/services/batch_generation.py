@@ -34,6 +34,10 @@ from app.services.batch_manifests import (
     canonical_filename,
 )
 from app.services.long_audio import MAX_LONG_AUDIO_SECONDS
+from app.services.runninghub_pool import (
+    RunningHubPoolSelectionUnavailableError,
+    assigned_execution_account_ids,
+)
 from app.services.media_segmentation import (
     DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
     DIGITAL_HUMAN_MAX_SEGMENT_SECONDS,
@@ -904,11 +908,29 @@ def create_batch(
     if not clean_correlation_id:
         clean_correlation_id = uuid.uuid4().hex
 
+    runninghub_execution_account_ids_json = None
+    if (
+        plan.source_channel == BATCH_SOURCE_LEGACY_WEB
+        and plan.workflow_type == DIGITAL_HUMAN_WORKFLOW
+    ):
+        try:
+            assigned_ids = assigned_execution_account_ids(db, user)
+        except RunningHubPoolSelectionUnavailableError as exc:
+            raise BatchValidationError(
+                [{"rowNumber": 0, "rowId": "", "message": str(exc)}]
+            ) from exc
+        runninghub_execution_account_ids_json = json.dumps(
+            assigned_ids, ensure_ascii=False, separators=(",", ":")
+        )
+
     batch = GenerationBatch(
         id=str(uuid.uuid4()),
         user_id=user.id,
         name=clean_name,
         workflow_type=plan.workflow_type,
+        runninghub_execution_account_ids_json=(
+            runninghub_execution_account_ids_json
+        ),
         source_channel=plan.source_channel,
         correlation_id=clean_correlation_id,
         audio_mode=plan.audio_mode,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 
 from sqlalchemy import select
@@ -19,12 +20,54 @@ from app.services.runninghub_pool import (
     credential_active_task_count,
     execution_account_configuration_ready,
 )
+from app.services.runninghub_balance import (
+    balance_summary,
+    refresh_pool_account_balance,
+)
 from app.services.workflow_configs import get_system_workflow_config
 from app.services.security import encrypt_secret
 
 
 class H3PoolValidationError(ValueError):
     pass
+
+
+def _verified_positive_balance(balance: dict[str, object]) -> bool:
+    if balance.get("status") != "AVAILABLE":
+        return False
+    raw_coins = balance.get("remain_coins")
+    if raw_coins is None or isinstance(raw_coins, bool):
+        return False
+    try:
+        return Decimal(str(raw_coins)) > 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _assigned_h3_accounts(
+    db: Session,
+    user: User,
+) -> list[RunningHubExecutionAccount]:
+    return list(
+        db.scalars(
+            select(RunningHubExecutionAccount)
+            .join(RunningHubPoolMembership)
+            .where(RunningHubPoolMembership.admin_user_id == user.id)
+            .order_by(RunningHubExecutionAccount.id)
+        ).all()
+    )
+
+
+def refresh_h3_execution_account_balances(db: Session, user: User) -> None:
+    """Force a safe accountStatus refresh before presenting H3 account choices."""
+
+    if not user_has_h3_pool_entitlement(db, user):
+        raise H3PoolValidationError("当前账号尚未开通 H3 多账号执行池")
+    for account in _assigned_h3_accounts(db, user):
+        if not account.is_enabled or not execution_account_configuration_ready(account):
+            continue
+        refresh_pool_account_balance(db, account)
+        db.commit()
 
 
 def user_has_h3_pool_entitlement(db: Session, user: User) -> bool:
@@ -157,14 +200,7 @@ def h3_capability_snapshots_for_user(
     config = get_system_workflow_config(db, "minimax_h3_ref2va")
     if not config.is_enabled or not config.ai_app_id:
         return []
-    accounts = list(
-        db.scalars(
-            select(RunningHubExecutionAccount)
-            .join(RunningHubPoolMembership)
-            .where(RunningHubPoolMembership.admin_user_id == user.id)
-            .order_by(RunningHubExecutionAccount.id)
-        ).all()
-    )
+    accounts = _assigned_h3_accounts(db, user)
     return [
         H3ExecutionCapabilitySnapshot(
             execution_account_id=account.id,
@@ -198,6 +234,8 @@ def h3_execution_account_summary(db: Session, user: User) -> dict[str, object]:
     summaries: list[dict[str, object]] = []
     defaults: list[int] = []
     for account in accounts:
+        balance = balance_summary(db, account.credential_fingerprint)
+        balance_verified = _verified_positive_balance(balance)
         configured = bool(
             execution_account_configuration_ready(account)
             and config.is_enabled
@@ -211,13 +249,17 @@ def h3_execution_account_summary(db: Session, user: User) -> dict[str, object]:
             availability = "DISABLED"
         elif not configured:
             availability = "INCOMPLETE"
+        elif balance.get("status") == "AVAILABLE" and not balance_verified:
+            availability = "NO_BALANCE"
+        elif not balance_verified:
+            availability = "BALANCE_UNAVAILABLE"
         elif cooldown_active:
             availability = "COOLDOWN"
         elif health_status in UNHEALTHY_ACCOUNT_STATUSES:
             availability = "UNHEALTHY"
         else:
             availability = "AVAILABLE"
-        selectable = configured
+        selectable = bool(configured and balance_verified)
         if selectable:
             defaults.append(account.id)
         active = credential_active_task_count(db, account.credential_fingerprint)
@@ -236,6 +278,7 @@ def h3_execution_account_summary(db: Session, user: User) -> dict[str, object]:
                 "availability": availability,
                 "safe_note": "",
                 "has_access_password": bool(config.settings.get("access_password_encrypted")),
+                "balance": balance,
             }
         )
     return {
@@ -279,4 +322,19 @@ def validate_h3_account_selection(
         raise H3PoolValidationError("所选 H3 执行账号不存在或不属于当前用户")
     if any(not execution_account_configuration_ready(account) for account in accounts):
         raise H3PoolValidationError("所选账号存在已停用或未配置的 RunningHub 账号")
+    balance_blocked_labels: list[str] = []
+    for account in accounts:
+        balance = balance_summary(db, account.credential_fingerprint)
+        # Historical/internal callers without a balance row remain compatible;
+        # the public account-list endpoint always refreshes first, and the
+        # Worker performs another authoritative check immediately before submit.
+        if balance.get("status") == "UNKNOWN" and balance.get("checked_at") is None:
+            continue
+        if not _verified_positive_balance(balance):
+            balance_blocked_labels.append(account.label)
+    if balance_blocked_labels:
+        labels = "、".join(balance_blocked_labels)
+        raise H3PoolValidationError(
+            f"所选 H3 执行账号余额为 0 或本次余额读取失败，不能用于生成：{labels}"
+        )
     return selected

@@ -563,6 +563,29 @@ def workbench_execution_account_summary(
     }
 
 
+def assigned_execution_account_ids(db: Session, user: User) -> list[int]:
+    """Return the configured account pool currently assigned to one user."""
+
+    accounts = list(
+        db.scalars(
+            select(RunningHubExecutionAccount)
+            .join(RunningHubPoolMembership)
+            .where(RunningHubPoolMembership.admin_user_id == user.id)
+            .order_by(RunningHubExecutionAccount.id)
+        ).all()
+    )
+    selected_ids = [
+        account.id
+        for account in accounts
+        if account.is_enabled and execution_account_configuration_ready(account)
+    ]
+    if not selected_ids:
+        raise RunningHubPoolSelectionUnavailableError(
+            "当前用户没有可用的 RunningHub 执行账号，请先在用户管理页分配账号"
+        )
+    return selected_ids
+
+
 def validate_workbench_execution_account_selection(
     db: Session,
     user: User,
@@ -667,6 +690,17 @@ def item_execution_account_snapshot(
             item.runninghub_execution_account_ids_json
         )
     return batch_execution_account_snapshot(item.batch)
+
+
+def task_execution_account_snapshot(task: GenerationTask) -> list[int] | None:
+    """Return a task-local pool, falling back to its row/batch operation scope."""
+
+    if task.runninghub_execution_account_ids_json:
+        return _decode_batch_execution_account_snapshot(
+            task.runninghub_execution_account_ids_json
+        )
+    item = task.batch_item or (task.segment.batch_item if task.segment else None)
+    return item_execution_account_snapshot(item) if item is not None else None
 
 
 def bind_item_execution_account_snapshot(

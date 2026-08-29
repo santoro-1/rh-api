@@ -39,6 +39,7 @@ from app.services.runninghub import (
     runninghub_upload_diagnostics,
 )
 from app.services.runninghub_balance import (
+    BALANCE_RETRY_SECONDS,
     persist_client_account_status,
     save_balance_error,
 )
@@ -80,9 +81,11 @@ from app.services.h3.postprocess import (
     H3_OUTPUT_CONTRACT_VERSION,
     H3PostprocessError,
     fallback_h3_head_trim,
+    extract_last_visible_frame_from_url,
     parse_h3_head_trim_decision,
     postprocess_h3_result,
 )
+from app.services.h3.delivery import build_h3_direct_output_metadata
 from app.services.h3.remote_asr import H3_ASR_ACTION_HEAD_TRIM
 from app.services.h3_workbench import (
     activate_next_h3_soft_chain_segment,
@@ -101,6 +104,7 @@ from app.services.storage import (
     create_enhanced_download_target,
     create_source_download_target,
     safe_relative_path,
+    task_output_dir,
     to_relative_data_path,
 )
 from app.services.workflow_configs import get_user_workflow_config
@@ -113,7 +117,7 @@ from app.services.video_enhancement import (
     task_uses_seedvr2_pipeline,
 )
 from app.workflows import get_workflow
-from app.workflows.base import WorkflowAdapter, resolve_asset_path
+from app.workflows.base import WorkflowAdapter, WorkflowOutput, resolve_asset_path
 from app.workflows.digital_human import generation_tail_padding_seconds
 from app.workflows.seedvr2_upscale import (
     SEEDVR2_AI_APP_ID,
@@ -747,6 +751,70 @@ def _load_task(db: Session, task_id: str) -> GenerationTask | None:
     )
 
 
+def _complete_h3_direct_result(
+    db: Session,
+    task: GenerationTask,
+    output: WorkflowOutput,
+) -> None:
+    """Persist a provider reference and only materialize a soft-chain PNG anchor."""
+
+    segment = task.segment
+    if segment is None or segment.h3_config is None:
+        raise H3PostprocessError("H3 分段审计快照缺失")
+    item = segment.batch_item
+    needs_anchor = bool(
+        segment.h3_config.continuity_mode == "soft_chain"
+        and segment.segment_index < item.h3_config.segment_count - 1
+    )
+    completed_at = _now()
+    metadata = build_h3_direct_output_metadata(
+        provider_task_id=task.runninghub_task_id,
+        provider_url=output.url,
+        output_type=output.extension,
+        source_metadata=output.metadata,
+        received_at=completed_at,
+    )
+    if needs_anchor:
+        anchor = (
+            task_output_dir(get_settings(), task.user_id, task.id)
+            / "continuity.last-visible.png"
+        )
+        extract_last_visible_frame_from_url(output.url, anchor)
+        anchor_sha256 = _file_sha256(anchor)
+        activate_next_h3_soft_chain_segment(
+            db,
+            task,
+            anchor_path=to_relative_data_path(anchor, get_settings()),
+            anchor_sha256=anchor_sha256,
+        )
+
+    segment.h3_config.normalized_video_path = None
+    segment.h3_config.normalized_video_sha256 = None
+    segment.h3_config.invalidated_at = None
+    segment.video_path = None
+    task.result_path = None
+    task.output_metadata = json.dumps(metadata, ensure_ascii=False)
+    task.status = TaskStatus.SUCCESS.value
+    task.error_code = None
+    task.error_message = None
+    task.runninghub_failed_reason = None
+    task.runninghub_auto_retry_after = None
+    task.completed_at = completed_at
+    segment.status = TaskStatus.SUCCESS.value
+    finish_task_attempt(task, status="SUCCESS")
+    sync_h3_task_hierarchy(task)
+    db.commit()
+    log_event(
+        logger,
+        "video.h3_direct_ready",
+        "H3 结果地址已保存，等待工作台直连下载",
+        runninghub_task_id=task.runninghub_task_id,
+        delivery_mode="runninghub_direct",
+        continuity_anchor_created=needs_anchor,
+        **_video_log_context(task),
+    )
+
+
 def _handle_remote_status(
     db: Session,
     task: GenerationTask,
@@ -934,6 +1002,29 @@ def _handle_remote_status(
         db.commit()
         return
     settings = get_settings()
+    if (
+        task.workflow_type == "minimax_h3_ref2va"
+        and settings.h3_direct_delivery_enabled
+        and not H3_HEAD_TRIM_ENABLED
+    ):
+        try:
+            _complete_h3_direct_result(db, task, output)
+        except (H3PostprocessError, OSError, ValueError) as exc:
+            task.status = TaskStatus.DOWNLOAD_FAILED.value
+            task.error_code = "H3_DIRECT_DELIVERY_FAILED"
+            task.error_message = str(exc)
+            task.completed_at = _now()
+            if task.segment is not None:
+                task.segment.status = TaskStatus.DOWNLOAD_FAILED.value
+            sync_h3_task_hierarchy(task)
+            finish_task_attempt(
+                task,
+                status="POSTPROCESS_FAILED",
+                error_code=task.error_code,
+                error_message=task.error_message,
+            )
+            db.commit()
+        return
     destination = (
         create_source_download_target(
             settings, task.user_id, task.id, output.extension
@@ -1931,6 +2022,28 @@ def _remote_capacity_is_available(
         )
         return False
     persist_client_account_status(db, client, config.credential_fingerprint)
+    account_status = getattr(client, "last_account_status", None)
+    remain_coins = getattr(account_status, "remain_coins", None)
+    if pool_account is not None and remain_coins is not None and remain_coins <= 0:
+        cool_execution_account(
+            pool_account,
+            error_code="RUNNINGHUB_BALANCE_EMPTY",
+            cooldown_seconds=BALANCE_RETRY_SECONDS,
+            unhealthy=False,
+        )
+        _return_to_capacity_queue(
+            db,
+            task,
+            reason=(
+                "RunningHub 账号本次读取余额为 0，未上传素材或创建远程任务；"
+                "任务将改用本次快照内其他有余额账号"
+            ),
+            event_code="video.balance_empty",
+            level=logging.WARNING,
+            diagnostics={"remain_coins": str(remain_coins)},
+            release_pool_account=True,
+        )
+        return False
     if pool_account is not None:
         _remote_account_task_counts[pool_account.id] = current_tasks
         mark_execution_account_healthy(pool_account)
