@@ -44,6 +44,14 @@ from app.services.runninghub_balance import (
     save_balance_error,
 )
 from app.services.runninghub_uploads import prepare_runninghub_retry_upload
+from app.services.h3.upload_recovery import (
+    H3UploadRecoveryError,
+    bind_upload_receipt,
+    ensure_recovered_uploads,
+    failure_upload_receipt,
+    record_upload,
+    start_upload_receipt,
+)
 from app.services.deployment_drain import is_deployment_draining
 from app.services.runninghub_dispatch import (
     DispatchReservation,
@@ -356,6 +364,10 @@ def _record_runninghub_failure(
             "failedAt": _now().isoformat(),
         }
     )
+    if task.workflow_type == "minimax_h3_ref2va":
+        receipt = failure_upload_receipt(task)
+        if receipt is not None:
+            history[-1]["uploadReceipt"] = receipt
     # Keep enough evidence for repeated manual retry cycles without allowing
     # one pathological task to grow its database row forever.
     history = history[-50:]
@@ -2249,6 +2261,8 @@ def process_task(db: Session, task_id: str) -> None:
         settings = get_settings()
         attempt = ensure_reserved_task_attempt(task)
         attempt.status = "UPLOADING"
+        if task.workflow_type == "minimax_h3_ref2va":
+            start_upload_receipt(task, attempt.id)
         db.commit()
         log_event(
             logger,
@@ -2280,7 +2294,7 @@ def process_task(db: Session, task_id: str) -> None:
                     log_event(
                         logger,
                         "video.remote_asset_refreshed",
-                        "RunningHub 远端视频素材丢失，已生成无损重封装副本后重传",
+                        "RunningHub 远端素材丢失，已准备保持内容不变的临时上传副本",
                         asset_slot=asset.name,
                         **_video_log_context(task),
                     )
@@ -2295,6 +2309,19 @@ def process_task(db: Session, task_id: str) -> None:
                         )
                 try:
                     uploaded_files[asset.name] = client.upload_file(upload_path)
+                    if task.workflow_type == "minimax_h3_ref2va":
+                        receipt = record_upload(
+                            task, asset, asset_path, upload_path, uploaded_files[asset.name]
+                        )
+                        db.commit()
+                        log_event(
+                            logger,
+                            "video.asset_uploaded",
+                            "H3 素材上传完成，已保存文件指纹与远端文件名",
+                            asset_slot=asset.name,
+                            **receipt,
+                            **_video_log_context(task),
+                        )
                 except RunningHubError as exc:
                     exc.diagnostics.setdefault("asset_slot", asset.name)
                     exc.diagnostics.setdefault(
@@ -2307,6 +2334,8 @@ def process_task(db: Session, task_id: str) -> None:
                         ).items():
                             exc.diagnostics.setdefault(key, value)
                     raise
+        if task.workflow_type == "minimax_h3_ref2va":
+            ensure_recovered_uploads(task)
         payload = workflow.build_payload(
             task,
             uploaded_files,
@@ -2327,6 +2356,8 @@ def process_task(db: Session, task_id: str) -> None:
         remote_task_id = client.submit_task(payload)
         # Persist as soon as submission returns. Every later run only queries this ID.
         task.runninghub_task_id = remote_task_id
+        if task.workflow_type == "minimax_h3_ref2va":
+            bind_upload_receipt(task, remote_task_id)
         task.runninghub_submitted_at = _now()
         task.status = TaskStatus.SUBMITTED.value
         task.error_code = None
@@ -2467,6 +2498,15 @@ def process_task(db: Session, task_id: str) -> None:
             str(exc),
             diagnostics=exc.log_details(),
         )
+        db.commit()
+    except H3UploadRecoveryError as exc:
+        finish_task_attempt(
+            task,
+            status="PRE_SUBMISSION_FAILED",
+            error_code="H3_INPUT_RECOVERY_FAILED",
+            error_message=str(exc),
+        )
+        _mark_failed(task, "H3_INPUT_RECOVERY_FAILED", str(exc))
         db.commit()
     except (OSError, ValueError) as exc:
         finish_task_attempt(

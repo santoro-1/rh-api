@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 
+from sqlalchemy import update
 from sqlalchemy.orm import object_session
 
 from app.config import Settings
@@ -87,6 +88,25 @@ def prepare_task_retry(
             "RunningHub 提交结果无法确认，禁止盲目重提；请管理员先在 RunningHub 核对远程任务"
         )
     retry_time = now or datetime.now(timezone.utc)
+    if task.workflow_type == "minimax_h3_ref2va":
+        db = object_session(task)
+        if db is not None:
+            # Compare the state actually reviewed by this caller, not merely
+            # its stale ORM object. Keep the write lock through reset+commit so
+            # a second click cannot overwrite a task already claimed by Worker.
+            changed = db.execute(
+                update(GenerationTask)
+                .where(
+                    GenerationTask.id == task.id,
+                    GenerationTask.status == task.status,
+                    GenerationTask.updated_at == task.updated_at,
+                )
+                .values(updated_at=retry_time)
+                .execution_options(synchronize_session=False)
+            )
+            if changed.rowcount != 1:
+                raise TaskManagementError("H3 任务状态已变化，请刷新后查看；本次未重复创建重试")
+            task.updated_at = retry_time
     enhancement = task.enhancement
     if enhancement is not None:
         if enhancement_has_uncertain_submission(enhancement):

@@ -156,9 +156,18 @@ MiniMax 异步结果的远程任务 ID 会持久化，Worker 重启后继续查�
 - 音频批次使用工作台专用的无图片校验计划和既有 `create_batch`、
   `AudioGenerationTask`；只接收脚本、音色和语音参数，并强制 `reviewRequired=True`。
   生成完成后停在 `AWAITING_REVIEW`，不得自动创建视频任务。
-- 工作台可下载完整 MP3 和 MiniMax 原始字幕 cues；重新生成必须再次确认费用，只重置
-  指定行并保留历史 attempt。重试请求可携带 `speed`（`0.5–2.0`），路由在重置任务前
-  更新 `AudioGenerationTask.speed`，确保下一版实际使用工作台当前语速，而非旧版本参数。
+- `validate_workbench_audio_batch()` 不调用视频创建校验，不要求旧 RunningHub Key、执行账号
+  分配或数字人工作流就绪。`get_user_workflow_config()` 在此只读取兼容的视频默认参数，不以
+  启用状态或 App ID 阻止 TTS。MiniMax 配置、音色归属/激活、费用确认与语音参数继续严格校验；
+  视频链路的账号/工作流校验不放宽，旧网页完整流程的批次预检也不改变。
+- 工作台可下载完整 MP3 和 MiniMax 原始字幕 cues；重新生成必须再次确认费用。新版 JYD
+  统一创建独立幂等声音批次（含仅调速），不修改已绑定 H3 的旧任务。旧 retry 路由仅供兼容。
+- `POST /api/workbench/audio-batches/lookup` 仅按短期令牌用户、原请求键、`new_workbench` 来源
+  和 `minimax` 模式查询。schema 为 `runninghub.workbench-audio-lookup.v1`，返回 `found`；
+  找到时附带标准 batch、原 request_key 与 input_bindings（脚本 SHA-256、音色 ID、六项语音参数）。
+  不创建批次/attempt、不调用供应商、不返回凭据。找不到不能视为未计费，原请求可能尚未提交事务。
+  恢复时 JYD 校验 correlation_id、行 ID/row_key 和输入摘要后，原子登记回执并切换绑定。
+  无数据库迁移，先部署该服务器接口再更新工作台；旧服务器404时只保留待核对状态。
 - 工作台专用路由只负责编排与序列化，账号、声音资产、批次和批次行都按令牌用户过滤。
 - `GenerationBatch.source_channel` 是新旧入口的唯一判据。旧网页及迁移前历史数据固定为
   `legacy_web`，工作台声音批次固定为 `new_workbench`；禁止根据批次名或 `request_key`
@@ -276,6 +285,20 @@ LTX 的远程任务若明确在执行容器中报
 以改变 RunningHub 内容哈希、绕开“上传记录存在但对象缺失”的坏缓存；持久化源视频、编码、
 帧率和时长不变。每次再次出现同类失败都会使用新的重试序号产生不同哈希。OOM、普通模型失败、
 非 LTX 工作流及非 MP4 素材不进入此分支；FFmpeg 无法安全重封装时停止提交并保留原文件。
+
+H3 的 PNG 恢复由 `app/services/h3/upload_recovery.py` 独立处理：仅在最近一次明确远端
+`FAILED / LoadImage / FileNotFoundError` 且缺失路径为 `input/openapi/*.png` 时生效。
+先用同一远程尝试的上传回执定位素材槽位和源文件 SHA-256；历史任务仅允许文件名与源文件
+内容哈希精确匹配。人工重试时流式复制原 PNG 的全部数据块并校验 CRC，只增加不可见的
+`tEXt` 标记，不重新编码、不改变像素/颜色/透明度，也不改 Prompt、参考顺序或冻结输入。
+同一逻辑重试的标记稳定；再次远端失败后人工重试会生成新标记。无法定位、PNG 损坏或平台
+仍返回已知失效文件名时，以 `H3_INPUT_RECOVERY_FAILED` 在付费提交前停止，不自动重提。
+
+每轮 H3 上传在 `input_payload._h3_upload_receipt` 保存账号/尝试、槽位、源文件与上传文件
+哈希/大小、原文件名、远端相对文件名和时间；收到远程 ID 后绑定回执，远端失败时复制到
+`runninghub_attempt_history[].uploadReceipt`，人工重试清除当前错误时保留历史。日志不记录
+API Key、完整脚本、源文件绝对路径或带凭据 URL。H3 重试入口以状态和 `updated_at` 做数据库
+条件更新，防止重复请求覆盖已入队/已提交任务；下载重试和提交结果不明的保护继续保留。
 
 新版工作台在 RunningHub 手动取消数字人阶段后，若用户又更换当前图片或分辨率，下一次
 4A 启动必须清除该行旧视频阶段、保留已审核 MiniMax 音频，并按本次图片 SHA-256 与分辨率

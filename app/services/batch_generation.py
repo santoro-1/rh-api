@@ -304,7 +304,9 @@ def validate_workbench_audio_batch(
 
     The selected project picture belongs to Module 4A.  It is deliberately
     absent here and will be validated against the digital-human adapter when
-    the approved audio is handed off to video generation.
+    the approved audio is handed off to video generation. RunningHub credentials,
+    pool assignments and workflow readiness belong to that video stage as well;
+    here workflow settings supply only backward-compatible video defaults.
     """
 
     if not rows:
@@ -322,7 +324,6 @@ def validate_workbench_audio_batch(
             ]
         )
     try:
-        ensure_user_can_create_workflow(user, DIGITAL_HUMAN_WORKFLOW)
         resolved_speech = _validate_speech_options(db, user, speech_options)
         workflow_config = get_user_workflow_config(user, DIGITAL_HUMAN_WORKFLOW)
     except (TaskCreationError, ValueError) as exc:

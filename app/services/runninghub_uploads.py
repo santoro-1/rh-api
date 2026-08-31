@@ -51,13 +51,18 @@ def prepare_runninghub_retry_upload(
     source: Path,
     work_dir: Path,
 ) -> Path:
-    """Create a byte-distinct, stream-copy MP4 after a remote object-loss failure.
+    """Prepare a content-preserving upload copy after remote object loss.
 
-    RunningHub names uploaded objects by content. Re-uploading identical bytes can
-    therefore keep returning the same broken object key. A metadata-only remux
-    preserves encoded streams, frame rate and duration while forcing a new key.
-    The persisted source is never modified.
+    Re-uploading identical bytes can return the same broken content-addressed key.
+    H3 PNG recovery uses a validated ancillary chunk; LTX MP4 recovery uses a
+    stream-copy remux. Both change only a temporary upload copy's metadata.
+    The persisted source and its encoded image/video streams are never modified.
     """
+
+    if task.workflow_type == "minimax_h3_ref2va":
+        from app.services.h3.upload_recovery import prepare_png_retry
+
+        return prepare_png_retry(task, asset, source, work_dir)
 
     if (
         task.workflow_type != "ltx_lip_sync"

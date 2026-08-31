@@ -27,7 +27,7 @@ from app.services.video_merge import (
     merge_segment_videos,
     process_pending_video_merges,
 )
-from tests.conftest import create_user, login
+from tests.conftest import assign_runninghub_account, create_user, login
 
 
 def _segmented_batch(
@@ -273,6 +273,7 @@ def test_legacy_batch_detail_can_retry_any_successful_segment_after_merge(
     client, monkeypatch
 ):
     batch_id, item_id = _segmented_batch(review_required=False)
+    assign_runninghub_account("merge-auto-user")
     monkeypatch.setattr(
         "app.services.video_merge.merge_segment_videos",
         _fake_legacy_merge,

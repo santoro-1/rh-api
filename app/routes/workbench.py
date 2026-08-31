@@ -1187,6 +1187,48 @@ def create_workbench_audio_batch(
     return JSONResponse(_audio_batch_payload(batch), status_code=201)
 
 
+@router.post("/api/workbench/audio-batches/lookup")
+def lookup_workbench_audio_batch(
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Read a lost submission receipt; this route never creates paid work."""
+    user = _token_user(str(payload.get("access_token", "")), db)
+    request_key = payload.get("request_key")
+    if not isinstance(request_key, str) or not 1 <= len(request_key.strip()) <= 64:
+        raise HTTPException(status_code=422, detail="工作台请求标识不合法")
+    batch = db.scalar(select(GenerationBatch).where(
+        GenerationBatch.user_id == user.id,
+        GenerationBatch.request_key == request_key.strip(),
+        GenerationBatch.source_channel == BATCH_SOURCE_NEW_WORKBENCH,
+        GenerationBatch.audio_mode == "minimax",
+    ))
+    result = {"schema": "runninghub.workbench-audio-lookup.v1", "found": batch is not None}
+    if batch is None:
+        # Absence is only an observation, not proof that an in-flight request
+        # cannot commit later. Clients must not use this to authorize a new key.
+        return result
+    batch = _batch_for_user(batch.id, user, db)
+    result["batch"] = _audio_batch_payload(batch)
+    result["request_key"] = batch.request_key
+    result["input_bindings"] = {
+        item.id: {
+            "script_sha256": hashlib.sha256(item.audio_task.speech_script.encode("utf-8")).hexdigest(),
+            "voice_asset_id": item.audio_task.voice_asset_id,
+            "speech_settings": {
+                "model": item.audio_task.model,
+                "speed": item.audio_task.speed,
+                "volume": item.audio_task.volume,
+                "pitch": item.audio_task.pitch,
+                "languageBoost": item.audio_task.language_boost,
+                "outputFormat": item.audio_task.output_format,
+            },
+        }
+        for item in batch.items if item.audio_task is not None
+    }
+    return result
+
+
 @router.post("/api/workbench/audio-batches/{batch_id}")
 def workbench_audio_batch(
     batch_id: str,

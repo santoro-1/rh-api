@@ -31,7 +31,7 @@ from app.services.postproduction import (
 from app.services.batch_status import batch_detail_status, batch_query
 from app.services.security import encrypt_secret
 from app.services.speech.accounts import credential_fingerprint
-from tests.conftest import create_user, login
+from tests.conftest import assign_runninghub_account, create_user, login
 
 
 def _text_item(*, segment_count: int) -> tuple[str, str]:
@@ -423,6 +423,7 @@ def test_workbench_composition_exposes_safe_dual_pool_assignments(client):
 
 def test_workbench_composition_reports_remote_cancel_as_retryable_failure(client):
     _batch_id, item_id = _text_item(segment_count=3)
+    assign_runninghub_account("postproduction-text-3")
     settings = get_settings()
     (settings.data_dir / "image.png").write_bytes(b"image")
     (settings.data_dir / "audio.mp3").write_bytes(b"audio")

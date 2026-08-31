@@ -16,6 +16,9 @@ TEST_DATA_DIR = TEST_RUNTIME_ROOT / "data"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE.as_posix()}"
 os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
 os.environ["APP_ENV"] = "test"
+# Developer .env switches must not silently change the default test contract.
+# Dedicated direct-delivery tests explicitly enable the feature themselves.
+os.environ["H3_DIRECT_DELIVERY_ENABLED"] = "false"
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine

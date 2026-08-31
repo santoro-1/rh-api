@@ -19,7 +19,7 @@ from app.models import (
     User,
 )
 from app.services.workflow_configs import save_workflow_config
-from tests.conftest import create_user, login
+from tests.conftest import assign_runninghub_account, create_user, login
 
 
 TOKEN = "remote-worker-test-token-0123456789abcdef"
@@ -395,6 +395,7 @@ def test_remote_worker_claims_and_completes_h3_head_trim(client, monkeypatch):
 def test_remote_digital_human_uses_audio_only_cut_archive(client, monkeypatch):
     _remote_settings(monkeypatch)
     create_user("remote-digital-user")
+    assign_runninghub_account("remote-digital-user")
     login(client, "remote-digital-user")
     monkeypatch.setattr(
         "app.services.long_audio.inspect_audio_duration",
