@@ -9,6 +9,10 @@ WorkingDirectory=/opt/runninghub-video
 Environment=RUNNINGHUB_APP_DIR=/opt/runninghub-video
 Environment=RUNNINGHUB_BACKUP_DIR=/var/backups/runninghub-video
 Environment=RUNNINGHUB_BACKUP_KEEP_COUNT=1
+StateDirectory=runninghub-video-backup
+StateDirectoryMode=0700
+ExecCondition=/bin/bash -c 'test ! -e /var/lib/runninghub-video-backup/last-scheduled-run || test "$$(date +%%s)" -ge "$$(date -d "$$(date -r /var/lib/runninghub-video-backup/last-scheduled-run +%%F) +3 days" +%%s)"'
+ExecStartPre=/usr/bin/touch /var/lib/runninghub-video-backup/last-scheduled-run
 ExecStart=/bin/bash /opt/runninghub-video/deploy/scripts/backup.sh
 UMask=0077
 NoNewPrivileges=true

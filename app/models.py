@@ -21,6 +21,19 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
+# Import licensing metadata for both Alembic and isolated create_all tests.
+from app.services.device_auth.models import (  # noqa: F401
+    WorkbenchDevice,
+    WorkbenchDeviceAuditEvent,
+    WorkbenchDeviceChallenge,
+    WorkbenchDeviceControl,
+    WorkbenchDeviceGrant,
+    WorkbenchDevicePolicy,
+    WorkbenchDeviceProofReplay,
+    WorkbenchDeviceOperation,
+    WorkbenchDeviceWorkBinding,
+)
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -2067,6 +2080,9 @@ class VoiceCreationTask(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_channel: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=BATCH_SOURCE_LEGACY_WEB, index=True
     )
     config_id: Mapped[int] = mapped_column(
         ForeignKey("minimax_configs.id", ondelete="RESTRICT"),

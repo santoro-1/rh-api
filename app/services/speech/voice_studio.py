@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import (
+    BATCH_SOURCE_LEGACY_WEB,
     MiniMaxVoiceAsset,
     User,
     VoiceCreationStatus,
@@ -49,6 +50,8 @@ def create_voice_task(
     noise_reduction: bool,
     volume_normalization: bool,
     cost_confirmed: bool,
+    source_channel: str = BATCH_SOURCE_LEGACY_WEB,
+    task_id: str | None = None,
 ) -> VoiceCreationTask:
     """Validate uploads and persist one clone or blend audition request."""
 
@@ -93,7 +96,7 @@ def create_voice_task(
         if weight_a is None or not 1 <= weight_a <= 99:
             raise ValueError("音色 A 权重必须是 1–99 的整数")
 
-    task_id = str(uuid.uuid4())
+    task_id = task_id or str(uuid.uuid4())
     directory = voice_creation_dir(settings, user.id, task_id)
     try:
         path_a, original_a = save_upload(
@@ -112,6 +115,7 @@ def create_voice_task(
         task = VoiceCreationTask(
             id=task_id,
             user_id=user.id,
+            source_channel=source_channel,
             config_id=config.id,
             account_binding_id=config.account_binding_id,
             credential_fingerprint=config.credential_fingerprint,

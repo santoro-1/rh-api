@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}工作台设备授权{% endblock %}
+{% block content %}
+<h1>工作台设备授权</h1>
+<p>首次批准设备后，普通更新和移动程序目录不需要重复激活。当前模式：{{ mode }}。</p>
+<p>保护类型由客户端报告，尚未进行硬件来源证明。软件保护较弱，只有明确允许后才能批准。</p>
+<section class="card">
+  <h2>账号设备额度</h2>
+  {% for user in users %}{% set policy = policies.get(user.id) %}
+  <form method="post" action="/admin/workbench-devices/policies/{{ user.id }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <strong>{{ user.username }}</strong>
+    <label>最多设备数 <input name="max_devices" type="number" min="0" max="1000" value="{{ policy.max_devices if policy else 1 }}" required></label>
+    <label><input type="checkbox" name="allow_software" value="true" {% if policy and policy.allow_software %}checked{% endif %}>明确允许较弱的软件保护</label>
+    <button type="submit">保存额度与保护设置</button>
+  </form>
+  {% endfor %}
+  <p>暂停仍占额度，撤销释放额度。管理员账号也遵循额度限制。</p>
+</section>
+<h2>设备申请与授权</h2>
+{% for grant, device, user in records %}
+<section class="card">
+  <h3>{{ user.username }} · {{ grant.label or '未填写备注' }}</h3>
+  <p>账号设备授权：{{ grant.status }} · 设备全局状态：{{ device.status }} · 版本：{{ grant.client_version or '未提供' }}</p>
+  <p>设备 {{ device.id }} · 保护：{{ device.protection_report }}（未完成硬件来源证明）</p>
+  <details><summary>公钥摘要与登记信息</summary><p>{{ device.thumbprint }}</p><p>授权编号 {{ grant.id }} · 修订 {{ grant.revision }}</p></details>
+  <p>申请：{{ as_datetime(grant.created_at)|beijing_datetime }} · 最近联系：{{ as_datetime(device.last_seen_at)|beijing_datetime }}</p>
+  {% for action, title, allowed in [('approve','批准', ['PENDING','REJECTED','REVOKED']), ('reject','拒绝',['PENDING']), ('suspend','暂停',['ACTIVE']), ('resume','恢复',['SUSPENDED']), ('revoke','撤销',['PENDING','ACTIVE','REJECTED','SUSPENDED'])] %}
+  {% if grant.status in allowed %}
+  <form method="post" action="/admin/workbench-devices/{{ grant.id }}/{{ action }}" style="display:inline-block">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="revision" value="{{ grant.revision }}">
+    <button type="submit">{{ title }}</button>
+  </form>
+  {% endif %}{% endfor %}
+  <form method="post" action="/admin/workbench-devices/{{ grant.id }}/rename">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="revision" value="{{ grant.revision }}">
+    <label>设备备注 <input name="label" value="{{ grant.label }}" maxlength="80"></label><button type="submit">修改备注</button>
+  </form>
+  {% if grant.status in ['PENDING','REJECTED','REVOKED'] %}
+  <details><summary>用此设备替换同账号旧设备</summary>
+    <p>此操作同时撤销所选旧授权并批准当前设备；任一步骤失败不会部分生效。</p>
+    {% for old, old_device, owner in records %}{% if old.user_id == grant.user_id and old.id != grant.id and old.status in ['ACTIVE','SUSPENDED'] %}
+    <form method="post" action="/admin/workbench-devices/replace">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="old_grant_id" value="{{ old.id }}">
+      <input type="hidden" name="new_grant_id" value="{{ grant.id }}"><input type="hidden" name="old_revision" value="{{ old.revision }}"><input type="hidden" name="new_revision" value="{{ grant.revision }}">
+      <button type="submit">撤销 {{ old.label or old_device.id }} 并批准本设备</button>
+    </form>
+    {% endif %}{% endfor %}
+  </details>
+  {% endif %}
+  <details><summary>设备全局管理（影响此设备所有账号）</summary>
+    <form method="post" action="/admin/workbench-devices/devices/{{ device.id }}/status">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <select name="status"><option value="SUSPENDED">停用此设备全部账号</option><option value="ACTIVE">恢复设备全局状态</option><option value="REVOKED">撤销设备全局状态</option></select>
+      <button type="submit">执行全局操作</button>
+    </form>
+  </details>
+</section>
+{% else %}<p>暂无设备申请。</p>{% endfor %}
+<h2>最近授权操作</h2>
+<ul>{% for event in audits %}<li>{{ as_datetime(event.created_at)|beijing_datetime }} · {{ event.action }} · 操作账号 ID {{ event.actor_user_id }} · 授权 {{ event.grant_id or '—' }}</li>{% else %}<li>暂无记录。</li>{% endfor %}</ul>
+{% endblock %}

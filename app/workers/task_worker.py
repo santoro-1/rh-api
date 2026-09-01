@@ -53,6 +53,7 @@ from app.services.h3.upload_recovery import (
     start_upload_receipt,
 )
 from app.services.deployment_drain import is_deployment_draining
+from app.services.device_auth.queued_work import task_is_admitted, task_requires_device_admission
 from app.services.runninghub_dispatch import (
     DispatchReservation,
     cool_execution_account,
@@ -73,6 +74,7 @@ from app.services.runninghub_attempts import (
     latest_task_attempt,
     task_attempt_for_remote_id,
     task_execution_account_for_remote,
+    task_has_uncertain_submission,
 )
 from app.services.logging_config import (
     configure_logging,
@@ -648,6 +650,32 @@ def recover_interrupted_tasks(db: Session) -> int:
     return int(result.rowcount or 0) + int(enhancement_result.rowcount or 0)
 
 
+def _new_work_is_authorized(db: Session, task: GenerationTask, *, phase: str) -> bool:
+    """Pause unpaid protected work separately from failures; never discard IDs."""
+    if not task_requires_device_admission(task) or task.runninghub_task_id:
+        return True
+    if task_has_uncertain_submission(task):
+        # Missing remote ID does not prove no charge occurred. Preserve its
+        # attempt/account and existing manual-recovery contract unchanged.
+        return False
+    if task_is_admitted(db, task, phase=phase):
+        if db.new or db.dirty:
+            db.commit()
+        return True
+    if phase != "queue":
+        latest = latest_task_attempt(task)
+        if latest is not None and latest.remote_task_id is None and latest.finished_at is None:
+            finish_task_attempt(task, status="AUTHORIZATION_WAIT")
+        # This is a local queue wait, NOT a provider failure or paid retry.
+        task.status = TaskStatus.PENDING.value
+        if task.execution_account_id is not None:
+            release_unsubmitted_pool_reservation(task)
+        if task.workflow_type == "minimax_h3_ref2va":
+            sync_h3_task_hierarchy(task)
+    db.commit()
+    return False
+
+
 def claim_next_pending_task(db: Session) -> str | None:
     prepare_legacy_credential_fingerprints(db)
     # Global creation time remains the FIFO key. A task whose entire selected
@@ -682,6 +710,8 @@ def claim_next_pending_task(db: Session) -> str | None:
         ).all()
     )
     for pending_task in pending_tasks:
+        if not _new_work_is_authorized(db, pending_task, phase="queue"):
+            continue
         reservation: DispatchReservation | None
         if task_uses_execution_pool(pending_task):
             reservation = reserve_pool_task(
@@ -2094,6 +2124,8 @@ def process_task(db: Session, task_id: str) -> None:
         _mark_failed(task, "CONFIGURATION_ERROR", "账号已禁用")
         db.commit()
         return
+    if not _new_work_is_authorized(db, task, phase="dispatch"):
+        return
     if (
         task.workflow_type == "digital_human"
         and task.enhancement is not None
@@ -2353,6 +2385,8 @@ def process_task(db: Session, task_id: str) -> None:
                 workflow_json.encode("utf-8")
             ).hexdigest()
             db.commit()
+        if not _new_work_is_authorized(db, task, phase="submit"):
+            return
         remote_task_id = client.submit_task(payload)
         # Persist as soon as submission returns. Every later run only queries this ID.
         task.runninghub_task_id = remote_task_id

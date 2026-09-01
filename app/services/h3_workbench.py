@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from app.services.device_auth.admission import WorkbenchIdentity, require_new_work
+from app.services.device_auth.queued_work import bind_new_operation
+
 import hashlib
 import json
 import math
@@ -36,6 +39,9 @@ from app.services.audio import inspect_audio_duration
 from app.services.audio_review import current_attempt
 from app.services.batch_assets import load_available_assets
 from app.services.h3.duration import plan_h3_duration
+from app.services.h3.quote_lifecycle import (
+    claim_quote, finish_quote_cancellation, quote_capability, quote_token,
+)
 from app.services.h3.delivery import parse_h3_direct_delivery
 from app.services.h3.graph import (
     H3_ADAPTER_VERSION,
@@ -2036,6 +2042,7 @@ def confirm_h3_segment_regeneration(
     quote_token: str,
     cost_confirmed: object,
     settings: Settings,
+    device_identity: WorkbenchIdentity | None = None,
 ) -> tuple[GenerationBatch, dict[str, object]]:
     if not _strict_bool(cost_confirmed, "H3 重生成费用确认"):
         raise H3WorkbenchError("必须确认 H3 主动重生成的每个受影响分段都会产生费用")
@@ -2059,6 +2066,14 @@ def confirm_h3_segment_regeneration(
     if preview["quote_token"] != clean_quote_token:
         raise H3WorkbenchError("H3 重生成费用快照已过期，请重新预览影响范围")
     affected = _affected_regeneration_segments(segment)
+    # A real new paid attempt needs current device permission, before archiving
+    # any previous result or resetting the task. Idempotent receipt reads above
+    # are not a second paid operation.
+    bind_new_operation(
+        db, user_id=user.id, identity=device_identity, operation_kind="h3.regenerate",
+        request_snapshot={"segment_id": segment.id, "request_key": clean_request_key, "quote_token": clean_quote_token},
+        resources=[("generation_segment", candidate.id) for candidate in affected],
+    )
     now = datetime.now(timezone.utc)
     receipt: dict[str, object] = {
         "schema": "runninghub.h3-regeneration-confirmation.v1",
@@ -2171,6 +2186,7 @@ def confirm_h3_segment_retry(
     quote_token: str,
     cost_confirmed: object,
     settings: Settings,
+    device_identity: WorkbenchIdentity | None = None,
 ) -> tuple[GenerationBatch, dict[str, object]]:
     clean_request_key = str(request_key or "").strip()
     if not clean_request_key or len(clean_request_key) > 100:
@@ -2198,6 +2214,14 @@ def confirm_h3_segment_retry(
         raise H3WorkbenchError("必须确认重新提交 H3 会产生 RunningHub 费用")
     if not paid_calls and not isinstance(cost_confirmed, bool):
         raise H3WorkbenchError("H3 重试费用确认必须是布尔值")
+    if paid_calls:
+        # Classification comes from the owned task/remote ID, not the request's
+        # retry_scope or cost flags. Download-only recovery remains available.
+        bind_new_operation(
+            db, user_id=user.id, identity=device_identity, operation_kind="h3.retry",
+            request_snapshot={"segment_id": segment.id, "request_key": clean_request_key, "quote_token": clean_quote_token},
+            resources=[("generation_segment", segment.id)],
+        )
     now = datetime.now(timezone.utc)
     receipt: dict[str, object] = {
         "schema": "runninghub.h3-retry-confirmation.v1",
@@ -2212,7 +2236,7 @@ def confirm_h3_segment_retry(
     payload["_h3_manual_retry"] = receipt
     task.input_payload = json.dumps(payload, ensure_ascii=False)
     try:
-        prepare_task_retry(task, settings, now=now)
+        prepare_task_retry(task, settings, now=now, device_identity=device_identity)
     except TaskManagementError as exc:
         raise H3WorkbenchError(str(exc)) from exc
     if task.runninghub_task_id is None:
@@ -2479,7 +2503,50 @@ def activate_next_h3_soft_chain_segment(
     return existing_task
 
 
-def confirm_h3_workbench_batch(
+def cancel_h3_workbench_quote(db: Session, user: User, batch_id: str, *, request_key: str, token: str):
+    if not request_key or len(request_key) > 100:
+        raise H3WorkbenchError("撤销费用预览必须提供有效 request_key")
+    batch = get_h3_batch(db, user, batch_id)
+    if batch is None or batch.h3_config is None:
+        raise H3WorkbenchError("H3 批次不存在")
+    if token != quote_token(batch):
+        raise H3WorkbenchError("费用预览凭据不匹配，请重新读取状态")
+    receipt = json.loads(batch.h3_config.fee_snapshot_json or "{}")
+    if batch.status == "CANCELLED" and receipt.get("quote_cancellation"):
+        return batch
+    if not claim_quote(db, batch, "CANCELLED"):
+        raise H3WorkbenchError("批次已确认、状态已变化或存在任务，不能按费用预览撤销")
+    return finish_quote_cancellation(db, batch, request_key)
+
+
+def confirm_h3_workbench_batch(db: Session, user: User, batch_id: str, *, cost_confirmed: object,
+                               device_identity: WorkbenchIdentity | None = None):
+    if not _strict_bool(cost_confirmed, "H3 费用确认"):
+        raise H3WorkbenchError("必须明确确认 H3 费用")
+    batch = get_h3_batch(db, user, batch_id)
+    if batch is None or batch.h3_config is None:
+        raise H3WorkbenchError("H3 批次不存在")
+    if batch.h3_config.confirmed_at is not None:
+        return batch
+    require_new_work(db, user_id=user.id, identity=device_identity)
+    if not claim_quote(db, batch, "ACTIVE"):
+        batch = get_h3_batch(db, user, batch_id)
+        if batch is not None and batch.h3_config.confirmed_at is not None:
+            return batch
+        raise H3WorkbenchError("费用预览已撤销或状态发生变化，请重新读取状态")
+    try:
+        bind_new_operation(
+            db, user_id=user.id, identity=device_identity, operation_kind="h3.generate",
+            request_snapshot={"batch_id": batch.id, "fee_snapshot": batch.h3_config.fee_snapshot_json},
+            resources=[("generation_segment", segment.id) for item in batch.items for segment in item.segments],
+        )
+        return _confirm_h3_workbench_batch(db, user, batch_id, cost_confirmed=cost_confirmed)
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _confirm_h3_workbench_batch(
     db: Session,
     user: User,
     batch_id: str,
@@ -2746,6 +2813,7 @@ def h3_batch_payload(batch: GenerationBatch) -> dict[str, object]:
         "reference_image_count": len(_reference_assets(batch)),
         "fee_snapshot": fee_snapshot,
         "items": [h3_item_payload(item) for item in batch.items],
+        "quote_recovery": quote_capability(batch),
         "created_at": batch.created_at.isoformat(),
         "confirmed_at": (
             batch.h3_config.confirmed_at.isoformat()

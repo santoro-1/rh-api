@@ -8,6 +8,8 @@ from sqlalchemy.orm import object_session
 
 from app.config import Settings
 from app.models import EnhancementStatus, GenerationTask, TaskStatus
+from app.services.device_auth.admission import WorkbenchIdentity, require_new_work
+from app.services.device_auth.queued_work import task_requires_device_admission
 from app.services.storage import (
     remove_directory,
     safe_relative_path,
@@ -78,6 +80,7 @@ def prepare_task_retry(
     settings: Settings,
     *,
     now: datetime | None = None,
+    device_identity: WorkbenchIdentity | None = None,
 ) -> None:
     """Reset a failed or cancelled stage without repeating paid success."""
 
@@ -88,8 +91,24 @@ def prepare_task_retry(
             "RunningHub 提交结果无法确认，禁止盲目重提；请管理员先在 RunningHub 核对远程任务"
         )
     retry_time = now or datetime.now(timezone.utc)
-    if task.workflow_type == "minimax_h3_ref2va":
+    if task_requires_device_admission(task):
         db = object_session(task)
+        if db is not None:
+            # A caller may have just recorded the provider failure on this ORM
+            # object without committing it yet (the worker/pool recovery path
+            # does this).  Flush that caller-owned state before taking the
+            # optimistic-lock snapshot.  A genuinely stale, otherwise-clean
+            # object still keeps its old timestamp and is rejected below.
+            db.flush()
+            reviewed_status = task.status
+            reviewed_updated_at = task.updated_at
+        if not (task.status == TaskStatus.DOWNLOAD_FAILED.value and task.runninghub_task_id):
+            if db is None:
+                raise TaskManagementError("工作台付费重试缺少数据库授权上下文")
+            # Shared legacy/batch retry routes must not borrow the original
+            # task's admitted device to start another paid attempt. Only the
+            # newly verified request may authorize that attempt.
+            require_new_work(db, user_id=task.user_id, identity=device_identity)
         if db is not None:
             # Compare the state actually reviewed by this caller, not merely
             # its stale ORM object. Keep the write lock through reset+commit so
@@ -98,14 +117,14 @@ def prepare_task_retry(
                 update(GenerationTask)
                 .where(
                     GenerationTask.id == task.id,
-                    GenerationTask.status == task.status,
-                    GenerationTask.updated_at == task.updated_at,
+                    GenerationTask.status == reviewed_status,
+                    GenerationTask.updated_at == reviewed_updated_at,
                 )
                 .values(updated_at=retry_time)
                 .execution_options(synchronize_session=False)
             )
             if changed.rowcount != 1:
-                raise TaskManagementError("H3 任务状态已变化，请刷新后查看；本次未重复创建重试")
+                raise TaskManagementError("任务状态已变化，请刷新后查看；本次未重复创建重试")
             task.updated_at = retry_time
     enhancement = task.enhancement
     if enhancement is not None:
@@ -221,16 +240,35 @@ def _ensure_task_assets(task: GenerationTask, settings: Settings) -> None:
         )
 
 
+def task_retry_starts_new_provider_work(task: GenerationTask) -> bool:
+    """Classify from server state; callers must not trust a client retry label."""
+    if task.enhancement is not None:
+        return not (
+            task.enhancement.status == EnhancementStatus.DOWNLOAD_FAILED.value
+            and task.enhancement.remote_task_id
+        )
+    return not (
+        task.status == TaskStatus.DOWNLOAD_FAILED.value
+        and task.runninghub_task_id
+    )
+
+
 def prepare_successful_segment_regeneration(
     task: GenerationTask,
     settings: Settings,
     *,
     now: datetime | None = None,
+    device_identity: WorkbenchIdentity | None = None,
 ) -> None:
     """Replace one successful segmented result after an explicit paid action."""
 
     if task.status != TaskStatus.SUCCESS.value or not task.segment_id:
         raise TaskManagementError("只有成功的分段视频可以重新生成")
+    if task_requires_device_admission(task):
+        db = object_session(task)
+        if db is None:
+            raise TaskManagementError("工作台付费重生成缺少数据库授权上下文")
+        require_new_work(db, user_id=task.user_id, identity=device_identity)
     _ensure_task_assets(task, settings)
     _ensure_legacy_pool_snapshot(task)
     retry_time = now or datetime.now(timezone.utc)

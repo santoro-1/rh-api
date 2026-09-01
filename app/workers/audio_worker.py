@@ -18,6 +18,7 @@ from app.models import (
     AudioGenerationAttempt,
     AudioGenerationTask,
     AudioTaskStatus,
+    BATCH_SOURCE_NEW_WORKBENCH,
     GenerationBatchItem,
     GenerationSegment,
     MiniMaxVoiceAsset,
@@ -31,6 +32,11 @@ from app.services.audio import (
     master_generated_speech,
 )
 from app.services.deployment_drain import is_deployment_draining
+from app.services.device_auth.queued_work import (
+    inherit_operation_binding,
+    resource_is_admitted,
+    task_resource,
+)
 from app.services.logging_config import (
     configure_logging,
     log_event,
@@ -259,37 +265,71 @@ def recover_approved_audio_handoffs(
 
 
 def claim_next_pending_task(db: Session) -> str | None:
-    task_id = db.scalar(
-        select(AudioGenerationTask.id)
+    pending_tasks = db.scalars(
+        select(AudioGenerationTask)
+        .options(
+            selectinload(AudioGenerationTask.batch_item).selectinload(
+                GenerationBatchItem.batch
+            )
+        )
         .where(AudioGenerationTask.status == AudioTaskStatus.PENDING.value)
         .order_by(AudioGenerationTask.created_at)
-        .limit(1)
-    )
-    if task_id is None:
-        return None
-    result = db.execute(
-        update(AudioGenerationTask)
-        .where(
-            AudioGenerationTask.id == task_id,
-            AudioGenerationTask.status == AudioTaskStatus.PENDING.value,
+        .limit(100)
+    ).all()
+    for pending_task in pending_tasks:
+        if not _audio_new_work_is_authorized(db, pending_task, phase="queue"):
+            db.commit()
+            continue
+        result = db.execute(
+            update(AudioGenerationTask)
+            .where(
+                AudioGenerationTask.id == pending_task.id,
+                AudioGenerationTask.status == AudioTaskStatus.PENDING.value,
+            )
+            .values(
+                status=AudioTaskStatus.CLONING.value,
+                error_code=None,
+                error_message=None,
+            )
         )
-        .values(
-            status=AudioTaskStatus.CLONING.value,
-            error_code=None,
-            error_message=None,
-        )
-    )
-    db.commit()
-    if result.rowcount == 1:
-        task = _load_task(db, task_id)
-        log_event(
-            logger,
-            "audio.claimed",
-            "语音 Worker 已领取脚本任务",
-            **(_audio_log_context(task) if task is not None else {"task_id": task_id}),
-        )
-        return task_id
+        db.commit()
+        if result.rowcount == 1:
+            task = _load_task(db, pending_task.id)
+            log_event(
+                logger,
+                "audio.claimed",
+                "语音 Worker 已领取脚本任务",
+                **(
+                    _audio_log_context(task)
+                    if task is not None
+                    else {"task_id": pending_task.id}
+                ),
+            )
+            return pending_task.id
     return None
+
+
+def _audio_new_work_is_authorized(
+    db: Session,
+    task: AudioGenerationTask,
+    *,
+    phase: str,
+) -> bool:
+    batch = task.batch_item.batch if task.batch_item is not None else None
+    if batch is None or batch.source_channel not in {
+        BATCH_SOURCE_NEW_WORKBENCH,
+    }:
+        return True
+    # Once MiniMax has accepted an asynchronous request, continue polling and
+    # local handoff so a later revocation cannot cause a duplicate paid call.
+    if task.provider_task_id or task.provider_submitted_at:
+        return True
+    return resource_is_admitted(
+        db,
+        user_id=task.user_id,
+        resource=("audio_generation_task", task.id),
+        phase=phase,
+    )
 
 
 def _load_task(db: Session, task_id: str) -> AudioGenerationTask | None:
@@ -636,6 +676,7 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
 
     segment_dir = audio_path.parent / "segments"
     base_time = _now()
+    generation_tasks = []
     for plan in plans:
         segment_id = str(uuid.uuid4())
         segment_audio = segment_dir / f"segment-{plan.index:03d}.mp3"
@@ -732,14 +773,25 @@ def _handoff_to_video(db: Session, task: AudioGenerationTask) -> None:
                 and item_execution_account_snapshot(task.batch_item) is not None
             ),
         )
-        create_generation_task(
+        generation_task = create_generation_task(
             db,
             task.user,
             validated,
             segment_id=segment.id,
             created_at=base_time + timedelta(microseconds=plan.index),
         )
+        generation_tasks.append(generation_task)
         segment.status = "TASK_CREATED"
+
+    if task.batch_item.batch.source_channel in {
+        BATCH_SOURCE_NEW_WORKBENCH,
+    }:
+        inherit_operation_binding(
+            db,
+            user_id=task.user_id,
+            source=("audio_generation_task", task.id),
+            targets=[task_resource(child) for child in generation_tasks],
+        )
 
     task.status = AudioTaskStatus.SUCCESS.value
     task.error_code = None
@@ -771,6 +823,12 @@ def process_task(db: Session, task_id: str) -> None:
         return
     if not task.user.is_active:
         _mark_failed(db, task, "CONFIGURATION_ERROR", "账号已禁用")
+        return
+    if not _audio_new_work_is_authorized(db, task, phase="dispatch"):
+        task.status = AudioTaskStatus.PENDING.value
+        task.batch_item.audio_status = "PENDING"
+        task.batch_item.status = "AUDIO_PENDING"
+        db.commit()
         return
     try:
         output_exists = bool(

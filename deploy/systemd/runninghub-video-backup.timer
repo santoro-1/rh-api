@@ -1,7 +1,8 @@
 [Unit]
-Description=Daily RunningHub backup
+Description=Check the three-day RunningHub backup schedule
 
 [Timer]
+# The service's persistent interval gate only permits a backup every three days.
 OnCalendar=*-*-* 03:30:00
 Persistent=true
 RandomizedDelaySec=15m

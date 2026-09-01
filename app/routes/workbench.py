@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+import uuid
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -51,6 +52,15 @@ from app.services.content_analysis.analysis import (
     ContentAnalysisInputError,
     ContentAnalysisUnavailable,
     analyze_content,
+)
+from app.services.device_auth.admission import (
+    request_identity,
+    require_new_work,
+    workbench_user,
+)
+from app.services.device_auth.queued_work import (
+    bind_new_operation,
+    task_resource,
 )
 from app.services.visual_analysis import (
     VisualAnalysisInputError,
@@ -118,6 +128,7 @@ from app.services.storage import (
 from app.services.task_management import (
     TaskManagementError,
     prepare_task_retry,
+    task_retry_starts_new_provider_work,
 )
 from app.services.video_enhancement import (
     VideoEnhancementBackfillError,
@@ -724,12 +735,18 @@ def workbench_tasks(
 
 @router.post("/api/workbench/content-analysis")
 def workbench_content_analysis(
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
     """Analyze one exact script without exposing Ark credentials to workbench."""
 
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+        new_work=True,
+    )
     original_script = payload.get("original_script")
     force_refresh = payload.get("force_refresh", False)
     visual_context = payload.get("visual_context")
@@ -755,12 +772,18 @@ def workbench_content_analysis(
 
 @router.post("/api/workbench/visual-analysis")
 def workbench_visual_analysis(
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
     """Analyze only local semantic candidates without exposing Ark credentials."""
 
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+        new_work=True,
+    )
     force_refresh = payload.get("force_refresh", False)
     if type(force_refresh) is not bool:
         raise HTTPException(status_code=400, detail="force_refresh 必须是布尔值")
@@ -919,11 +942,30 @@ def import_workbench_voice(
 @router.post("/api/workbench/voices/{voice_asset_id}/preview")
 def create_workbench_official_voice_preview(
     voice_asset_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+    )
     voice = _voice_for_user(voice_asset_id, user, db)
+    cached_preview = False
+    if voice.preview_relative_path:
+        try:
+            cached_preview = safe_relative_path(
+                voice.preview_relative_path, get_settings().data_dir
+            ).is_file()
+        except ValueError:
+            cached_preview = False
+    if not cached_preview:
+        require_new_work(
+            db,
+            user_id=user.id,
+            identity=request_identity(request),
+        )
     try:
         generate_official_voice_preview(
             db,
@@ -963,11 +1005,22 @@ def download_workbench_voice_preview(
 @router.post("/api/workbench/voices/{voice_asset_id}/activate")
 def activate_workbench_saved_voice(
     voice_asset_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+    )
     voice = _voice_for_user(voice_asset_id, user, db)
+    if voice.status != "ACTIVE":
+        require_new_work(
+            db,
+            user_id=user.id,
+            identity=request_identity(request),
+        )
     try:
         activate_workbench_voice(
             db,
@@ -1002,7 +1055,7 @@ def delete_workbench_saved_voice(
 @router.post("/api/workbench/voice-creations")
 def create_workbench_voice_creation(
     request: Request,
-    access_token: str = Form(...),
+    access_token: str = Form(""),
     method: str = Form(...),
     name: str = Form(...),
     preview_text: str = Form(...),
@@ -1015,7 +1068,7 @@ def create_workbench_voice_creation(
     source_b: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(access_token, db)
+    user = workbench_user(request, db, body_token=access_token)
     check_rate_limit(
         request,
         f"workbench-voice-create:{user.id}",
@@ -1023,6 +1076,25 @@ def create_workbench_voice_creation(
     )
     if source_b is not None and not source_b.filename:
         source_b = None
+    task_id = str(uuid.uuid4())
+    bind_new_operation(
+        db,
+        user_id=user.id,
+        identity=request_identity(request),
+        operation_kind="workbench.voice.create",
+        request_snapshot={
+            "task_id": task_id,
+            "method": method,
+            "name": name,
+            "model": model,
+            "weight_a": weight_a,
+            "noise_reduction": noise_reduction,
+            "volume_normalization": volume_normalization,
+            "source_a_name": source_a.filename,
+            "source_b_name": source_b.filename if source_b is not None else None,
+        },
+        resources=[("voice_creation_task", task_id)],
+    )
     try:
         task = create_voice_task(
             db,
@@ -1038,6 +1110,8 @@ def create_workbench_voice_creation(
             noise_reduction=noise_reduction,
             volume_normalization=volume_normalization,
             cost_confirmed=cost_confirmed,
+            source_channel=BATCH_SOURCE_NEW_WORKBENCH,
+            task_id=task_id,
         )
     except (UploadValidationError, OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1047,11 +1121,25 @@ def create_workbench_voice_creation(
 @router.post("/api/workbench/voice-creations/{task_id}/save")
 def save_workbench_voice_creation(
     task_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+    )
     task = _voice_task_for_user(task_id, user, db)
+    if task.status != "SAVED":
+        bind_new_operation(
+            db,
+            user_id=user.id,
+            identity=request_identity(request),
+            operation_kind="workbench.voice.save",
+            request_snapshot={"task_id": task.id, "status": task.status},
+            resources=[("voice_creation_task", task.id)],
+        )
     try:
         request_voice_save(db, task)
     except ValueError as exc:
@@ -1107,7 +1195,11 @@ def create_workbench_audio_batch(
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+    )
     check_rate_limit(
         request,
         f"workbench-audio-batch:{user.id}",
@@ -1158,6 +1250,21 @@ def create_workbench_audio_batch(
             request_key=request_key,
             plan=plan,
             correlation_id=str(payload.get("correlation_id") or "").strip() or None,
+        )
+        audio_tasks = [
+            item.audio_task for item in batch.items if item.audio_task is not None
+        ]
+        bind_new_operation(
+            db,
+            user_id=user.id,
+            identity=request_identity(request),
+            operation_kind="workbench.audio.generate",
+            request_snapshot={
+                "batch_id": batch.id,
+                "request_key": request_key,
+                "audio_task_ids": [task.id for task in audio_tasks],
+            },
+            resources=[("audio_generation_task", task.id) for task in audio_tasks],
         )
         db.commit()
         batch = _batch_for_user(batch.id, user, db)
@@ -1259,10 +1366,15 @@ def download_workbench_audio(
 def retry_workbench_audio(
     batch_id: str,
     item_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+    )
     if payload.get("cost_confirmed") is not True:
         raise HTTPException(status_code=409, detail="请确认重新生成声音可能再次产生费用")
     batch = _batch_for_user(batch_id, user, db)
@@ -1291,6 +1403,20 @@ def retry_workbench_audio(
             raise AudioReviewError("当前声音状态不能重新生成")
     except AudioReviewError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    bind_new_operation(
+        db,
+        user_id=user.id,
+        identity=request_identity(request),
+        operation_kind="workbench.audio.retry",
+        request_snapshot={
+            "batch_id": batch.id,
+            "item_id": item.id,
+            "audio_task_id": item.audio_task.id,
+            "generation_version": item.audio_task.generation_version,
+            "speed": requested_speed,
+        },
+        resources=[("audio_generation_task", item.audio_task.id)],
+    )
     db.commit()
     return _audio_batch_payload(_batch_for_user(batch_id, user, db))
 
@@ -1301,12 +1427,17 @@ def retry_workbench_audio(
 def start_workbench_composition(
     batch_id: str,
     item_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
     """Approve one generated audio version and hand it to the existing workers."""
 
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+    )
     if payload.get("cost_confirmed") is not True:
         raise HTTPException(status_code=409, detail="请确认画面生成会产生 RunningHub 费用")
     if not str(payload.get("idempotency_key") or "").strip():
@@ -1551,6 +1682,22 @@ def start_workbench_composition(
             pass
         else:
             raise AudioReviewError("当前声音尚未准备好进入画面生成")
+        if not handoff_started or video_handoff_reset:
+            bind_new_operation(
+                db,
+                user_id=user.id,
+                identity=request_identity(request),
+                operation_kind="workbench.composition",
+                request_snapshot={
+                    "batch_id": batch.id,
+                    "item_id": item.id,
+                    "audio_task_id": task.id,
+                    "idempotency_key": str(payload.get("idempotency_key") or ""),
+                    "image_sha256": task.primary_sha256,
+                    "resolution": requested_resolution,
+                },
+                resources=[("audio_generation_task", task.id)],
+            )
     except AudioReviewError as exc:
         db.rollback()
         if materialized_image is not None:
@@ -1578,12 +1725,18 @@ def start_workbench_composition(
 @router.post("/api/workbench/tasks/{item_id}/composition/retry")
 def retry_workbench_composition(
     item_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
     """Create a new command for the failed/cancelled active stage of one row."""
 
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+    )
+    identity = request_identity(request)
     if payload.get("cost_confirmed") is not True:
         raise HTTPException(
             status_code=409,
@@ -1617,6 +1770,9 @@ def retry_workbench_composition(
             TaskStatus.CANCELLED.value,
         }
     ]
+    paid_retryable = [
+        task for task in retryable if task_retry_starts_new_provider_work(task)
+    ]
     try:
         if retryable:
             for task in retryable:
@@ -1644,7 +1800,11 @@ def retry_workbench_composition(
                         )
                     parameters["resolution"] = requested_resolution
                     task.input_payload = json.dumps(task_input, ensure_ascii=False)
-                prepare_task_retry(task, get_settings())
+                prepare_task_retry(
+                    task,
+                    get_settings(),
+                    device_identity=identity,
+                )
             invalidate_merged_video(item, get_settings())
         elif item.merged_video_status == MERGE_FAILED:
             retry_video_merge(item, get_settings())
@@ -1652,6 +1812,19 @@ def retry_workbench_composition(
             raise TaskManagementError("当前画面任务没有可重试的失败阶段")
     except (TaskManagementError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if paid_retryable:
+        bind_new_operation(
+            db,
+            user_id=user.id,
+            identity=identity,
+            operation_kind="workbench.composition.retry",
+            request_snapshot={
+                "item_id": item.id,
+                "task_ids": [task.id for task in paid_retryable],
+                "resolution": requested_resolution or None,
+            },
+            resources=[task_resource(task) for task in paid_retryable],
+        )
     db.commit()
     return _workbench_manifest(_item_for_user(item_id, user, db))
 
@@ -1659,12 +1832,18 @@ def retry_workbench_composition(
 @router.post("/api/workbench/tasks/{item_id}/enhancement/backfill")
 def backfill_workbench_video_enhancement(
     item_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
     """Send saved digital-human source segments to SeedVR2 without rerunning 4A."""
 
-    user = _token_user(str(payload.get("access_token", "")), db)
+    user = workbench_user(
+        request,
+        db,
+        body_token=str(payload.get("access_token", "")),
+    )
+    identity = request_identity(request)
     if payload.get("cost_confirmed") is not True:
         raise HTTPException(
             status_code=409,
@@ -1698,19 +1877,40 @@ def backfill_workbench_video_enhancement(
 
         queued_count = 0
         retried_count = 0
+        paid_tasks: list[GenerationTask] = []
         for task in tasks:
             enhancement = task.enhancement
             if enhancement is None:
                 queue_historical_seedvr2_enhancement(task, settings)
                 queued_count += 1
+                paid_tasks.append(task)
             elif task.status in {
                 TaskStatus.FAILED.value,
                 TaskStatus.DOWNLOAD_FAILED.value,
             }:
-                prepare_task_retry(task, settings)
+                starts_new_work = task_retry_starts_new_provider_work(task)
+                prepare_task_retry(
+                    task,
+                    settings,
+                    device_identity=identity,
+                )
                 retried_count += 1
+                if starts_new_work:
+                    paid_tasks.append(task)
         if queued_count or retried_count:
             invalidate_merged_video(item, settings)
+        if paid_tasks:
+            bind_new_operation(
+                db,
+                user_id=user.id,
+                identity=identity,
+                operation_kind="workbench.enhancement.backfill",
+                request_snapshot={
+                    "item_id": item.id,
+                    "task_ids": [task.id for task in paid_tasks],
+                },
+                resources=[task_resource(task) for task in paid_tasks],
+            )
     except (
         VideoEnhancementBackfillError,
         TaskManagementError,

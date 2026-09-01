@@ -17,6 +17,7 @@ from app.services.h3_workbench import (
     H3WorkbenchError,
     approve_h3_audio_source,
     cancel_h3_segment,
+    cancel_h3_workbench_quote,
     confirm_h3_workbench_batch,
     confirm_h3_segment_regeneration,
     confirm_h3_segment_retry,
@@ -29,7 +30,10 @@ from app.services.h3_workbench import (
     prepare_h3_segment_regeneration,
     prepare_h3_segment_retry,
 )
-from app.services.workbench_auth import decode_workbench_token, token_matches_user
+from app.services.device_auth.admission import workbench_user, request_identity
+from app.services.device_auth.h3_queue_recovery import (
+    list_waiting_batches, prepare_recovery, resume_recovery,
+)
 from app.services.storage import safe_relative_path
 
 
@@ -88,14 +92,8 @@ def _stream_h3_provider_video(url: str, request: Request) -> StreamingResponse:
     )
 
 
-def _token_user(token: str, db: Session) -> User:
-    payload = decode_workbench_token(token, get_settings())
-    if payload is None:
-        raise HTTPException(status_code=401, detail="账号已停用、已删除或登录已失效")
-    user = db.get(User, int(payload["user_id"]))
-    if user is None or not token_matches_user(payload, user):
-        raise HTTPException(status_code=401, detail="账号已停用、已删除或登录已失效")
-    return user
+def _token_user(token: str, db: Session, request: Request, *, new_work: bool = False) -> User:
+    return workbench_user(request, db, body_token=token, new_work=new_work)
 
 
 def _service_error(exc: Exception) -> HTTPException:
@@ -103,19 +101,16 @@ def _service_error(exc: Exception) -> HTTPException:
 
 
 def _bearer_user(request: Request, db: Session) -> User:
-    authorization = str(request.headers.get("authorization") or "")
-    scheme, _, token = authorization.partition(" ")
-    if scheme.casefold() != "bearer" or not token.strip():
-        raise HTTPException(status_code=401, detail="缺少下载授权")
-    return _token_user(token.strip(), db)
+    return workbench_user(request, db)
 
 
 @router.post("/api/workbench/h3-execution-accounts")
 def get_h3_execution_accounts(
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     try:
         return h3_account_payload(db, user)
     except H3WorkbenchError as exc:
@@ -124,19 +119,21 @@ def get_h3_execution_accounts(
 
 @router.post("/api/workbench/h3-audio-sources")
 def get_h3_audio_sources(
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     return h3_audio_sources_payload(db, user)
 
 
 @router.post("/api/workbench/h3-audio-sources/approve")
 def approve_h3_audio(
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     try:
         task = approve_h3_audio_source(
             db,
@@ -162,7 +159,7 @@ def prepare_h3_batch(
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request, new_work=True)
     check_rate_limit(
         request,
         f"workbench-h3-prepare:{user.id}",
@@ -196,7 +193,7 @@ def confirm_h3_batch(
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     if payload.get("cost_confirmed") is not True:
         raise HTTPException(
             status_code=409,
@@ -213,7 +210,22 @@ def confirm_h3_batch(
             user,
             batch_id,
             cost_confirmed=payload.get("cost_confirmed"),
+            device_identity=request_identity(request),
         )
+    except (H3WorkbenchError, ValueError) as exc:
+        raise _service_error(exc) from exc
+    return h3_batch_payload(batch)
+
+
+@router.post("/api/workbench/h3-batches/{batch_id}/quote/cancel")
+def cancel_h3_quote(batch_id: str, request: Request, payload: dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
+    if payload.get("cancel_quote_confirmed") is not True:
+        raise HTTPException(status_code=409, detail="请明确确认撤销整个未付费预览")
+    try:
+        batch = cancel_h3_workbench_quote(db, user, batch_id,
+            request_key=str(payload.get("request_key") or ""),
+            token=str(payload.get("quote_token") or ""))
     except (H3WorkbenchError, ValueError) as exc:
         raise _service_error(exc) from exc
     return h3_batch_payload(batch)
@@ -222,23 +234,48 @@ def confirm_h3_batch(
 @router.post("/api/workbench/h3-batches/{batch_id}")
 def get_h3_batch_status(
     batch_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     batch = get_h3_batch(db, user, batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="H3 批次不存在")
     return h3_batch_payload(batch)
 
 
+@router.post("/api/workbench/h3-authorization-waiting")
+def get_h3_authorization_waiting(request: Request, payload: dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
+    result = list_waiting_batches(db, user, after_id=str(payload.get("after_id") or ""))
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/workbench/h3-batches/{batch_id}/authorization/prepare")
+def prepare_h3_authorization_recovery(batch_id: str, request: Request, payload: dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
+    return JSONResponse(prepare_recovery(db, user, batch_id), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/workbench/h3-batches/{batch_id}/authorization/resume")
+def resume_h3_authorization_recovery(batch_id: str, request: Request, payload: dict[str, Any] = Body(...), db: Session = Depends(get_db)):
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
+    check_rate_limit(request, f"h3-authorization-resume:{user.id}", 30)
+    result = resume_recovery(db, user, batch_id, identity=request_identity(request),
+                             resume_confirmed=payload.get("resume_confirmed"),
+                             request_key=payload.get("request_key"), review_token=payload.get("review_token"))
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/workbench/h3-segments/{segment_id}/regeneration/prepare")
 def prepare_h3_regeneration(
     segment_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request, new_work=True)
     try:
         return prepare_h3_segment_regeneration(db, user, segment_id)
     except (H3WorkbenchError, ValueError) as exc:
@@ -252,7 +289,7 @@ def confirm_h3_regeneration(
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     if payload.get("cost_confirmed") is not True:
         raise HTTPException(
             status_code=409,
@@ -272,6 +309,7 @@ def confirm_h3_regeneration(
             quote_token=str(payload.get("quote_token") or ""),
             cost_confirmed=payload.get("cost_confirmed"),
             settings=get_settings(),
+            device_identity=request_identity(request),
         )
     except (H3WorkbenchError, ValueError, OSError) as exc:
         raise _service_error(exc) from exc
@@ -283,10 +321,11 @@ def confirm_h3_regeneration(
 @router.post("/api/workbench/h3-segments/{segment_id}/retry/prepare")
 def prepare_h3_retry(
     segment_id: str,
+    request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     try:
         return prepare_h3_segment_retry(db, user, segment_id)
     except (H3WorkbenchError, ValueError) as exc:
@@ -300,7 +339,7 @@ def confirm_h3_retry(
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     check_rate_limit(
         request,
         f"workbench-h3-retry:{user.id}",
@@ -315,6 +354,7 @@ def confirm_h3_retry(
             quote_token=str(payload.get("quote_token") or ""),
             cost_confirmed=payload.get("cost_confirmed"),
             settings=get_settings(),
+            device_identity=request_identity(request),
         )
     except (H3WorkbenchError, ValueError, OSError) as exc:
         raise _service_error(exc) from exc
@@ -330,7 +370,7 @@ def cancel_h3_task(
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
 ):
-    user = _token_user(str(payload.get("access_token") or ""), db)
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
     check_rate_limit(
         request,
         f"workbench-h3-cancel:{user.id}",

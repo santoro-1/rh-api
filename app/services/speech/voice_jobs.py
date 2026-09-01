@@ -12,12 +12,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.models import (
+    BATCH_SOURCE_NEW_WORKBENCH,
     MiniMaxVoiceAsset,
     User,
     VoiceAssetStatus,
     VoiceCreationStatus,
     VoiceCreationTask,
 )
+from app.services.device_auth.queued_work import resource_is_admitted
 from app.services.logging_config import log_event
 from app.services.security import decrypt_secret
 from app.services.speech.accounts import replicate_shared_custom_voice
@@ -68,8 +70,8 @@ def recover_interrupted_voice_tasks(db: Session) -> int:
 def claim_next_voice_task(db: Session) -> str | None:
     """Atomically claim the oldest preview/save job from the voice FIFO."""
 
-    row = db.execute(
-        select(VoiceCreationTask.id, VoiceCreationTask.status)
+    rows = db.scalars(
+        select(VoiceCreationTask)
         .where(
             VoiceCreationTask.status.in_(
                 {
@@ -79,39 +81,57 @@ def claim_next_voice_task(db: Session) -> str | None:
             )
         )
         .order_by(VoiceCreationTask.created_at)
-        .limit(1)
-    ).first()
-    if row is None:
-        return None
-    task_id, current_status = row
-    claimed_status = (
-        VoiceCreationStatus.SAVING.value
-        if current_status == VoiceCreationStatus.SAVE_PENDING.value
-        else VoiceCreationStatus.CLONING.value
-    )
-    result = db.execute(
-        update(VoiceCreationTask)
-        .where(
-            VoiceCreationTask.id == task_id,
-            VoiceCreationTask.status == current_status,
+        .limit(100)
+    ).all()
+    for task in rows:
+        if not _voice_new_work_is_authorized(db, task, phase="queue"):
+            db.commit()
+            continue
+        current_status = task.status
+        claimed_status = (
+            VoiceCreationStatus.SAVING.value
+            if current_status == VoiceCreationStatus.SAVE_PENDING.value
+            else VoiceCreationStatus.CLONING.value
         )
-        .values(
-            status=claimed_status,
-            error_code=None,
-            error_message=None,
+        result = db.execute(
+            update(VoiceCreationTask)
+            .where(
+                VoiceCreationTask.id == task.id,
+                VoiceCreationTask.status == current_status,
+            )
+            .values(
+                status=claimed_status,
+                error_code=None,
+                error_message=None,
+            )
         )
-    )
-    db.commit()
-    if result.rowcount == 1:
-        log_event(
-            logger,
-            "voice.claimed",
-            "语音 Worker 已领取声音制作任务",
-            task_id=task_id,
-            status=claimed_status,
-        )
-        return task_id
+        db.commit()
+        if result.rowcount == 1:
+            log_event(
+                logger,
+                "voice.claimed",
+                "语音 Worker 已领取声音制作任务",
+                task_id=task.id,
+                status=claimed_status,
+            )
+            return task.id
     return None
+
+
+def _voice_new_work_is_authorized(
+    db: Session,
+    task: VoiceCreationTask,
+    *,
+    phase: str,
+) -> bool:
+    if task.source_channel != BATCH_SOURCE_NEW_WORKBENCH:
+        return True
+    return resource_is_admitted(
+        db,
+        user_id=task.user_id,
+        resource=("voice_creation_task", task.id),
+        phase=phase,
+    )
 
 
 def _make_client(task: VoiceCreationTask) -> MiniMaxClient:
@@ -420,6 +440,14 @@ def process_voice_task(db: Session, task_id: str) -> None:
             "CONFIGURATION_ERROR",
             "MiniMax 账号配置缺失、已禁用或已更换",
         )
+        return
+    if not _voice_new_work_is_authorized(db, task, phase="dispatch"):
+        task.status = (
+            VoiceCreationStatus.SAVE_PENDING.value
+            if task.save_requested_at is not None and task.preview_relative_path
+            else VoiceCreationStatus.PENDING.value
+        )
+        db.commit()
         return
     try:
         client = _make_client(task)

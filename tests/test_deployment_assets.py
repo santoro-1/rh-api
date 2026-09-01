@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import zipfile
@@ -389,6 +390,14 @@ def test_backup_timer_and_restore_confirmation_are_present():
         PROJECT_ROOT / "deploy" / "scripts" / "restore.sh"
     ).read_text(encoding="utf-8")
     assert "Persistent=true" in timer
+    assert "OnCalendar=*-*-* 03:30:00" in timer
+    assert "StateDirectory=runninghub-video-backup" in service
+    assert "StateDirectoryMode=0700" in service
+    assert "ExecCondition=/bin/bash -c" in service
+    assert "+3 days" in service
+    assert "$$(date +%%s)" in service
+    assert "ExecStartPre=/usr/bin/touch /var/lib/runninghub-video-backup/last-scheduled-run" in service
+    assert service.index("ExecCondition=") < service.index("ExecStartPre=") < service.index("ExecStart=")
     assert "Environment=RUNNINGHUB_BACKUP_KEEP_COUNT=1" in service
     assert 'BACKUP_KEEP_COUNT="${RUNNINGHUB_BACKUP_KEEP_COUNT:-1}"' in backup
     assert "^runninghub-video-[0-9]{8}T[0-9]{6}Z\\.tar\\.gz$" in backup
@@ -402,6 +411,47 @@ def test_backup_timer_and_restore_confirmation_are_present():
     assert '"$CONFIRM" != "--confirm"' in restore
     assert "runninghub-video-media.service" in restore
     assert "runninghub-video-asr.service" not in restore
+
+
+@pytest.mark.parametrize(
+    ("previous", "current", "expected"),
+    [
+        ("2026-08-31", "2026-09-01", 1),
+        ("2026-08-31", "2026-09-02", 1),
+        ("2026-08-31", "2026-09-03", 0),
+        ("2026-01-31", "2026-02-02", 1),
+        ("2026-01-31", "2026-02-03", 0),
+        ("2028-02-28", "2028-03-01", 1),
+        ("2028-02-28", "2028-03-02", 0),
+    ],
+)
+def test_backup_schedule_uses_three_calendar_days(previous, current, expected):
+    bash = shutil.which("bash")
+    if bash is None and os.name == "nt":
+        candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/bin/bash.exe"
+        if candidate.is_file():
+            bash = str(candidate)
+    if bash is None:
+        pytest.skip("bash is required to validate the backup interval gate")
+
+    service = (PROJECT_ROOT / "deploy/systemd/runninghub-video-backup.service").read_text(encoding="utf-8")
+    condition = next(line.split("=", 1)[1] for line in service.splitlines() if line.startswith("ExecCondition="))
+    command = shlex.split(condition)
+    assert command[:2] == ["/bin/bash", "-c"]
+    script = command[2].replace("$$", "$").replace("%%", "%")
+    marker = "/var/lib/runninghub-video-backup/last-scheduled-run"
+    # Substitute only the marker and clock; execute the actual GNU date gate.
+    script = script.replace(f"test ! -e {marker}", "false")
+    script = script.replace("$(date +%s)", f'$(date -d "{current} 03:30:00" +%s)')
+    script = script.replace(f"$(date -r {marker} +%F)", previous)
+    result = subprocess.run(
+        [bash, "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TZ": "UTC"},
+        creationflags=hidden_creation_flags(),
+    )
+    assert result.returncode == expected, result.stderr
 
 
 def test_backup_rotate_only_keeps_latest_managed_archives_and_unrelated_files(tmp_path):

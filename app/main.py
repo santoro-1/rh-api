@@ -30,10 +30,13 @@ from app.routes import (
     workbench_ltx,
     workbench_h3,
     multi_camera,
+    workbench_device_auth,
+    workbench_device_admin,
 )
 from app.services.deployment_drain import is_deployment_draining
 from app.services.logging_config import configure_logging, log_event
 from app.services.multi_camera_access import bootstrap_multi_camera_access
+from app.services.device_auth.errors import DeviceAuthError
 
 
 logger = logging.getLogger(__name__)
@@ -123,6 +126,13 @@ def create_app() -> FastAPI:
     app.include_router(workbench_ltx.router)
     app.include_router(workbench_h3.router)
     app.include_router(multi_camera.router)
+    app.include_router(workbench_device_auth.router)
+    app.include_router(workbench_device_admin.router)
+
+    @app.exception_handler(DeviceAuthError)
+    async def device_auth_error_handler(request: Request, exc: DeviceAuthError):
+        return JSONResponse({"detail": exc.message, "code": exc.code}, status_code=exc.status_code,
+                            headers={"Cache-Control": "no-store"})
 
     @app.get("/healthz", include_in_schema=False)
     def healthcheck():
