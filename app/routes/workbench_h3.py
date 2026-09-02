@@ -26,9 +26,14 @@ from app.services.h3_workbench import (
     h3_audio_sources_payload,
     h3_batch_payload,
     h3_segment_video_delivery,
+    refresh_h3_segment_video_delivery,
     prepare_h3_workbench_batch,
     prepare_h3_segment_regeneration,
     prepare_h3_segment_retry,
+)
+from app.services.h3.delivery import (
+    resolve_h3_provider_video_ips,
+    validate_h3_provider_video_url,
 )
 from app.services.device_auth.admission import workbench_user, request_identity
 from app.services.device_auth.h3_queue_recovery import (
@@ -41,6 +46,20 @@ router = APIRouter(tags=["workbench-h3"])
 
 
 def _stream_h3_provider_video(url: str, request: Request) -> StreamingResponse:
+    settings = get_settings()
+    approved_ips: tuple[str, ...] = ()
+    try:
+        url = validate_h3_provider_video_url(
+            url,
+            allowed_hosts=settings.h3_provider_allowed_hosts,
+            resolve_dns=settings.app_env != "test",
+        )
+        if settings.app_env != "test":
+            approved_ips = resolve_h3_provider_video_ips(url)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502, detail="RunningHub H3 视频地址未通过安全校验"
+        ) from exc
     headers = {"Accept": "video/mp4,*/*"}
     range_header = str(request.headers.get("range") or "").strip()
     if range_header:
@@ -65,6 +84,19 @@ def _stream_h3_provider_video(url: str, request: Request) -> StreamingResponse:
         status_code = 404 if upstream.status_code in {403, 404} else 502
         upstream.close()
         raise HTTPException(status_code=status_code, detail="H3 远端视频暂不可用")
+    if approved_ips:
+        connection = getattr(upstream.raw, "_connection", None)
+        sock = getattr(connection, "sock", None)
+        try:
+            peer_ip = str(sock.getpeername()[0]) if sock is not None else ""
+        except OSError:
+            peer_ip = ""
+        if peer_ip not in approved_ips:
+            upstream.close()
+            raise HTTPException(
+                status_code=502,
+                detail="RunningHub H3 视频实际目标未通过安全校验",
+            )
 
     response_headers = {"Cache-Control": "private, no-store"}
     for source, target in (
@@ -419,6 +451,29 @@ def download_h3_segment_video(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="H3 标准化分段文件不存在")
     return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+@router.post("/api/workbench/h3-segments/{segment_id}/delivery/refresh")
+def refresh_h3_segment_delivery(
+    segment_id: str,
+    request: Request,
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
+    segment = db.scalar(
+        select(GenerationSegment).where(GenerationSegment.id == segment_id)
+    )
+    if segment is None or segment.batch_item.batch.user_id != user.id:
+        raise HTTPException(status_code=404, detail="H3 分段不存在")
+    try:
+        return {
+            "video_delivery": refresh_h3_segment_video_delivery(
+                db, user, segment, settings=get_settings()
+            )
+        }
+    except (H3WorkbenchError, ValueError) as exc:
+        raise _service_error(exc) from exc
 
 
 @router.get("/api/workbench/h3-items/{item_id}/raw-cues")

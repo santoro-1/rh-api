@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import difflib
 import hashlib
@@ -866,6 +866,7 @@ def _request_dedicated_subtitles(
     client: ArkClient,
     *,
     original_script: str,
+    deadline_monotonic: float | None = None,
 ) -> tuple[BranchResult, str | None, int]:
     """Make one provider attempt, then deterministically segment on any failure."""
 
@@ -878,6 +879,7 @@ def _request_dedicated_subtitles(
             temperature=0.0,
             max_tokens=min(4096, max(768, len(original_script) * 3 + 256)),
             max_attempts=1,
+            deadline_monotonic=deadline_monotonic,
         )
         provider_attempts = 1
         content, request_id = subtitle_provider_text(response)
@@ -1090,6 +1092,7 @@ def _apply_title(record: ContentAnalysisCache, result: BranchResult) -> None:
 
 def _serialize(record: ContentAnalysisCache, *, cache_hit: bool) -> dict[str, Any]:
     return {
+        "cache_id": record.id,
         "schema_version": record.schema_version,
         "prompt_version": record.prompt_version,
         "content_planning_prompt_version": CONTENT_PLANNING_PROMPT_VERSION,
@@ -1173,10 +1176,17 @@ def analyze_content(
     visual_context_payload: Mapping[str, Any] | None = None,
     client_factory: Callable[[ArkConfig], ArkClient] | None = None,
     limiter: ArkConcurrencyLimiter | None = None,
+    total_budget_seconds: float | None = None,
+    skip_legacy_limiter: bool = False,
 ) -> dict[str, Any]:
     """Analyze once, salvage valid branches, and never overwrite prior success."""
 
     settings = get_settings()
+    resolved_budget_seconds = min(
+        float(settings.ark_analysis_total_timeout_seconds),
+        float(total_budget_seconds or settings.ark_analysis_total_timeout_seconds),
+    )
+    deadline_monotonic = time.monotonic() + max(0.001, resolved_budget_seconds)
     resolved_client_factory = client_factory or ark_client_from_config
     resolved_limiter = limiter or _ARK_LIMITER
     if not isinstance(original_script, str) or not original_script:
@@ -1265,9 +1275,17 @@ def analyze_content(
         )
         try:
             client = resolved_client_factory(config)
-            with resolved_limiter.slot(
-                settings.ark_queue_wait_timeout_seconds
-            ) as waited:
+            slot_context = (
+                nullcontext(0.0)
+                if skip_legacy_limiter
+                else resolved_limiter.slot(
+                    min(
+                        float(settings.ark_queue_wait_timeout_seconds),
+                        max(0.001, deadline_monotonic - time.monotonic()),
+                    )
+                )
+            )
+            with slot_context as waited:
                 queue_wait_seconds = waited
                 if planning_needed:
                     try:
@@ -1282,6 +1300,8 @@ def analyze_content(
                                 original_script,
                                 visual_anchor_count=len(visual_context.anchors),
                             ),
+                            max_attempts=settings.ark_planning_max_attempts,
+                            deadline_monotonic=deadline_monotonic,
                         )
                     except ArkAPIError as exc:
                         provider_attempts += exc.attempts
@@ -1307,6 +1327,7 @@ def analyze_content(
                     ) = _request_dedicated_subtitles(
                         client,
                         original_script=original_script,
+                        deadline_monotonic=deadline_monotonic,
                     )
                     provider_attempts += subtitle_provider_attempts
                     if request_id is None:

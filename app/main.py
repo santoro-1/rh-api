@@ -34,6 +34,9 @@ from app.routes import (
     workbench_device_admin,
 )
 from app.services.deployment_drain import is_deployment_draining
+from app.services.ark_request_manager import ArkRequestManager
+from app.services.ark_operation_ledger import expire_stale_ark_operations
+from app.services.content_analysis.ark import close_ark_sessions
 from app.services.logging_config import configure_logging, log_event
 from app.services.multi_camera_access import bootstrap_multi_camera_access
 from app.services.device_auth.errors import DeviceAuthError
@@ -60,7 +63,25 @@ def create_app() -> FastAPI:
         settings.runtime_dir.mkdir(parents=True, exist_ok=True)
         with SessionLocal() as db:
             bootstrap_multi_camera_access(db)
-        yield
+            expire_stale_ark_operations(db, stale_seconds=0)
+        ark_request_manager = (
+            ArkRequestManager(
+                max_concurrency=settings.ark_max_concurrency,
+                queue_max=settings.ark_queue_max,
+                circuit_failure_threshold=(
+                    3 if settings.ark_circuit_breaker_enabled else 10**9
+                ),
+            )
+            if settings.ark_request_manager_enabled
+            else None
+        )
+        app.state.ark_request_manager = ark_request_manager
+        try:
+            yield
+        finally:
+            if ark_request_manager is not None:
+                ark_request_manager.shutdown()
+            close_ark_sessions()
 
     app = FastAPI(
         title="数字人视频生成中转站",
@@ -85,6 +106,7 @@ def create_app() -> FastAPI:
         name="static",
     )
     app.state.rate_limits = defaultdict(deque)
+    app.state.ark_request_manager = None
 
     @app.middleware("http")
     async def deployment_drain_middleware(request: Request, call_next):
@@ -143,10 +165,27 @@ def create_app() -> FastAPI:
             return JSONResponse({"status": "unhealthy"}, status_code=503)
         return {"status": "ok"}
 
+    @app.get("/healthz/ark", include_in_schema=False)
+    def ark_healthcheck():
+        manager = getattr(app.state, "ark_request_manager", None)
+        if manager is None:
+            return {
+                "schema": "runninghub.ark-request-manager-health.v1",
+                "enabled": False,
+                "hard_limit": settings.ark_max_concurrency,
+            }
+        return {"enabled": True, **manager.diagnostics()}
+
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
         if request.url.path.startswith("/api/"):
-            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+            payload = {"detail": exc.detail}
+            ark_code = str((exc.headers or {}).get("X-Ark-Error-Code") or "")
+            if ark_code:
+                payload["code"] = ark_code
+            return JSONResponse(
+                payload, status_code=exc.status_code, headers=exc.headers
+            )
         from fastapi.exception_handlers import http_exception_handler
 
         return await http_exception_handler(request, exc)

@@ -352,6 +352,9 @@ def test_nginx_template_supports_current_upload_limit_and_proxy_headers():
     assert "proxy_pass http://127.0.0.1:18083;" in config
     assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in config
     assert "Content-Security-Policy" in config
+    assert "location ~ ^/api/workbench/h3-segments/[^/]+/video$" in config
+    assert "proxy_buffering off;" in config
+    assert "proxy_max_temp_file_size 0;" in config
 
 
 def test_documentation_has_one_current_developer_entrypoint():

@@ -44,8 +44,17 @@ class FakeSession:
         self.headers: dict[str, str] = {}
         self.calls: list[dict[str, Any]] = []
 
-    def post(self, url: str, *, json: dict[str, Any], timeout: int) -> FakeResponse:
-        self.calls.append({"url": url, "json": json, "timeout": timeout})
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: tuple[float, float],
+    ) -> FakeResponse:
+        self.calls.append(
+            {"url": url, "json": json, "headers": headers, "timeout": timeout}
+        )
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -235,7 +244,7 @@ def test_ark_client_sends_openai_compatible_request() -> None:
     )
 
     assert result["choices"][0]["message"]["content"] == "{}"
-    assert session.headers["Authorization"] == "Bearer ark-client-secret"
+    assert "Authorization" not in session.headers
     assert session.calls == [
         {
             "url": f"{ARK_DEFAULT_BASE_URL}/chat/completions",
@@ -249,7 +258,11 @@ def test_ark_client_sends_openai_compatible_request() -> None:
                 "response_format": {"type": "json_object"},
                 "max_tokens": 2048,
             },
-            "timeout": 25,
+            "headers": {
+                "Authorization": "Bearer ark-client-secret",
+                "Content-Type": "application/json",
+            },
+            "timeout": (10.0, 25.0),
         }
     ]
 
@@ -271,6 +284,7 @@ def test_ark_client_retries_timeout_429_and_5xx_then_succeeds() -> None:
         max_retries=3,
         session=session,
         sleep=sleeps.append,
+        random_uniform=lambda _low, high: high,
     )
     assert client.create_chat_completion(
         messages=[{"role": "user", "content": "private script"}]
@@ -308,7 +322,7 @@ def test_ark_client_failure_is_structured_and_does_not_leak_bodies() -> None:
         )
     error = captured.value
     assert error.diagnostics == {
-        "code": "ARK_HTTP_ERROR",
+        "code": "ARK_UPSTREAM_TRANSIENT",
         "status_code": 500,
         "retryable": True,
         "request_id": "safe-request-id",
@@ -388,8 +402,11 @@ def test_ark_client_can_be_built_from_encrypted_user_config() -> None:
         assert client.create_chat_completion(
             messages=[{"role": "user", "content": "script"}]
         ) == {"ok": True}
-    assert session.headers["Authorization"] == "Bearer encrypted-client-key"
-    assert session.calls[0]["timeout"] == 35
+    assert "Authorization" not in session.headers
+    assert session.calls[0]["headers"]["Authorization"] == (
+        "Bearer encrypted-client-key"
+    )
+    assert session.calls[0]["timeout"] == (10.0, 35.0)
 
 
 def test_deleting_user_cascades_to_ark_config() -> None:

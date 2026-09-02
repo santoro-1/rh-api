@@ -247,7 +247,7 @@ def test_h3_direct_delivery_persists_url_without_server_mp4(
         assert task.result_path is None
         metadata = json.loads(task.output_metadata or "{}")
         assert metadata["output_contract_version"] == (
-            "h3.output.runninghub-direct.v1"
+            "h3.output.runninghub-direct.v2"
         )
         assert metadata["delivery"]["mode"] == "runninghub_direct"
         assert metadata["delivery"]["download_url"] == (

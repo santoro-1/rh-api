@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import nullcontext
 from collections.abc import Mapping
 from textwrap import dedent
 from typing import Any, Callable
@@ -123,6 +124,7 @@ def _serialize(record: VisualAnalysisCache, *, cache_hit: bool) -> dict[str, Any
     result = json.loads(record.result_json)
     return {
         **result,
+        "cache_id": record.id,
         "analysis_status": "SUCCESS",
         "model": record.model,
         "prompt_version": record.prompt_version,
@@ -172,6 +174,8 @@ def analyze_visual_context(
     force_refresh: bool = False,
     client_factory: Callable[[ArkConfig], ArkClient] | None = None,
     limiter: ArkConcurrencyLimiter | None = None,
+    total_budget_seconds: float | None = None,
+    skip_legacy_limiter: bool = False,
 ) -> dict[str, Any]:
     """Validate all local facts, call Ark once, then strictly verify its decisions."""
 
@@ -179,7 +183,8 @@ def analyze_visual_context(
         request = parse_visual_analysis_request(payload)
     except (TypeError, VisualAnalysisContractError) as exc:
         raise VisualAnalysisInputError("视觉分析请求不符合 v1 契约") from exc
-    max_chars = get_settings().content_analysis_max_script_chars
+    settings = get_settings()
+    max_chars = settings.content_analysis_max_script_chars
     if len(request.original_script) > max_chars:
         raise VisualAnalysisInputError(f"原始脚本不能超过 {max_chars} 个字符")
 
@@ -199,18 +204,33 @@ def analyze_visual_context(
         return _serialize(existing, cache_hit=True)
 
     started = time.perf_counter()
+    resolved_budget_seconds = min(
+        float(settings.ark_analysis_total_timeout_seconds),
+        float(total_budget_seconds or settings.ark_analysis_total_timeout_seconds),
+    )
+    deadline_monotonic = time.monotonic() + max(0.001, resolved_budget_seconds)
     request_id: str | None = None
     attempts = 0
     try:
         client = (client_factory or ark_client_from_config)(config)
-        with (limiter or _ARK_LIMITER).slot(
-            get_settings().ark_queue_wait_timeout_seconds
-        ):
+        slot_context = (
+            nullcontext(0.0)
+            if skip_legacy_limiter
+            else (limiter or _ARK_LIMITER).slot(
+                min(
+                    float(settings.ark_queue_wait_timeout_seconds),
+                    max(0.001, deadline_monotonic - time.monotonic()),
+                )
+            )
+        )
+        with slot_context:
             response = client.create_chat_completion(
                 messages=build_ark_messages(request),
                 response_format=ark_response_format(),
                 temperature=0.0,
                 max_tokens=min(8192, max(1024, len(request.candidates) * 180)),
+                max_attempts=settings.ark_planning_max_attempts,
+                deadline_monotonic=deadline_monotonic,
             )
         content, request_id = _provider_content(response)
         provider_payload = _decode_provider_json(content)

@@ -169,6 +169,9 @@ class User(Base):
     visual_analysis_caches: Mapped[list["VisualAnalysisCache"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    ark_analysis_operations: Mapped[list["ArkAnalysisOperation"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     minimax_voices: Mapped[list["MiniMaxVoiceAsset"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
@@ -446,6 +449,55 @@ class VisualAnalysisCache(Base):
             "prompt_version",
             "model",
             name="uq_visual_analysis_cache_key",
+        ),
+    )
+
+
+class ArkAnalysisOperation(Base):
+    """Durable idempotency ledger for paid Ark analysis operations."""
+
+    __tablename__ = "ark_analysis_operations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    business_key_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="QUEUED")
+    cache_kind: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    cache_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_summary: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    user: Mapped[User] = relationship(back_populates="ark_analysis_operations")
+
+    __table_args__ = (
+        Index(
+            "ix_ark_analysis_operations_user_business",
+            "user_id",
+            "business_key_sha256",
+        ),
+        Index("ix_ark_analysis_operations_status_updated", "status", "updated_at"),
+        CheckConstraint(
+            "kind IN ('content','visual')",
+            name="ck_ark_analysis_operation_kind",
+        ),
+        CheckConstraint(
+            "status IN ('QUEUED','RUNNING','SUCCEEDED','PARTIAL','FAILED','EXPIRED')",
+            name="ck_ark_analysis_operation_status",
         ),
     )
 

@@ -425,8 +425,10 @@ python -m app.workers.task_worker
 - RunningHub：基础地址、轮询、超时以及自动重试次数与等待。
 - 长音频：`LONG_AUDIO_ALIGNMENT_PROVIDER`、`ASR_BASE_URL`、ASR 超时。
 - 媒体节点：`MEDIA_PROCESSING_MODE`、`MEDIA_WORKER_TOKEN`、租约和归档上限。
-- 豆包内容分析：`ARK_MAX_CONCURRENCY` 默认 10、`ARK_QUEUE_WAIT_TIMEOUT_SECONDS`
-  默认 300 秒、`CONTENT_ANALYSIS_MAX_SCRIPT_CHARS` 默认 50000。
+- 豆包内容分析：`ARK_REQUEST_MANAGER_ENABLED` 默认关闭用于灰度；开启后
+  `ARK_MAX_CONCURRENCY` 默认且硬上限 10、`ARK_QUEUE_MAX` 默认 200、
+  `ARK_QUEUE_WAIT_TIMEOUT_SECONDS` 默认 120 秒、`ARK_ANALYSIS_TOTAL_TIMEOUT_SECONDS`
+  默认 540 秒、`ARK_CONNECT_TIMEOUT_SECONDS` 默认 10 秒、规划最多 2 次尝试。
 
 用户级 RunningHub、MiniMax、豆包 Ark 和工作流 ID 通过管理员页面维护，不写入仓库环境模板。
 RunningHub 配置分为三层：`system_workflow_configs` 按工作流保存一次 Workflow ID / AI App ID、
@@ -437,7 +439,8 @@ RunningHub 配置分为三层：`system_workflow_configs` 按工作流保存一�
 
 ## 7. 数据库与迁移
 
-当前迁移头为 `0048_legacy_task_runninghub_pool`。`0048` 为独立数字人任务增加可空的
+当前迁移头为 `0051_ark_analysis_operations`。`0051` 只新增豆包分析操作幂等账本；
+`0050` 增加设备工作准入记录，`0049` 增加工作台设备授权实体。`0048` 为独立数字人任务增加可空的
 RunningHub 候选账号快照；`0047` 为老网页 H3 批次增加可空的人工总体 Prompt
 冻结字段；留空继续编译现有模板，填写后用独立版本标识覆盖节点 83 的完整 Prompt，并进入费用
 与幂等摘要。`0031` 新增双池基础实体、执行模式与
@@ -677,9 +680,15 @@ ASR，也不应修改其他项目端口、Nginx 或证书。完整预检、验�
 - 迁移 `0024_shared_minimax_voices` 不改变表结构或唯一约束，只按相同
   `credential_fingerprint` 为既有用户补齐自定义音色副本并同步激活状态。迁移不得通过
   重建 `minimax_configs` 取消绑定唯一约束，否则 SQLite 外键级联可能删除已有音色。
-- 单 Web 进程使用统一有界信号量，默认最多同时发出 10 个 Ark 请求；其余请求等待，默认
-  最长 300 秒。当前生产结构只有一个 Web 进程；若将来增加 Web 进程或多台主机，必须先
-  把进程内信号量替换为数据库或 Redis 共享租约，不能简单把进程数相乘。
+- 灰度开关开启后，内容分析与语义视觉统一提交到 `ArkRequestManager` 专用公平队列，真实
+  活动上限硬限制为 10，等待队列默认 200，排队预算 120 秒、服务器总预算 540 秒；异步路由
+  等待专用 Future，不使用 FastAPI 通用线程池承载长排队。旧开关关闭时仍保留原信号量路径。
+- 请求使用 `analysis_operation_id`、业务摘要和 `0051_ark_analysis_operations` 账本合并进行中
+  操作；重启后的未完成记录标记 `EXPIRED`，不会自动重放可能已经计费的请求。完成结果只关联
+  现有缓存，不保存完整脚本或模型原始响应。
+- Ark 传输按工作线程和配置指纹复用 Session，连接/读取 timeout 分离，429/临时 5xx 遵循
+  `Retry-After` 或 full jitter；连续临时错误触发按配置指纹熔断。`/healthz/ark` 暴露队列、
+  p95/p99、去重与熔断状态。当前只支持一个 Web 进程；开启管理器且检测到多 worker 会拒绝启动。
 - 429、超时、连接错误和明确 5xx 继续使用模块 3 的有限退避。分析失败不调用 MiniMax、
   RunningHub 或剪映，不改变基础视频状态。
 - 真实 Ark 验收发现组合任务会让 Lite 模型遗漏必要字幕断点。Prompt v20 因此把字幕从

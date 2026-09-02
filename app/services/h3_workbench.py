@@ -945,6 +945,71 @@ def h3_segment_video_delivery(
     }
 
 
+def refresh_h3_segment_video_delivery(
+    db: Session,
+    user: User,
+    segment: GenerationSegment,
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
+    """Refresh one signed provider URL without submitting a new paid task."""
+
+    task = segment.generation_task
+    current = h3_segment_video_delivery(segment)
+    if (
+        task is None
+        or task.user_id != user.id
+        or not task.runninghub_task_id
+        or current is None
+        or current.get("mode") != "runninghub_direct"
+    ):
+        raise H3WorkbenchError("当前 H3 分段没有可刷新的直达结果")
+
+    from app.services.h3.delivery import build_h3_direct_output_metadata
+    from app.services.runninghub import RunningHubClient, RunningHubError
+    from app.services.runninghub_attempts import task_execution_account_for_remote
+    from app.services.security import decrypt_secret
+    from app.workflows import get_workflow
+
+    account = task_execution_account_for_remote(task) or user.runninghub_config
+    if account is None or not account.api_key_encrypted:
+        raise H3WorkbenchError("H3 执行账号已不可用，无法刷新交付地址")
+    workflow_config = get_system_workflow_config(db, H3_WORKFLOW)
+    workflow = get_workflow(H3_WORKFLOW)
+    try:
+        client = RunningHubClient(
+            api_key=decrypt_secret(account.api_key_encrypted),
+            base_url=account.base_url,
+            ai_app_id=workflow_config.ai_app_id,
+            submission_type=workflow.submission_type,
+        )
+        result = client.query_task(str(task.runninghub_task_id))
+    except (RunningHubError, ValueError) as exc:
+        raise H3WorkbenchError("RunningHub H3 交付地址刷新失败，请稍后重试") from exc
+    if str(result.get("status") or "").upper() != "SUCCESS":
+        raise H3WorkbenchError("RunningHub H3 结果当前不可下载，请稍后重试")
+    output = workflow.select_output(task, result)
+    if output is None:
+        raise H3WorkbenchError("RunningHub H3 结果缺少可下载视频")
+    task.output_metadata = json.dumps(
+        build_h3_direct_output_metadata(
+            provider_task_id=task.runninghub_task_id,
+            provider_url=output.url,
+            output_type=output.extension,
+            source_metadata=output.metadata,
+            received_at=datetime.now(timezone.utc),
+            allowed_hosts=settings.h3_provider_allowed_hosts,
+            resolve_dns=settings.app_env != "test",
+        ),
+        ensure_ascii=False,
+    )
+    db.commit()
+    refreshed = h3_segment_video_delivery(segment)
+    if refreshed is None:
+        raise H3WorkbenchError("RunningHub H3 交付地址刷新后仍不可用")
+    return refreshed
+
+
 def _h3_segment_has_current_result(segment: GenerationSegment) -> bool:
     return h3_segment_video_delivery(segment) is not None
 

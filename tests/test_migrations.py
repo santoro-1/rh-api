@@ -73,7 +73,7 @@ def test_h3_remote_asr_migration_preserves_existing_head_trim_job() -> None:
                 "AND name='h3_head_trim_jobs'"
             ).fetchone()
         connection.close()
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert migrated[:5] == (
             1,
             "h3-task",
@@ -124,7 +124,7 @@ def test_h3_manual_prompt_override_migration_adds_nullable_frozen_field() -> Non
             }
         connection.close()
 
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert columns["prompt_override"] == 0
     finally:
         database.unlink(missing_ok=True)
@@ -149,7 +149,7 @@ def test_legacy_task_pool_migration_adds_nullable_candidate_snapshot() -> None:
             }
         connection.close()
 
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert columns["runninghub_execution_account_ids_json"] == 0
 
         _run_alembic(
@@ -188,7 +188,7 @@ def test_h3_motion_reference_pool_migration_is_reversible() -> None:
                 )
             }
         connection.close()
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert {
             "motion_reference_index",
             "motion_reference_path",
@@ -263,7 +263,7 @@ def test_h3_access_password_migration_preserves_existing_capability() -> None:
             ).fetchall()
         connection.close()
 
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert "access_password_encrypted" in columns
         assert row == ("workflow", None)
         assert foreign_key_errors == []
@@ -347,7 +347,7 @@ def test_h3_user_access_migration_backfills_existing_h3_members() -> None:
             ).fetchall()
         connection.close()
 
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert grants == [(1, 1), (2, 0)]
         assert foreign_key_errors == []
     finally:
@@ -491,7 +491,7 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('h3_remote_asr_jobs')"
             )
         }
-    assert revision == "0050_device_work_admission"
+    assert revision == "0051_ark_analysis_operations"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -744,7 +744,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0050_device_work_admission"
+        assert version == "0051_ark_analysis_operations"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -806,7 +806,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -979,7 +979,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -1116,7 +1116,7 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
             ).fetchall()
         connection.close()
 
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert grant == (7, 1, 1)
         assert batch_snapshot == (None, None)
         assert foreign_key_errors == []
@@ -1209,7 +1209,7 @@ def test_item_execution_pool_migration_copies_legacy_batch_snapshots():
             ).fetchone()
         connection.close()
 
-        assert revision == "0050_device_work_admission"
+        assert revision == "0051_ark_analysis_operations"
         assert snapshots == ("[3,5]", "[7]")
     finally:
         database.unlink(missing_ok=True)
@@ -1287,6 +1287,46 @@ def test_multi_camera_migration_bootstraps_only_exact_active_accounts(tmp_path):
         ).fetchall()
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert revision == "0050_device_work_admission"
+    assert revision == "0051_ark_analysis_operations"
     assert grants == [(1, 1), (2, 1)]
     assert foreign_key_errors == []
+
+
+def test_ark_operation_ledger_migration_is_add_only_and_reversible(tmp_path):
+    database = tmp_path / "ark-operation-ledger.db"
+    _run_alembic(database, "0050_device_work_admission")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO users "
+            "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+            "VALUES (1, 'ledger-user', 'hash', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.commit()
+
+    _run_alembic(database, "head")
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO ark_analysis_operations "
+            "(operation_id, user_id, kind, business_key_sha256, request_sha256, status) "
+            "VALUES ('operation-1', 1, 'content', ?, ?, 'QUEUED')",
+            ("a" * 64, "b" * 64),
+        )
+        connection.commit()
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+    assert revision == "0051_ark_analysis_operations"
+    assert foreign_key_errors == []
+
+    _run_alembic(database, "0050_device_work_admission", command="downgrade")
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        user = connection.execute("SELECT username FROM users WHERE id = 1").fetchone()
+    assert "ark_analysis_operations" not in tables
+    assert user == ("ledger-user",)

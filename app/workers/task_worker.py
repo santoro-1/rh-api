@@ -815,6 +815,8 @@ def _complete_h3_direct_result(
         output_type=output.extension,
         source_metadata=output.metadata,
         received_at=completed_at,
+        allowed_hosts=get_settings().h3_provider_allowed_hosts,
+        resolve_dns=get_settings().app_env != "test",
     )
     if needs_anchor:
         anchor = (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -10,12 +11,14 @@ import uuid
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models import (
+    ArkConfig,
     AudioTaskStatus,
     BATCH_SOURCE_NEW_WORKBENCH,
     BATCH_EXECUTION_MODE_DUAL_POOL_V1,
@@ -30,6 +33,19 @@ from app.models import (
 )
 from app.routes.dependencies import check_rate_limit
 from app.services.audio import ensure_generated_speech_mastered
+from app.services.ark_request_manager import (
+    ArkRequestManager,
+    ArkRequestManagerError,
+)
+from app.services.ark_operation_ledger import (
+    ArkOperationConflict,
+    claim_ark_operation,
+    mark_ark_operation_failed,
+    mark_ark_operation_running,
+    mark_ark_operation_succeeded,
+    replay_ark_operation_result,
+    release_unadmitted_ark_operation,
+)
 from app.services.audio_review import (
     AudioReviewError,
     approve_item_audio,
@@ -733,8 +749,129 @@ def workbench_tasks(
     return {"schema": "runninghub.workbench-inbox.v1", "tasks": tasks[:limit]}
 
 
+def _analysis_operation_id(payload: dict[str, Any]) -> str:
+    value = str(payload.get("analysis_operation_id") or "").strip()
+    if not value:
+        return str(uuid.uuid4())
+    if len(value) > 64 or not all(
+        character.isalnum() or character in {"-", "_", ".", ":"}
+        for character in value
+    ):
+        raise HTTPException(status_code=400, detail="analysis_operation_id 格式不合法")
+    return value
+
+
+def _analysis_request_budget_seconds(request: Request) -> float:
+    maximum = float(get_settings().ark_analysis_total_timeout_seconds)
+    raw = str(request.headers.get("X-JYD-Request-Budget-Ms") or "").strip()
+    if not raw:
+        return maximum
+    try:
+        milliseconds = int(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail="X-JYD-Request-Budget-Ms 必须是整数"
+        ) from exc
+    if milliseconds <= 0:
+        raise HTTPException(status_code=400, detail="豆包请求预算必须大于 0")
+    return min(maximum, milliseconds / 1000.0)
+
+
+def _ark_circuit_key(db: Session, user_id: int) -> str:
+    config = db.scalar(select(ArkConfig).where(ArkConfig.user_id == user_id))
+    if config is None:
+        return f"user:{user_id}:unconfigured"
+    fingerprint = hashlib.sha256(
+        "\0".join(
+            (
+                str(config.id),
+                str(config.base_url or "").strip().lower(),
+                str(config.model or "").strip(),
+                str(config.api_key_encrypted or ""),
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"ark:{fingerprint}"
+
+
+def _ark_manager_http_error(exc: ArkRequestManagerError) -> HTTPException:
+    headers = {"X-Ark-Error-Code": exc.code}
+    if exc.retry_after_seconds is not None:
+        headers["Retry-After"] = str(exc.retry_after_seconds)
+    return HTTPException(
+        status_code=exc.status_code,
+        detail=str(exc),
+        headers=headers,
+    )
+
+
+def _ark_operation_http_error(exc: ArkOperationConflict) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail=str(exc),
+        headers={"X-Ark-Error-Code": exc.code},
+    )
+
+
+async def _run_ark_operation(
+    request: Request,
+    *,
+    operation_id: str,
+    business_key: str,
+    kind: str,
+    circuit_key: str,
+    runner,
+    total_timeout_seconds: float,
+) -> dict[str, Any]:
+    manager: ArkRequestManager | None = getattr(
+        request.app.state, "ark_request_manager", None
+    )
+    if manager is None:
+        # A negative queue wait is the internal marker for the compatibility
+        # path: the analysis service still owns its legacy semaphore.
+        result = await run_in_threadpool(runner, total_timeout_seconds, -1.0)
+    else:
+        try:
+            future = manager.submit(
+                operation_id=operation_id,
+                business_key=business_key,
+                kind=kind,
+                circuit_key=circuit_key,
+                runner=runner,
+                total_timeout_seconds=total_timeout_seconds,
+                queue_timeout_seconds=min(
+                    float(get_settings().ark_queue_wait_timeout_seconds),
+                    max(0.001, total_timeout_seconds - 0.001),
+                ),
+            )
+            result = await asyncio.wrap_future(future)
+        except ArkRequestManagerError as exc:
+            with SessionLocal() as ledger_db:
+                if exc.code in {
+                    "ARK_QUEUE_FULL",
+                    "ARK_CIRCUIT_OPEN",
+                    "ARK_MANAGER_SHUTTING_DOWN",
+                }:
+                    release_unadmitted_ark_operation(ledger_db, operation_id)
+                else:
+                    mark_ark_operation_failed(
+                        ledger_db,
+                        operation_id,
+                        code=exc.code,
+                        summary=str(exc),
+                    )
+            raise _ark_manager_http_error(exc) from exc
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="豆包分析返回格式错误")
+    return {
+        **result,
+        "analysis_operation_id": operation_id,
+        "request_manager_enabled": manager is not None,
+    }
+
+
 @router.post("/api/workbench/content-analysis")
-def workbench_content_analysis(
+async def workbench_content_analysis(
     request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
@@ -756,14 +893,119 @@ def workbench_content_analysis(
         raise HTTPException(status_code=400, detail="force_refresh 必须是布尔值")
     if visual_context is not None and not isinstance(visual_context, dict):
         raise HTTPException(status_code=400, detail="visual_context 必须是对象")
+    operation_id = _analysis_operation_id(payload)
+    force_refresh_generation = payload.get("force_refresh_generation", 0)
+    if (
+        isinstance(force_refresh_generation, bool)
+        or not isinstance(force_refresh_generation, int)
+        or force_refresh_generation < 0
+    ):
+        raise HTTPException(
+            status_code=400, detail="force_refresh_generation 必须是非负整数"
+        )
+    user_id = int(user.id)
+    visual_digest = hashlib.sha256(
+        json.dumps(
+            visual_context or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    script_digest = hashlib.sha256(original_script.encode("utf-8")).hexdigest()
+    business_key = ":".join(
+        (
+            "content",
+            str(user_id),
+            script_digest,
+            visual_digest,
+            str(force_refresh_generation),
+            operation_id if force_refresh else "shared",
+        )
+    )
+    circuit_key = _ark_circuit_key(db, user_id)
+    total_budget = _analysis_request_budget_seconds(request)
     try:
-        kwargs: dict[str, Any] = {
-            "original_script": original_script,
-            "force_refresh": force_refresh,
+        operation = claim_ark_operation(
+            db,
+            operation_id=operation_id,
+            user_id=user_id,
+            kind="content",
+            business_key=business_key,
+            request_sha256=hashlib.sha256(
+                f"{script_digest}:{visual_digest}".encode("utf-8")
+            ).hexdigest(),
+        )
+    except ArkOperationConflict as exc:
+        raise _ark_operation_http_error(exc) from exc
+    replay = replay_ark_operation_result(db, operation)
+    if operation.status in {"SUCCEEDED", "PARTIAL"}:
+        if replay is None:
+            raise _ark_operation_http_error(
+                ArkOperationConflict(
+                    "ARK_OPERATION_RESULT_MISSING",
+                    "操作账本存在但缓存结果缺失，已阻止自动重放",
+                )
+            )
+        return {
+            **replay,
+            "analysis_operation_id": operation_id,
+            "request_manager_enabled": getattr(
+                request.app.state, "ark_request_manager", None
+            )
+            is not None,
+            "operation_replayed": True,
         }
-        if visual_context is not None:
-            kwargs["visual_context_payload"] = visual_context
-        return analyze_content(db, user, **kwargs)
+
+    def run_analysis(remaining_seconds: float, queue_wait_seconds: float):
+        with SessionLocal() as worker_db:
+            worker_user = worker_db.get(User, user_id)
+            if worker_user is None:
+                raise ContentAnalysisUnavailable("当前账号不存在或已停用")
+            mark_ark_operation_running(worker_db, operation_id)
+            kwargs: dict[str, Any] = {
+                "original_script": original_script,
+                "force_refresh": force_refresh,
+            }
+            if visual_context is not None:
+                kwargs["visual_context_payload"] = visual_context
+            if queue_wait_seconds >= 0:
+                kwargs.update(
+                    total_budget_seconds=remaining_seconds,
+                    skip_legacy_limiter=True,
+                )
+            try:
+                result = analyze_content(worker_db, worker_user, **kwargs)
+            except BaseException as exc:
+                mark_ark_operation_failed(
+                    worker_db,
+                    operation_id,
+                    code=getattr(exc, "code", type(exc).__name__),
+                    summary=str(exc) or "豆包内容分析执行失败",
+                )
+                raise
+            mark_ark_operation_succeeded(
+                worker_db,
+                operation_id,
+                cache_kind="content",
+                cache_id=result.get("cache_id"),
+                status=(
+                    "PARTIAL"
+                    if str(result.get("overall_status") or "").upper() == "PARTIAL"
+                    else "SUCCEEDED"
+                ),
+            )
+            return result
+    try:
+        return await _run_ark_operation(
+            request,
+            operation_id=operation_id,
+            business_key=business_key,
+            kind="content",
+            circuit_key=circuit_key,
+            runner=run_analysis,
+            total_timeout_seconds=total_budget,
+        )
     except ContentAnalysisInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ContentAnalysisUnavailable as exc:
@@ -771,7 +1013,7 @@ def workbench_content_analysis(
 
 
 @router.post("/api/workbench/visual-analysis")
-def workbench_visual_analysis(
+async def workbench_visual_analysis(
     request: Request,
     payload: dict[str, Any] = Body(...),
     db: Session = Depends(get_db),
@@ -790,14 +1032,132 @@ def workbench_visual_analysis(
     request_payload = {
         key: value
         for key, value in payload.items()
-        if key not in {"access_token", "force_refresh"}
+        if key
+        not in {
+            "access_token",
+            "force_refresh",
+            "analysis_operation_id",
+            "force_refresh_generation",
+        }
     }
+    operation_id = _analysis_operation_id(payload)
+    force_refresh_generation = payload.get("force_refresh_generation", 0)
+    if (
+        isinstance(force_refresh_generation, bool)
+        or not isinstance(force_refresh_generation, int)
+        or force_refresh_generation < 0
+    ):
+        raise HTTPException(
+            status_code=400, detail="force_refresh_generation 必须是非负整数"
+        )
+    user_id = int(user.id)
+    request_digest = hashlib.sha256(
+        json.dumps(
+            request_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    business_key = ":".join(
+        (
+            "visual",
+            str(user_id),
+            request_digest,
+            str(force_refresh_generation),
+            operation_id if force_refresh else "shared",
+        )
+    )
+    circuit_key = _ark_circuit_key(db, user_id)
+    total_budget = _analysis_request_budget_seconds(request)
     try:
-        return analyze_visual_context(
+        operation = claim_ark_operation(
             db,
-            user,
-            payload=request_payload,
-            force_refresh=force_refresh,
+            operation_id=operation_id,
+            user_id=user_id,
+            kind="visual",
+            business_key=business_key,
+            request_sha256=request_digest,
+        )
+    except ArkOperationConflict as exc:
+        raise _ark_operation_http_error(exc) from exc
+    replay = replay_ark_operation_result(db, operation)
+    if operation.status in {"SUCCEEDED", "PARTIAL"}:
+        if replay is None:
+            raise _ark_operation_http_error(
+                ArkOperationConflict(
+                    "ARK_OPERATION_RESULT_MISSING",
+                    "操作账本存在但缓存结果缺失，已阻止自动重放",
+                )
+            )
+        return {
+            **replay,
+            "analysis_operation_id": operation_id,
+            "request_manager_enabled": getattr(
+                request.app.state, "ark_request_manager", None
+            )
+            is not None,
+            "operation_replayed": True,
+        }
+
+    def run_analysis(remaining_seconds: float, queue_wait_seconds: float):
+        with SessionLocal() as worker_db:
+            worker_user = worker_db.get(User, user_id)
+            if worker_user is None:
+                raise VisualAnalysisUnavailable("当前账号不存在或已停用")
+            mark_ark_operation_running(worker_db, operation_id)
+            kwargs: dict[str, Any] = {
+                "payload": request_payload,
+                "force_refresh": force_refresh,
+            }
+            if queue_wait_seconds >= 0:
+                kwargs.update(
+                    total_budget_seconds=remaining_seconds,
+                    skip_legacy_limiter=True,
+                )
+            try:
+                result = analyze_visual_context(worker_db, worker_user, **kwargs)
+            except BaseException as exc:
+                mark_ark_operation_failed(
+                    worker_db,
+                    operation_id,
+                    code=getattr(exc, "code", type(exc).__name__),
+                    summary=str(exc) or "豆包视觉分析执行失败",
+                )
+                raise
+            if str(result.get("analysis_status") or "").upper() == "FAILED":
+                error = result.get("error")
+                mark_ark_operation_failed(
+                    worker_db,
+                    operation_id,
+                    code=(
+                        str(error.get("code") or "VISUAL_ANALYSIS_FAILED")
+                        if isinstance(error, dict)
+                        else "VISUAL_ANALYSIS_FAILED"
+                    ),
+                    summary=(
+                        str(error.get("summary") or "豆包视觉分析失败")
+                        if isinstance(error, dict)
+                        else "豆包视觉分析失败"
+                    ),
+                )
+            else:
+                mark_ark_operation_succeeded(
+                    worker_db,
+                    operation_id,
+                    cache_kind="visual",
+                    cache_id=result.get("cache_id"),
+                )
+            return result
+    try:
+        return await _run_ark_operation(
+            request,
+            operation_id=operation_id,
+            business_key=business_key,
+            kind="visual",
+            circuit_key=circuit_key,
+            runner=run_analysis,
+            total_timeout_seconds=total_budget,
         )
     except VisualAnalysisInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

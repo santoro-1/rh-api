@@ -37,6 +37,33 @@ def test_production_settings_accept_explicit_domain(monkeypatch):
     assert settings.log_retention_days == 7
     assert settings.log_max_bytes == 10 * 1024 * 1024
     assert settings.runninghub_remote_watchdog_seconds == 14400
+    assert settings.ark_max_concurrency == 10
+    assert settings.ark_queue_max == 200
+    assert settings.ark_analysis_total_timeout_seconds == 540
+    assert settings.ark_queue_wait_timeout_seconds == 120
+
+
+def test_ark_hard_limit_cannot_exceed_ten(monkeypatch):
+    _set_valid_production_environment(monkeypatch)
+    monkeypatch.setenv("ARK_MAX_CONCURRENCY", "11")
+    with pytest.raises(ValueError, match="1-10"):
+        Settings.from_environment()
+
+
+def test_process_ark_manager_rejects_multiple_web_workers(monkeypatch):
+    _set_valid_production_environment(monkeypatch)
+    monkeypatch.setenv("ARK_REQUEST_MANAGER_ENABLED", "true")
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with pytest.raises(ValueError, match="单 Web 进程"):
+        Settings.from_environment()
+
+
+def test_ark_queue_budget_must_finish_before_total_budget(monkeypatch):
+    _set_valid_production_environment(monkeypatch)
+    monkeypatch.setenv("ARK_QUEUE_WAIT_TIMEOUT_SECONDS", "540")
+    monkeypatch.setenv("ARK_ANALYSIS_TOTAL_TIMEOUT_SECONDS", "540")
+    with pytest.raises(ValueError, match="排队预算"):
+        Settings.from_environment()
 
 
 def test_default_image_upload_limit_is_200_mb(monkeypatch):

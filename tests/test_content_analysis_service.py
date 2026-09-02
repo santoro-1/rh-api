@@ -771,3 +771,70 @@ def test_workbench_analysis_endpoint_requires_valid_token(client) -> None:
         json={"access_token": "invalid", "original_script": SCRIPT},
     )
     assert response.status_code == 401
+
+
+def test_same_completed_operation_replays_cache_even_when_force_refresh_is_true(
+    client, monkeypatch
+) -> None:
+    _configured_user("analysis-operation-replay")
+    login = client.post(
+        "/api/auth/center/login",
+        json={"username": "analysis-operation-replay", "password": "password123"},
+    )
+    token = login.json()["access_token"]
+    fake = FakeArkClient([_ark_response(_valid_payload())])
+    monkeypatch.setattr(
+        "app.services.content_analysis.analysis.ark_client_from_config",
+        lambda _: fake,
+    )
+    request = {
+        "access_token": token,
+        "original_script": SCRIPT,
+        "force_refresh": True,
+        "analysis_operation_id": "same-paid-operation",
+    }
+
+    first = client.post("/api/workbench/content-analysis", json=request)
+    replay = client.post("/api/workbench/content-analysis", json=request)
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json()["cache_hit"] is True
+    assert replay.json()["operation_replayed"] is True
+    assert len(fake.calls) == 2
+
+
+def test_operation_id_cannot_be_reused_for_different_script(client, monkeypatch) -> None:
+    _configured_user("analysis-operation-conflict")
+    login = client.post(
+        "/api/auth/center/login",
+        json={"username": "analysis-operation-conflict", "password": "password123"},
+    )
+    token = login.json()["access_token"]
+    fake = FakeArkClient([_ark_response(_valid_payload())])
+    monkeypatch.setattr(
+        "app.services.content_analysis.analysis.ark_client_from_config",
+        lambda _: fake,
+    )
+    operation_id = "conflicting-paid-operation"
+    first = client.post(
+        "/api/workbench/content-analysis",
+        json={
+            "access_token": token,
+            "original_script": SCRIPT,
+            "analysis_operation_id": operation_id,
+        },
+    )
+    conflict = client.post(
+        "/api/workbench/content-analysis",
+        json={
+            "access_token": token,
+            "original_script": f"{SCRIPT}不同",
+            "analysis_operation_id": operation_id,
+        },
+    )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "ARK_OPERATION_ID_CONFLICT"
+    assert len(fake.calls) == 2

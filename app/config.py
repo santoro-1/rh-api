@@ -72,6 +72,7 @@ class Settings:
     runninghub_auto_retry_base_delay_seconds: int
     runninghub_dual_pool_enabled: bool
     h3_direct_delivery_enabled: bool
+    h3_provider_allowed_hosts: tuple[str, ...]
     max_image_size_mb: int
     max_audio_size_mb: int
     max_video_size_mb: int
@@ -86,8 +87,15 @@ class Settings:
     staged_asset_retention_hours: int
     minimax_default_base_url: str
     minimax_request_timeout_seconds: int
+    ark_request_manager_enabled: bool
     ark_max_concurrency: int
+    ark_queue_max: int
     ark_queue_wait_timeout_seconds: int
+    ark_analysis_total_timeout_seconds: int
+    ark_connect_timeout_seconds: int
+    ark_planning_max_attempts: int
+    ark_circuit_breaker_enabled: bool
+    ark_limiter_scope: str
     content_analysis_max_script_chars: int
     temporary_voice_retention_hours: int
     long_audio_alignment_provider: str
@@ -193,19 +201,69 @@ class Settings:
             raise ValueError(
                 "RUNNINGHUB_REMOTE_WATCHDOG_SECONDS 必须为 3600-604800"
             )
-        ark_max_concurrency = _as_int("ARK_MAX_CONCURRENCY", 10)
-        if not 1 <= ark_max_concurrency <= 100:
-            raise ValueError("ARK_MAX_CONCURRENCY 必须为 1-100")
-        ark_queue_wait_timeout_seconds = _as_int(
-            "ARK_QUEUE_WAIT_TIMEOUT_SECONDS", 300
+        ark_request_manager_enabled = _as_bool(
+            os.getenv("ARK_REQUEST_MANAGER_ENABLED"), False
         )
-        if not 1 <= ark_queue_wait_timeout_seconds <= 3600:
-            raise ValueError("ARK_QUEUE_WAIT_TIMEOUT_SECONDS 必须为 1-3600")
+        ark_max_concurrency = _as_int("ARK_MAX_CONCURRENCY", 10)
+        if not 1 <= ark_max_concurrency <= 10:
+            raise ValueError("ARK_MAX_CONCURRENCY 必须为 1-10")
+        ark_queue_max = _as_int("ARK_QUEUE_MAX", 200)
+        if not 1 <= ark_queue_max <= 10000:
+            raise ValueError("ARK_QUEUE_MAX 必须为 1-10000")
+        ark_queue_wait_timeout_seconds = _as_int(
+            "ARK_QUEUE_WAIT_TIMEOUT_SECONDS", 120
+        )
+        if not 1 <= ark_queue_wait_timeout_seconds <= 540:
+            raise ValueError("ARK_QUEUE_WAIT_TIMEOUT_SECONDS 必须为 1-540")
+        ark_analysis_total_timeout_seconds = _as_int(
+            "ARK_ANALYSIS_TOTAL_TIMEOUT_SECONDS", 540
+        )
+        if not 60 <= ark_analysis_total_timeout_seconds <= 540:
+            raise ValueError("ARK_ANALYSIS_TOTAL_TIMEOUT_SECONDS 必须为 60-540")
+        if ark_queue_wait_timeout_seconds >= ark_analysis_total_timeout_seconds:
+            raise ValueError("ARK 排队预算必须小于分析总预算")
+        ark_connect_timeout_seconds = _as_int("ARK_CONNECT_TIMEOUT_SECONDS", 10)
+        if not 1 <= ark_connect_timeout_seconds <= 60:
+            raise ValueError("ARK_CONNECT_TIMEOUT_SECONDS 必须为 1-60")
+        ark_planning_max_attempts = _as_int("ARK_PLANNING_MAX_ATTEMPTS", 2)
+        if not 1 <= ark_planning_max_attempts <= 2:
+            raise ValueError("ARK_PLANNING_MAX_ATTEMPTS 必须为 1-2")
+        ark_circuit_breaker_enabled = _as_bool(
+            os.getenv("ARK_CIRCUIT_BREAKER_ENABLED"), True
+        )
+        ark_limiter_scope = os.getenv("ARK_LIMITER_SCOPE", "process").strip().lower()
+        if ark_limiter_scope != "process":
+            raise ValueError("ARK_LIMITER_SCOPE 当前只支持 process")
+        configured_web_workers = max(
+            _as_int("WEB_CONCURRENCY", 1),
+            _as_int("UVICORN_WORKERS", 1),
+        )
+        if ark_request_manager_enabled and configured_web_workers > 1:
+            raise ValueError(
+                "进程级 Ark 请求管理器只允许单 Web 进程；多进程前必须接入共享租约"
+            )
         content_analysis_max_script_chars = _as_int(
             "CONTENT_ANALYSIS_MAX_SCRIPT_CHARS", 50000
         )
         if not 100 <= content_analysis_max_script_chars <= 500000:
             raise ValueError("CONTENT_ANALYSIS_MAX_SCRIPT_CHARS 必须为 100-500000")
+
+        h3_direct_delivery_enabled = _as_bool(
+            os.getenv("H3_DIRECT_DELIVERY_ENABLED"), False
+        )
+        configured_h3_hosts = os.getenv("H3_PROVIDER_ALLOWED_HOSTS")
+        if app_env == "production" and h3_direct_delivery_enabled and not configured_h3_hosts:
+            raise ValueError(
+                "生产启用 H3 直达前必须设置 H3_PROVIDER_ALLOWED_HOSTS"
+            )
+        h3_provider_allowed_hosts = _as_csv(
+            configured_h3_hosts,
+            (
+                "example.invalid"
+                if app_env == "test"
+                else "runninghub.cn,runninghub.ai,myqcloud.com,tencentcos.cn"
+            ),
+        )
 
         return cls(
             app_env=app_env,
@@ -234,9 +292,8 @@ class Settings:
             runninghub_dual_pool_enabled=_as_bool(
                 os.getenv("RUNNINGHUB_DUAL_POOL_ENABLED"), False
             ),
-            h3_direct_delivery_enabled=_as_bool(
-                os.getenv("H3_DIRECT_DELIVERY_ENABLED"), False
-            ),
+            h3_direct_delivery_enabled=h3_direct_delivery_enabled,
+            h3_provider_allowed_hosts=h3_provider_allowed_hosts,
             max_image_size_mb=_as_int("MAX_IMAGE_SIZE_MB", 200),
             max_audio_size_mb=_as_int("MAX_AUDIO_SIZE_MB", 100),
             max_video_size_mb=_as_int("MAX_VIDEO_SIZE_MB", 500),
@@ -261,8 +318,15 @@ class Settings:
             minimax_request_timeout_seconds=_as_int(
                 "MINIMAX_REQUEST_TIMEOUT_SECONDS", 120
             ),
+            ark_request_manager_enabled=ark_request_manager_enabled,
             ark_max_concurrency=ark_max_concurrency,
+            ark_queue_max=ark_queue_max,
             ark_queue_wait_timeout_seconds=ark_queue_wait_timeout_seconds,
+            ark_analysis_total_timeout_seconds=ark_analysis_total_timeout_seconds,
+            ark_connect_timeout_seconds=ark_connect_timeout_seconds,
+            ark_planning_max_attempts=ark_planning_max_attempts,
+            ark_circuit_breaker_enabled=ark_circuit_breaker_enabled,
+            ark_limiter_scope=ark_limiter_scope,
             content_analysis_max_script_chars=content_analysis_max_script_chars,
             temporary_voice_retention_hours=_as_int(
                 "TEMPORARY_VOICE_RETENTION_HOURS", 48
