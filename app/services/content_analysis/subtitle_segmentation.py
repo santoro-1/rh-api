@@ -19,7 +19,6 @@ from app.services.content_analysis.contracts import (
 
 SUBTITLE_ANALYSIS_PROMPT_VERSION = "jyd.subtitle-analysis.prompt.v23"
 SUBTITLE_MAX_EFFECTIVE_CHARACTERS = 10
-SUBTITLE_QUALITY_MAX_ATTEMPTS = 3
 SUBTITLE_BOUNDARY_CHARACTERS = frozenset("，。！？；：、,.!?;:\n\r")
 _MARKDOWN_FENCE = re.compile(r"^```(?:json|text)?\s*|\s*```$", re.IGNORECASE)
 

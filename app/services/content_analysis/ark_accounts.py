@@ -39,8 +39,8 @@ def validate_ark_config(
     clean_model = model.strip()
     if len(clean_model) > 200:
         raise ValueError("豆包 Ark 模型名称不能超过 200 个字符")
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120:
-        raise ValueError("豆包 Ark 请求超时必须在 1 到 120 秒之间")
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 600:
+        raise ValueError("豆包 Ark 请求超时必须在 1 到 600 秒之间")
     if type(max_retries) is not int or not 0 <= max_retries <= 5:
         raise ValueError("豆包 Ark 额外重试次数必须在 0 到 5 之间")
     if enabled and not has_api_key:

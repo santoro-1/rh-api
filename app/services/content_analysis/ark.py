@@ -103,6 +103,7 @@ class ArkClient:
         response_format: Mapping[str, Any] | None = None,
         temperature: float = 0.0,
         max_tokens: int | None = None,
+        max_attempts: int | None = None,
     ) -> dict[str, Any]:
         if not messages:
             raise ValueError("Ark messages 不能为空")
@@ -121,6 +122,12 @@ class ArkClient:
             isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0
         ):
             raise ValueError("Ark max_tokens 必须为正整数")
+        if max_attempts is not None and (
+            isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or max_attempts <= 0
+        ):
+            raise ValueError("Ark max_attempts 必须为正整数")
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -133,7 +140,9 @@ class ArkClient:
             payload["max_tokens"] = max_tokens
 
         endpoint = f"{self.base_url}/chat/completions"
-        total_attempts = self.max_retries + 1
+        total_attempts = (
+            self.max_retries + 1 if max_attempts is None else max_attempts
+        )
         for attempt_index in range(total_attempts):
             attempt = attempt_index + 1
             response: requests.Response | None = None

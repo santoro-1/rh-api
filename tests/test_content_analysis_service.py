@@ -257,7 +257,7 @@ def test_music_only_planning_object_is_partial_but_subtitles_still_succeed() -> 
     assert len(fake.calls) == 2
 
 
-def test_subtitle_failure_does_not_discard_valid_music() -> None:
+def test_subtitle_timeout_uses_local_fallback_without_partial_status() -> None:
     user_id = _configured_user("partial-music")
     fake = FakeArkClient(
         [_ark_response(_provider_payload())],
@@ -268,13 +268,15 @@ def test_subtitle_failure_does_not_discard_valid_music() -> None:
 
     result = _analyze(user_id, fake)
 
-    assert result["overall_status"] == "PARTIAL"
+    assert result["overall_status"] == "SUCCESS"
     assert result["music_analysis_status"] == "SUCCESS"
     assert result["music_intent"] is not None
-    assert result["subtitle_analysis_status"] == "FAILED"
-    assert result["subtitle_units"] is None
-    assert result["errors"]["subtitle"]["code"] == "ARK_TIMEOUT"
+    assert result["subtitle_analysis_status"] == "SUCCESS"
+    assert "".join(unit["text"] for unit in result["subtitle_units"]) == SCRIPT
+    assert result["errors"]["subtitle"] is None
     assert result["cacheable"] is True
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["max_attempts"] == 1
 
 
 def test_title_failure_is_isolated_from_music_subtitle_and_visual_results() -> None:
@@ -314,7 +316,7 @@ def test_title_second_line_overflow_is_isolated_from_other_results() -> None:
     assert len(fake.calls) == 2
 
 
-def test_subtitle_text_mutation_is_retried_with_the_original_script() -> None:
+def test_subtitle_text_mutation_falls_back_without_second_provider_request() -> None:
     user_id = _configured_user("subtitle-retry")
     fake = FakeArkClient(
         [_ark_response(_provider_payload())],
@@ -334,10 +336,8 @@ def test_subtitle_text_mutation_is_retried_with_the_original_script() -> None:
 
     assert result["subtitle_analysis_status"] == "SUCCESS"
     assert "".join(unit["text"] for unit in result["subtitle_units"]) == SCRIPT
-    assert len(fake.calls) == 3
-    retry_prompt = fake.calls[2]["messages"][-1]["content"]
-    assert "上一次结果不合格" in retry_prompt
-    assert "修改、删除、移动" in retry_prompt
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["max_attempts"] == 1
 
 
 def test_schema_version_mismatch_debug_snapshot_is_explicitly_opt_in(
@@ -412,7 +412,7 @@ def test_force_refresh_failure_never_overwrites_previous_success() -> None:
     assert len(fake.calls) == 4
 
 
-def test_complete_transport_failure_is_not_sticky_cache() -> None:
+def test_planning_transport_failure_keeps_local_subtitles_and_can_force_retry() -> None:
     user_id = _configured_user("retry-failure")
     fake = FakeArkClient(
         [
@@ -425,11 +425,12 @@ def test_complete_transport_failure_is_not_sticky_cache() -> None:
     )
 
     failed = _analyze(user_id, fake)
-    retried = _analyze(user_id, fake)
+    retried = _analyze(user_id, fake, force_refresh=True)
 
-    assert failed["overall_status"] == "FAILED"
-    assert failed["cacheable"] is False
-    assert failed["provider_attempts"] == 6
+    assert failed["overall_status"] == "PARTIAL"
+    assert failed["subtitle_analysis_status"] == "SUCCESS"
+    assert failed["cacheable"] is True
+    assert failed["provider_attempts"] == 4
     assert retried["overall_status"] == "SUCCESS"
     assert len(fake.calls) == 4
 
@@ -643,7 +644,7 @@ def test_punctuation_breaks_are_added_locally_without_model_output() -> None:
     ]
 
 
-def test_three_invalid_subtitle_results_use_deterministic_safe_fallback() -> None:
+def test_one_invalid_subtitle_result_uses_deterministic_safe_fallback() -> None:
     script = "但是一定要有三次轻松的活动，"
     user_id = _configured_user("subtitle-fallback")
     invalid = {
@@ -671,7 +672,8 @@ def test_three_invalid_subtitle_results_use_deterministic_safe_fallback() -> Non
         "但是一定要有",
         "三次轻松的活动，",
     ]
-    assert len(fake.calls) == 4
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["max_attempts"] == 1
 
 
 def test_ark_limiter_allows_at_most_ten_active_calls() -> None:

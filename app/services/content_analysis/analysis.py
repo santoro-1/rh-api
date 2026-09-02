@@ -44,7 +44,6 @@ from app.services.content_analysis.contracts import (
 )
 from app.services.content_analysis.subtitle_segmentation import (
     SUBTITLE_ANALYSIS_PROMPT_VERSION,
-    SUBTITLE_QUALITY_MAX_ATTEMPTS,
     build_subtitle_messages,
     deterministic_subtitle_units,
     provider_text as subtitle_provider_text,
@@ -868,68 +867,40 @@ def _request_dedicated_subtitles(
     *,
     original_script: str,
 ) -> tuple[BranchResult, str | None, int]:
-    """Run the subtitle-only prompt with strict quality retries and safe fallback."""
+    """Make one provider attempt, then deterministically segment on any failure."""
 
     validation_error: str | None = None
     request_id: str | None = None
     provider_attempts = 0
-    for quality_attempt in range(1, SUBTITLE_QUALITY_MAX_ATTEMPTS + 1):
-        try:
-            response = client.create_chat_completion(
-                messages=build_subtitle_messages(
-                    original_script,
-                    validation_error=validation_error,
-                ),
-                temperature=0.0,
-                max_tokens=min(4096, max(768, len(original_script) * 3 + 256)),
-            )
-            provider_attempts += 1
-            content, current_request_id = subtitle_provider_text(response)
-            if current_request_id is not None:
-                request_id = current_request_id
-        except ArkAPIError as exc:
-            return (
-                BranchResult.failed(
-                    exc.code,
-                    "豆包字幕切分请求失败，已执行安全降级",
-                ),
-                exc.request_id or request_id,
-                provider_attempts + exc.attempts,
-            )
-        except (TypeError, ValueError):
-            validation_error = "模型响应中没有可读取的完整字幕文案"
-        else:
-            accepted = None
-            for candidate in subtitle_result_candidates(content):
-                validation = validate_subtitle_split(original_script, candidate)
-                if validation.valid:
-                    accepted = subtitle_units_from_validated_positions(
-                        original_script,
-                        validation.inserted_positions,
-                    )
-                    break
-                validation_error = validation.error
-            if accepted is not None:
-                if quality_attempt > 1:
-                    log_event(
-                        logger,
-                        "content_analysis.subtitle_quality_retry_succeeded",
-                        "字幕专用分析在质量重试后通过校验",
-                        quality_attempt=quality_attempt,
-                        provider_request_id=request_id,
-                    )
-                return BranchResult.success(accepted), request_id, provider_attempts
-
-        log_event(
-            logger,
-            "content_analysis.subtitle_quality_retry",
-            "字幕专用分析未通过强制校验，准备重试",
-            level=logging.WARNING,
-            quality_attempt=quality_attempt,
-            quality_max_attempts=SUBTITLE_QUALITY_MAX_ATTEMPTS,
-            validation_error=(validation_error or "字幕结果不合格")[:500],
-            provider_request_id=request_id,
+    try:
+        response = client.create_chat_completion(
+            messages=build_subtitle_messages(original_script),
+            temperature=0.0,
+            max_tokens=min(4096, max(768, len(original_script) * 3 + 256)),
+            max_attempts=1,
         )
+        provider_attempts = 1
+        content, request_id = subtitle_provider_text(response)
+        for candidate in subtitle_result_candidates(content):
+            validation = validate_subtitle_split(original_script, candidate)
+            if validation.valid:
+                return (
+                    BranchResult.success(
+                        subtitle_units_from_validated_positions(
+                            original_script,
+                            validation.inserted_positions,
+                        )
+                    ),
+                    request_id,
+                    provider_attempts,
+                )
+            validation_error = validation.error
+    except ArkAPIError as exc:
+        request_id = exc.request_id
+        provider_attempts = 1
+        validation_error = f"{exc.code}: 豆包字幕切分请求失败"
+    except (TypeError, ValueError) as exc:
+        validation_error = str(exc) or "模型响应中没有可读取的完整字幕文案"
 
     try:
         fallback_units = deterministic_subtitle_units(original_script)
@@ -945,9 +916,9 @@ def _request_dedicated_subtitles(
     log_event(
         logger,
         "content_analysis.subtitle_deterministic_fallback",
-        "字幕专用分析连续未通过校验，已使用最少安全断点兜底",
+        "字幕专用分析单次请求失败或未通过校验，已使用本地确定性切分",
         level=logging.WARNING,
-        quality_attempts=SUBTITLE_QUALITY_MAX_ATTEMPTS,
+        provider_attempts=provider_attempts,
         last_validation_error=(validation_error or "字幕结果不合格")[:500],
         provider_request_id=request_id,
     )
@@ -1347,7 +1318,15 @@ def analyze_content(
             if planning_needed:
                 music = visuals = titles = queue_failure
             if subtitles_needed:
-                subtitles = queue_failure
+                try:
+                    subtitles = BranchResult.success(
+                        deterministic_subtitle_units(original_script)
+                    )
+                except (TypeError, ValueError, ContentAnalysisContractError) as exc:
+                    subtitles = BranchResult.failed(
+                        "SUBTITLE_UNBREAKABLE_OVERFLOW",
+                        str(exc)[:500] or "字幕包含无法安全切分的超长表达",
+                    )
         except ValueError as exc:
             raise ContentAnalysisUnavailable("当前账号豆包配置不可用") from exc
 

@@ -123,7 +123,8 @@ def test_ark_config_encrypts_key_and_blank_update_preserves_ciphertext() -> None
         ({"enabled": True, "api_key": "", "model": "ep"}, "API Key"),
         ({"enabled": True, "api_key": "secret", "model": ""}, "模型"),
         ({"base_url": "file:///tmp/ark"}, "Base URL"),
-        ({"timeout_seconds": 0}, "1 到 120"),
+        ({"timeout_seconds": 0}, "1 到 600"),
+        ({"timeout_seconds": 601}, "1 到 600"),
         ({"max_retries": 6}, "0 到 5"),
     ],
 )
@@ -144,6 +145,23 @@ def test_ark_config_rejects_invalid_settings(
         user = db.query(User).filter_by(username="ark-invalid-user").one()
         with pytest.raises(ValueError, match=message):
             save_ark_config(db, user, **values)
+
+
+def test_ark_config_accepts_six_hundred_second_timeout() -> None:
+    create_user("ark-timeout-boundary")
+    with SessionLocal() as db:
+        user = db.query(User).filter_by(username="ark-timeout-boundary").one()
+        config = save_ark_config(
+            db,
+            user,
+            enabled=True,
+            api_key="secret",
+            base_url=ARK_DEFAULT_BASE_URL,
+            model="ep-timeout",
+            timeout_seconds=600,
+            max_retries=0,
+        )
+        assert config.timeout_seconds == 600
 
 
 def test_admin_form_saves_ark_config_without_ever_echoing_key(client) -> None:
@@ -172,6 +190,10 @@ def test_admin_form_saves_ark_config_without_ever_echoing_key(client) -> None:
     page = client.get(f"/admin/users/{user_id}")
     assert page.status_code == 200
     assert "豆包内容分析" in page.text
+    assert (
+        'name="ark_timeout_seconds" type="number" min="1" max="600"'
+        in page.text
+    )
     assert "已加密保存，留空不修改" in page.text
     assert "ark-form-secret" not in page.text
 
@@ -314,6 +336,30 @@ def test_ark_client_does_not_retry_non_retryable_http_error() -> None:
         )
     assert captured.value.status_code == 400
     assert captured.value.retryable is False
+    assert captured.value.attempts == 1
+    assert len(session.calls) == 1
+
+
+def test_ark_client_max_attempts_override_disables_configured_retries() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(500, {"error": "temporary"}),
+            FakeResponse(200, {"ok": True}),
+        ]
+    )
+    client = ArkClient(
+        "ark-secret",
+        base_url=ARK_DEFAULT_BASE_URL,
+        model="ep-single-attempt",
+        max_retries=5,
+        session=session,
+        sleep=lambda _: pytest.fail("single-attempt request must not retry"),
+    )
+    with pytest.raises(ArkAPIError) as captured:
+        client.create_chat_completion(
+            messages=[{"role": "user", "content": "script"}],
+            max_attempts=1,
+        )
     assert captured.value.attempts == 1
     assert len(session.calls) == 1
 

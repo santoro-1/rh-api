@@ -159,13 +159,13 @@
     </label>
     <div class="two-columns">
       <label>请求超时（秒）
-        <input name="ark_timeout_seconds" type="number" min="1" max="120" value="{{ ark_config.timeout_seconds }}" required>
+        <input name="ark_timeout_seconds" type="number" min="1" max="600" value="{{ ark_config.timeout_seconds }}" required>
       </label>
       <label>额外重试次数
         <input name="ark_max_retries" type="number" min="0" max="5" value="{{ ark_config.max_retries }}" required>
       </label>
     </div>
-    <p class="field-help">仅对超时、HTTP 429 和明确的 5xx 进行有限重试。内容分析 Prompt、缓存和工作台调用将在后续模块实现。</p>
+    <p class="field-help">内容规划仅对超时、HTTP 429 和明确的 5xx 进行有限重试；字幕切分固定只请求一次，失败后立即使用本地确定性切分。</p>
   </div>
   </details>
   <button type="submit">保存</button>
