@@ -16,14 +16,22 @@
     <label>结束日期
       <input type="date" name="end_date" value="{{ end_date }}">
     </label>
+    <label>每页显示
+      <select name="page_size">
+        <option value="20"{% if page_size == 20 %} selected{% endif %}>20 条</option>
+        <option value="50"{% if page_size == 50 %} selected{% endif %}>50 条</option>
+      </select>
+    </label>
     <button type="submit">按日期检索</button>
-    {% if has_date_filter %}<a class="button secondary" href="/tasks">清除筛选</a>{% endif %}
+    {% if has_date_filter %}<a class="button secondary" href="/tasks{% if page_size == 50 %}?page_size=50{% endif %}">清除筛选</a>{% endif %}
   </form>
   {% if tasks %}
   <form id="bulk-delete-form" class="bulk-toolbar" method="post" action="/tasks/bulk-delete" onsubmit="return validateBulkDelete()">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="start_date" value="{{ start_date }}">
     <input type="hidden" name="end_date" value="{{ end_date }}">
+    <input type="hidden" name="page" value="{{ page }}">
+    <input type="hidden" name="page_size" value="{{ page_size }}">
     <label class="inline-check">
       <input id="select-all-tasks" type="checkbox">
       全选当前结果
@@ -36,7 +44,11 @@
 {% if tasks %}
 <div class="task-list">
   {% for task in tasks %}
-  <article class="task-card">
+  <article
+    class="task-card"
+    data-task-id="{{ task.id }}"
+    data-active="{{ 'true' if task.status in ['PENDING', 'UPLOADING', 'SUBMITTED', 'RUNNING'] else 'false' }}"
+  >
     <label class="task-selector" title="选择此任务">
       <input
         class="task-select"
@@ -48,41 +60,37 @@
         aria-label="选择任务 {{ task.id }}"
       >
     </label>
-    {% if task.workflow_type == "digital_human" %}
-      <img src="/api/tasks/{{ task.id }}/image" alt="参考图">
+    {% if task.workflow_type == "digital_human" and thumbnail_available.get(task.id) %}
+      <img src="/api/tasks/{{ task.id }}/image" alt="任务参考图" loading="lazy" decoding="async" width="100" height="76">
+    {% elif task.workflow_type == "digital_human" %}
+      <div class="image-placeholder" aria-label="参考图不可用">暂无参考图</div>
     {% else %}
       <div class="video-placeholder">视频</div>
     {% endif %}
     <div class="task-main">
-      <h2><a href="/tasks/{{ task.id }}">{% if task.enhancement and task.status in ["FAILED", "DOWNLOAD_FAILED"] %}视频清晰化失败{% elif task.enhancement and task.enhancement.status != "SUCCESS" and task.status != "CANCELLED" %}视频清晰化中（48G）{% elif task.enhancement and task.enhancement.status == "SUCCESS" %}清晰视频已完成{% else %}{{ status_labels.get(task.status, task.status) }}{% endif %}</a></h2>
+      <h2><a data-task-status-label href="/tasks/{{ task.id }}">{% if task.enhancement and task.status in ["FAILED", "DOWNLOAD_FAILED"] %}视频清晰化失败{% elif task.enhancement and task.enhancement.status != "SUCCESS" and task.status != "CANCELLED" %}视频清晰化中（48G）{% elif task.enhancement and task.enhancement.status == "SUCCESS" %}清晰视频已完成{% else %}{{ status_labels.get(task.status, task.status) }}{% endif %}</a></h2>
       <p class="muted">{{ workflow_names.get(task.workflow_type, task.workflow_type) }}</p>
       <p>{{ task.created_at|beijing_datetime }} · {{ task.audio_original_name }}</p>
       {% if task.workflow_type == "digital_human" %}<p>{{ task.start_seconds|timecode }} — {{ task.end_seconds|timecode }}</p>{% endif %}
       <p class="truncate">{{ task.prompt }}</p>
       {% if current_user.is_admin %}<p class="muted">用户：{{ task.user.username }}</p>{% endif %}
-      {% if task.error_message %}<p class="error">{{ task.error_message }}</p>{% endif %}
+      <p class="error" data-task-error{% if not task.error_message %} hidden{% endif %}>{{ task.error_message or '' }}</p>
     </div>
     <div class="task-actions">
       <a class="button secondary" href="/tasks/{{ task.id }}">详情</a>
-      {% if task.status in ["PENDING", "SUBMITTED", "RUNNING"] %}
-        <form method="post" action="/tasks/{{ task.id }}/cancel" onsubmit="return confirm('确定取消这个生成任务吗？');">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="button danger" type="submit">取消生成</button>
-        </form>
-      {% endif %}
-      {% if task.status == "SUCCESS" %}<a class="button" href="/api/tasks/{{ task.id }}/download">下载</a>{% endif %}
-      {% if task.status in ["FAILED", "DOWNLOAD_FAILED"] %}
-        <form method="post" action="/tasks/{{ task.id }}/retry" onsubmit="return confirm('重试会重新进入队列并生成新的 RunningHub 任务 ID；生成失败时可能再次产生费用。确定重试吗？')">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="button secondary" type="submit">失败重试</button>
-        </form>
-      {% endif %}
-      {% if task.status in ["SUCCESS", "FAILED", "DOWNLOAD_FAILED", "CANCELLED"] %}
-        <form method="post" action="/tasks/{{ task.id }}/delete" onsubmit="return confirm('删除后，任务记录、上传素材和本地结果都会被清除，且无法恢复。确定删除吗？')">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="button danger" type="submit">删除记录</button>
-        </form>
-      {% endif %}
+      <form data-task-action="cancel"{% if task.status not in ["PENDING", "SUBMITTED", "RUNNING"] %} hidden{% endif %} method="post" action="/tasks/{{ task.id }}/cancel" onsubmit="return confirm('确定取消这个生成任务吗？');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="button danger" type="submit">取消生成</button>
+      </form>
+      <a data-task-action="download"{% if task.status != "SUCCESS" or not task.result_path %} hidden{% endif %} class="button" href="/api/tasks/{{ task.id }}/download">下载</a>
+      <form data-task-action="retry"{% if task.status not in ["FAILED", "DOWNLOAD_FAILED"] %} hidden{% endif %} method="post" action="/tasks/{{ task.id }}/retry" onsubmit="return confirm('重试会重新进入队列并生成新的 RunningHub 任务 ID；生成失败时可能再次产生费用。确定重试吗？')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="button secondary" type="submit">失败重试</button>
+      </form>
+      <form data-task-action="delete"{% if task.status not in ["SUCCESS", "FAILED", "DOWNLOAD_FAILED", "CANCELLED"] %} hidden{% endif %} method="post" action="/tasks/{{ task.id }}/delete" onsubmit="return confirm('删除后，任务记录、上传素材和本地结果都会被清除，且无法恢复。确定删除吗？')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="button danger" type="submit">删除记录</button>
+      </form>
     </div>
   </article>
   {% endfor %}
@@ -95,6 +103,15 @@
     <p>还没有任务。</p><a class="button" href="/generate">创建第一个任务</a>
   {% endif %}
 </section>
+{% endif %}
+{% if total_tasks %}
+<nav class="pagination" aria-label="任务分页">
+  <span>共 {{ total_tasks }} 条，第 {{ page }} / {{ total_pages }} 页</span>
+  <div class="button-row">
+    {% if previous_page_url %}<a class="button secondary" rel="prev" href="{{ previous_page_url }}">上一页</a>{% endif %}
+    {% if next_page_url %}<a class="button secondary" rel="next" href="{{ next_page_url }}">下一页</a>{% endif %}
+  </div>
+</nav>
 {% endif %}
 {% if tasks %}
 <script>
@@ -138,20 +155,100 @@ function validateBulkDelete() {
 {% endif %}
 {% if has_active_tasks %}
 <script>
-function refreshTaskList() {
-  if (document.querySelector(".task-select:checked")) {
-    setTimeout(refreshTaskList, 5000);
-    return;
-  }
-  if (document.visibilityState === "visible") {
-    location.reload();
-    return;
-  }
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") location.reload();
-  }, {once: true});
+const taskCards = new Map(
+  Array.from(document.querySelectorAll(".task-card[data-task-id]"))
+    .map((card) => [card.dataset.taskId, card])
+);
+const activeStatuses = new Set(["PENDING", "UPLOADING", "SUBMITTED", "RUNNING"]);
+const cancellableStatuses = new Set(["PENDING", "SUBMITTED", "RUNNING"]);
+const retryableStatuses = new Set(["FAILED", "DOWNLOAD_FAILED"]);
+const terminalStatuses = new Set(["SUCCESS", "FAILED", "DOWNLOAD_FAILED", "CANCELLED"]);
+const retryDelays = [5000, 10000, 20000, 30000];
+let taskPollTimer = null;
+let taskPollController = null;
+let taskPollFailures = 0;
+
+function activeTaskIds() {
+  return Array.from(taskCards.entries())
+    .filter(([, card]) => card.dataset.active === "true")
+    .map(([taskId]) => taskId);
 }
-setTimeout(refreshTaskList, 5000);
+
+function setActionVisible(card, action, visible) {
+  const element = card.querySelector(`[data-task-action="${action}"]`);
+  if (element) element.hidden = !visible;
+}
+
+function updateTaskCard(task) {
+  const card = taskCards.get(task.taskId);
+  if (!card) return;
+  card.dataset.active = activeStatuses.has(task.status) ? "true" : "false";
+  const label = card.querySelector("[data-task-status-label]");
+  if (label) label.textContent = task.statusLabel;
+  const error = card.querySelector("[data-task-error]");
+  if (error) {
+    error.textContent = task.errorMessage || "";
+    error.hidden = !task.errorMessage;
+  }
+  const download = card.querySelector('[data-task-action="download"]');
+  if (download && task.downloadUrl) download.href = task.downloadUrl;
+  setActionVisible(card, "cancel", cancellableStatuses.has(task.status));
+  setActionVisible(card, "download", Boolean(task.downloadAvailable));
+  setActionVisible(card, "retry", retryableStatuses.has(task.status));
+  setActionVisible(card, "delete", terminalStatuses.has(task.status));
+  const checkbox = card.querySelector(".task-select");
+  if (checkbox) {
+    checkbox.dataset.deletable = terminalStatuses.has(task.status) ? "true" : "false";
+  }
+}
+
+function scheduleTaskPoll(delayMilliseconds) {
+  if (taskPollTimer) clearTimeout(taskPollTimer);
+  taskPollTimer = null;
+  if (document.visibilityState !== "visible" || !activeTaskIds().length) return;
+  taskPollTimer = setTimeout(pollTaskStatuses, delayMilliseconds);
+}
+
+async function pollTaskStatuses() {
+  if (taskPollController || document.visibilityState !== "visible") return;
+  const taskIds = activeTaskIds();
+  if (!taskIds.length) return;
+  taskPollController = new AbortController();
+  try {
+    const response = await fetch(`/api/tasks/statuses?ids=${encodeURIComponent(taskIds.join(","))}`, {
+      credentials: "same-origin",
+      cache: "no-store",
+      signal: taskPollController.signal,
+    });
+    if (!response.ok) throw new Error(`任务状态更新失败：${response.status}`);
+    const payload = await response.json();
+    (payload.tasks || []).forEach(updateTaskCard);
+    taskPollFailures = 0;
+    scheduleTaskPoll(5000);
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      const delay = retryDelays[Math.min(taskPollFailures, retryDelays.length - 1)];
+      taskPollFailures += 1;
+      scheduleTaskPoll(delay);
+    }
+  } finally {
+    taskPollController = null;
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    if (taskPollTimer) clearTimeout(taskPollTimer);
+    taskPollTimer = null;
+    if (taskPollController) taskPollController.abort();
+  } else {
+    scheduleTaskPoll(0);
+  }
+});
+window.addEventListener("beforeunload", () => {
+  if (taskPollController) taskPollController.abort();
+});
+scheduleTaskPoll(5000);
 </script>
 {% endif %}
 {% endblock %}

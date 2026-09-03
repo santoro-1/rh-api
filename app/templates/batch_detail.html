@@ -343,12 +343,24 @@
   const statusLabels = {{ status_labels|tojson }};
   const autoRetryLimit = {{ auto_retry_limit }};
   const summaryKeys = ["total", "childTotal", "queued", "processing", "audioPreparing", "awaitingReview", "merging", "awaitingVideoReview", "completeVideos", "success", "failed"];
+  const retryDelays = [5000, 10000, 20000, 30000];
   let previousStatus = {{ summary.status|tojson }};
   let renderedViewRevision = {{ view_revision|tojson }};
+  let pollTimer = null;
+  let pollController = null;
+  let pollFailures = 0;
 
-  async function refreshBatchContent(nextRevision) {
+  function scheduleBatchStatus(delayMilliseconds) {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = null;
+    if (previousStatus !== "ACTIVE" || document.visibilityState !== "visible") return;
+    pollTimer = setTimeout(refreshBatchStatus, delayMilliseconds);
+  }
+
+  async function refreshBatchContent(nextRevision, signal) {
     const response = await fetch(`/batches/${batchId}`, {
       headers: {"Accept": "text/html"},
+      signal,
     });
     if (!response.ok) throw new Error("batch content refresh failed");
     const html = await response.text();
@@ -363,11 +375,16 @@
   }
 
   async function refreshBatchStatus() {
+    if (pollController || previousStatus !== "ACTIVE" || document.visibilityState !== "visible") return;
+    pollController = new AbortController();
+    let nextDelay = null;
     try {
       const response = await fetch(`/api/batches/${batchId}`, {
         headers: {"Accept": "application/json"},
+        cache: "no-store",
+        signal: pollController.signal,
       });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(`batch status refresh failed: ${response.status}`);
       const data = await response.json();
       for (const key of summaryKeys) {
         const target = document.querySelector(`[data-summary-key="${key}"]`);
@@ -407,19 +424,39 @@
       }
       if (data.viewRevision !== renderedViewRevision) {
         try {
-          await refreshBatchContent(data.viewRevision);
+          await refreshBatchContent(data.viewRevision, pollController.signal);
         } catch (_contentError) {
+          if (_contentError.name === "AbortError") throw _contentError;
           document.getElementById("batch-live-update-error")?.classList.remove("hidden");
         }
       }
       previousStatus = data.status;
-      if (data.status === "ACTIVE") setTimeout(refreshBatchStatus, 5000);
-    } catch (_error) {
-      setTimeout(refreshBatchStatus, 10000);
+      pollFailures = 0;
+      if (data.status === "ACTIVE") nextDelay = 5000;
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        nextDelay = retryDelays[Math.min(pollFailures, retryDelays.length - 1)];
+        pollFailures += 1;
+      }
+    } finally {
+      pollController = null;
+      if (nextDelay !== null) scheduleBatchStatus(nextDelay);
     }
   }
 
-  if (previousStatus === "ACTIVE") setTimeout(refreshBatchStatus, 5000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      if (pollTimer) clearTimeout(pollTimer);
+      pollTimer = null;
+      if (pollController) pollController.abort();
+    } else {
+      scheduleBatchStatus(0);
+    }
+  });
+  window.addEventListener("beforeunload", () => {
+    if (pollController) pollController.abort();
+  });
+  scheduleBatchStatus(5000);
 })();
 </script>
 {% endblock %}

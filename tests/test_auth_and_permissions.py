@@ -203,7 +203,9 @@ def test_task_list_auto_refreshes_only_while_tasks_are_active(client):
 
     active_page = client.get("/tasks")
     assert active_page.status_code == 200
-    assert "setTimeout(refreshTaskList, 5000)" in active_page.text
+    assert "/api/tasks/statuses?ids=" in active_page.text
+    assert "scheduleTaskPoll(5000)" in active_page.text
+    assert "location.reload()" not in active_page.text
 
     with SessionLocal() as db:
         task = db.get(GenerationTask, "refresh-task")
@@ -212,7 +214,8 @@ def test_task_list_auto_refreshes_only_while_tasks_are_active(client):
 
     terminal_page = client.get("/tasks")
     assert terminal_page.status_code == 200
-    assert "setTimeout(refreshTaskList, 5000)" not in terminal_page.text
+    assert "/api/tasks/statuses?ids=" not in terminal_page.text
+    assert "scheduleTaskPoll(5000)" not in terminal_page.text
 
 
 def test_admin_can_create_a_user_with_legacy_default_instance(client):

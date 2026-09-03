@@ -1319,6 +1319,29 @@ def analyze_content(
                             )
                         )
                         provider_attempts += 1
+                    # Title/music/visual planning is an independent result.  Persist it
+                    # before the dedicated subtitle request so a slow or interrupted
+                    # subtitle call cannot erase an already valid cover title.  Keep the
+                    # record non-cacheable until the subtitle phase finishes; after a
+                    # process interruption, the next request must still repair subtitles.
+                    if music is not None:
+                        _apply_music(record, music)
+                    if visuals is not None:
+                        _apply_visual(record, visuals)
+                    if titles is not None:
+                        _apply_title(record, titles)
+                    record.overall_status = _overall_status(
+                        record.music_analysis_status,
+                        record.subtitle_analysis_status,
+                        record.visual_analysis_status,
+                        record.title_analysis_status,
+                    )
+                    record.cacheable = False
+                    if request_id is not None:
+                        record.provider_request_id = request_id
+                    record.provider_attempts = provider_attempts
+                    db.commit()
+                    db.refresh(record)
                 if subtitles_needed:
                     (
                         subtitles,

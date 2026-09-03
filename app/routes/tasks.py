@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
@@ -109,16 +109,61 @@ def _beijing_date_boundary(value: date) -> datetime:
     )
 
 
-def _tasks_redirect(start_date: str, end_date: str) -> str:
+def _tasks_redirect(
+    start_date: str,
+    end_date: str,
+    *,
+    page: int = 1,
+    page_size: int = 20,
+) -> str:
     query = {
         key: value
         for key, value in (
             ("start_date", start_date),
             ("end_date", end_date),
+            ("page", page if page > 1 else ""),
+            ("page_size", page_size if page_size != 20 else ""),
         )
         if value
     }
     return f"/tasks?{urlencode(query)}" if query else "/tasks"
+
+
+def _task_list_status_text(task: GenerationTask) -> str:
+    if task.enhancement and task.status in {
+        TaskStatus.FAILED.value,
+        TaskStatus.DOWNLOAD_FAILED.value,
+    }:
+        return "视频清晰化失败"
+    if (
+        task.enhancement
+        and task.enhancement.status != TaskStatus.SUCCESS.value
+        and task.status != TaskStatus.CANCELLED.value
+    ):
+        return "视频清晰化中（48G）"
+    if task.enhancement and task.enhancement.status == TaskStatus.SUCCESS.value:
+        return "清晰视频已完成"
+    return STATUS_LABELS.get(task.status, task.status)
+
+
+def _task_thumbnail_available(task: GenerationTask) -> bool:
+    if task.workflow_type != DIGITAL_HUMAN_WORKFLOW or not task.image_path:
+        return False
+    try:
+        path = safe_relative_path(task.image_path, get_settings().data_dir)
+        return path.is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def _task_download_available(task: GenerationTask) -> bool:
+    if task.status != TaskStatus.SUCCESS.value or not task.result_path:
+        return False
+    try:
+        path = safe_relative_path(task.result_path, get_settings().data_dir)
+        return path.is_file()
+    except (OSError, ValueError):
+        return False
 
 
 def _task_failed_reason(task: GenerationTask) -> dict | None:
@@ -509,6 +554,50 @@ def create_ltx_lip_sync_task(
     )
 
 
+@router.get("/api/tasks/statuses")
+def task_statuses(
+    ids: str = "",
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    task_ids = list(
+        dict.fromkeys(value.strip() for value in ids.split(",") if value.strip())
+    )
+    if len(task_ids) > 50:
+        raise HTTPException(status_code=400, detail="一次最多查询 50 个任务")
+    if not task_ids:
+        return JSONResponse({"tasks": []}, headers={"Cache-Control": "no-store"})
+
+    statement = _task_query().where(GenerationTask.id.in_(task_ids))
+    if not current_user.is_admin:
+        statement = statement.where(GenerationTask.user_id == current_user.id)
+    visible_tasks = {task.id: task for task in db.scalars(statement).all()}
+    payload = []
+    for task_id in task_ids:
+        task = visible_tasks.get(task_id)
+        if task is None:
+            continue
+        download_available = _task_download_available(task)
+        payload.append(
+            {
+                "taskId": task.id,
+                "status": task.status,
+                "statusLabel": _task_list_status_text(task),
+                "errorMessage": task.error_message,
+                "downloadAvailable": download_available,
+                "downloadUrl": (
+                    f"/api/tasks/{task.id}/download"
+                    if download_available else None
+                ),
+                "updatedAt": task.updated_at.isoformat(),
+            }
+        )
+    return JSONResponse(
+        {"tasks": payload},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/api/tasks/{task_id}")
 def task_status(
     task_id: str,
@@ -600,6 +689,8 @@ def bulk_delete_tasks(
     task_ids: list[str] | None = Form(None),
     start_date: str = Form(""),
     end_date: str = Form(""),
+    page: int = Form(1),
+    page_size: int = Form(20),
     csrf_ok: None = Depends(require_csrf),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -645,7 +736,12 @@ def bulk_delete_tasks(
         ) from exc
 
     return RedirectResponse(
-        _tasks_redirect(start_date, end_date),
+        _tasks_redirect(
+            start_date,
+            end_date,
+            page=max(1, page),
+            page_size=page_size if page_size in {20, 50} else 20,
+        ),
         status_code=303,
     )
 
@@ -668,7 +764,10 @@ def task_image(
         raise HTTPException(status_code=404, detail="图片不存在") from exc
     if not path.is_file():
         raise HTTPException(status_code=404, detail="图片不存在")
-    return FileResponse(path)
+    return FileResponse(
+        path,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.get("/api/tasks/{task_id}/source-video")
@@ -757,31 +856,47 @@ def tasks_page(
     request: Request,
     start_date: date | None = None,
     end_date: date | None = None,
+    page: int = 1,
+    page_size: int = 20,
     current_user: User = Depends(get_page_user),
     db: Session = Depends(get_db),
 ):
     if start_date and end_date and start_date > end_date:
         raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+    if page < 1:
+        raise HTTPException(status_code=400, detail="页码必须大于等于 1")
+    if page_size not in {20, 50}:
+        raise HTTPException(status_code=400, detail="每页数量只能是 20 或 50")
 
     # Full-flow video calls are shown under their batch parent instead of
     # flooding the flat single-task history with every cut segment.
-    statement = (
-        _task_query()
-        .where(GenerationTask.segment_id.is_(None))
-        .order_by(GenerationTask.created_at.desc())
-    )
+    conditions = [GenerationTask.segment_id.is_(None)]
     if not current_user.is_admin:
-        statement = statement.where(GenerationTask.user_id == current_user.id)
+        conditions.append(GenerationTask.user_id == current_user.id)
     if start_date:
-        statement = statement.where(
+        conditions.append(
             GenerationTask.created_at >= _beijing_date_boundary(start_date)
         )
     if end_date:
-        statement = statement.where(
+        conditions.append(
             GenerationTask.created_at
             < _beijing_date_boundary(end_date + timedelta(days=1))
         )
+    total_tasks = db.scalar(
+        select(func.count(GenerationTask.id)).where(*conditions)
+    ) or 0
+    statement = (
+        _task_query()
+        .where(*conditions)
+        .order_by(GenerationTask.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
     tasks = db.scalars(statement).all()
+    thumbnail_available = {
+        task.id: _task_thumbnail_available(task) for task in tasks
+    }
+    total_pages = (total_tasks + page_size - 1) // page_size
     return templates.TemplateResponse(
         request,
         "tasks.html",
@@ -793,6 +908,31 @@ def tasks_page(
             "start_date": start_date.isoformat() if start_date else "",
             "end_date": end_date.isoformat() if end_date else "",
             "has_date_filter": bool(start_date or end_date),
+            "thumbnail_available": thumbnail_available,
+            "page": page,
+            "page_size": page_size,
+            "total_tasks": total_tasks,
+            "total_pages": total_pages,
+            "previous_page_url": (
+                _tasks_redirect(
+                    start_date.isoformat() if start_date else "",
+                    end_date.isoformat() if end_date else "",
+                    page=page - 1,
+                    page_size=page_size,
+                )
+                if page > 1
+                else None
+            ),
+            "next_page_url": (
+                _tasks_redirect(
+                    start_date.isoformat() if start_date else "",
+                    end_date.isoformat() if end_date else "",
+                    page=page + 1,
+                    page_size=page_size,
+                )
+                if page * page_size < total_tasks
+                else None
+            ),
             "workflow_names": {
                 workflow.key: workflow.display_name for workflow in list_workflows()
             },

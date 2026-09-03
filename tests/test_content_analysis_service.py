@@ -279,6 +279,35 @@ def test_subtitle_timeout_uses_local_fallback_without_partial_status() -> None:
     assert fake.calls[1]["max_attempts"] == 1
 
 
+def test_planning_title_is_committed_before_dedicated_subtitle_request() -> None:
+    user_id = _configured_user("title-before-subtitles")
+
+    class InspectingSubtitleClient(FakeArkClient):
+        def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs.get("response_format") is None:
+                with SessionLocal() as db:
+                    record = db.query(ContentAnalysisCache).filter_by(user_id=user_id).one()
+                    assert record.title_analysis_status == "SUCCESS"
+                    assert json.loads(record.title_json or "null") == {
+                        "line_1": "减脂真相",
+                        "line_2": "坚持更关键",
+                    }
+                    assert record.cacheable is False
+                raise ArkAPIError(
+                    "ARK_TIMEOUT", "safe", retryable=True, attempts=1
+                )
+            return super().create_chat_completion(**kwargs)
+
+    result = _analyze(
+        user_id,
+        InspectingSubtitleClient([_ark_response(_provider_payload())]),
+    )
+
+    assert result["title_analysis_status"] == "SUCCESS"
+    assert result["title"] == {"line_1": "减脂真相", "line_2": "坚持更关键"}
+    assert result["subtitle_analysis_status"] == "SUCCESS"
+
+
 def test_title_failure_is_isolated_from_music_subtitle_and_visual_results() -> None:
     user_id = _configured_user("partial-title")
     payload = _provider_payload()
