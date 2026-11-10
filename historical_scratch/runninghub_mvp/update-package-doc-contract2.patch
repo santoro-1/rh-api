@@ -1,0 +1,9 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_update_package_contract.py
+@@
+-        self.assertIn("只用于覆盖已经安装好的工作台程序", instructions)
+-        self.assertIn("重新构建的 Processor 程序以及 `_internal`", instructions)
++        self.assertIn("已经安装好的工作台", instructions)
++        self.assertIn("重新构建的 Processor 程序", instructions)
++        self.assertIn("完整 `_internal` 依赖", instructions)
+*** End Patch

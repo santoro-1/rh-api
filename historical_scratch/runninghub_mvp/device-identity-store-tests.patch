@@ -1,0 +1,320 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_identity_store.py
++"""In-memory keys/registry and injected Win32 calls only; no real machine writes."""
++from __future__ import annotations
++
++from concurrent.futures import ThreadPoolExecutor
++import ctypes
++import json
++from pathlib import Path
++import sys
++import threading
++import unittest
++from unittest.mock import Mock, MagicMock, patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from jyd_probe.device_identity_windows import DeviceIdentityError
++from jyd_probe.device_identity_store import (
++    IDENTITY_SCHEMA, MUTEX_NAME, REGISTRY_PATH, REGISTRY_VALUE,
++    IdentityRecord, RegistryIdentityStore, MachineInitializationLock,
++    MachineDeviceIdentity, _SecurityAttributes,
++)
++from jyd_probe.device_identity_setup import InteractiveWindowsDeviceIdentity
++
++
++class Key:
++    def __init__(self, protection, thumbprint):
++        self.protection, self.thumbprint = protection, thumbprint
++        self.close = Mock()
++    def __enter__(self):
++        return self
++    def __exit__(self, *_):
++        self.close()
++
++
++class Inventory:
++    def __init__(self):
++        self.values = {"tpm": None, "software": None}
++        self.reads, self.creates, self.handles = [], [], []
++        self.lock = threading.RLock()
++    def __call__(self, *, protection):
++        provider = Mock()
++        def read():
++            self.reads.append(protection)
++            value = self.values[protection]
++            if isinstance(value, Exception):
++                raise value
++            if value is None:
++                return None
++            key = Key(protection, value)
++            self.handles.append(key)
++            return key
++        def create(**kwargs):
++            assert self.values[protection] is None, "must not overwrite"
++            self.creates.append((protection, kwargs))
++            self.values[protection] = "T" * 43 if protection == "tpm" else "S" * 43
++            return read()
++        provider.open_existing.side_effect = read
++        provider.initialize_for_activation.side_effect = create
++        return provider
++
++
++class Store:
++    def __init__(self, value=None):
++        self.value = value
++        self.write_error = None
++        self.writes = []
++    def read(self):
++        if isinstance(self.value, Exception):
++            raise self.value
++        return self.value
++    def remember(self, record):
++        if self.write_error:
++            raise self.write_error
++        assert self.value is None or self.value == record
++        self.value = record
++        self.writes.append(record)
++
++
++class MachineIdentityTests(unittest.TestCase):
++    def setUp(self):
++        self.store, self.inventory = Store(), Inventory()
++        self.identity = self.new_identity()
++    def new_identity(self):
++        return MachineDeviceIdentity(store=self.store, identity_factory=self.inventory,
++                                     lock_factory=lambda: self.inventory.lock)
++    def test_empty_status_never_creates_key_or_locator(self):
++        self.assertIsNone(self.identity.open_existing())
++        self.assertEqual(self.inventory.reads, ["tpm", "software"])
++        self.assertFalse(self.inventory.creates or self.store.writes)
++    def test_four_new_instances_reuse_provider_and_public_identity(self):
++        for protection in ("tpm", "software"):
++            with self.subTest(protection=protection):
++                self.setUp()
++                with self.identity.initialize_for_activation(
++                    protection=protection, software_approved=True
++                ) as key:
++                    original = (key.protection, key.thumbprint)
++                for _ in range(4):
++                    with self.new_identity().open_existing() as key:
++                        self.assertEqual((key.protection, key.thumbprint), original)
++                self.assertEqual(len(self.inventory.creates), 1)
++                self.assertEqual(len(self.store.writes), 1)
++    def test_selected_software_does_not_depend_on_broken_tpm_or_switch_on_upgrade(self):
++        self.store.value = IdentityRecord("software", "S" * 43)
++        self.inventory.values = {"software": "S" * 43, "tpm": DeviceIdentityError("KEY_UNAVAILABLE", "TPM error")}
++        with self.identity.open_existing() as key:
++            self.assertEqual(key.protection, "software")
++        with self.identity.initialize_for_activation() as key:
++            self.assertEqual(key.protection, "software")
++        self.assertEqual(set(self.inventory.reads), {"software"})
++        self.assertFalse(self.inventory.creates)
++    def test_missing_original_key_or_mismatch_never_falls_back_to_other_provider(self):
++        self.store.value = IdentityRecord("tpm", "T" * 43)
++        self.inventory.values["software"] = "S" * 43
++        for value, code in ((None, "KEY_IDENTITY_MISSING"), ("X" * 43, "KEY_IDENTITY_CONFLICT"),
++                            (DeviceIdentityError("KEY_ACCESS_DENIED", "denied"), "KEY_ACCESS_DENIED")):
++            self.inventory.values["tpm"] = value
++            with self.assertRaises(DeviceIdentityError) as caught:
++                self.identity.initialize_for_activation(protection="software", software_approved=True)
++            self.assertEqual(caught.exception.code, code)
++        self.assertEqual(set(self.inventory.reads), {"tpm"})
++        self.assertFalse(self.inventory.creates or self.store.writes)
++        self.inventory.handles[0].close.assert_called_once()
++    def test_missing_locator_discovers_existing_key_without_writing_on_status(self):
++        for protection in ("tpm", "software"):
++            self.setUp()
++            self.inventory.values[protection] = "A" * 43
++            with self.identity.open_existing() as key:
++                self.assertEqual(key.protection, protection)
++            self.assertFalse(self.store.writes)
++            with self.identity.initialize_for_activation() as key:
++                self.assertEqual(key.thumbprint, "A" * 43)
++            self.assertEqual(self.store.value, IdentityRecord(protection, "A" * 43))
++            self.assertFalse(self.inventory.creates)
++    def test_ambiguous_two_keys_close_both_and_never_guess(self):
++        self.inventory.values = {"tpm": "T" * 43, "software": "S" * 43}
++        with self.assertRaises(DeviceIdentityError) as caught:
++            self.identity.initialize_for_activation()
++        self.assertEqual(caught.exception.code, "KEY_IDENTITY_CONFLICT")
++        for key in self.inventory.handles:
++            key.close.assert_called_once()
++        self.assertFalse(self.inventory.creates or self.store.writes)
++    def test_partial_discovery_failure_closes_open_handle_and_is_not_absence(self):
++        self.inventory.values = {"tpm": "T" * 43, "software": DeviceIdentityError("KEY_ACCESS_DENIED", "denied")}
++        with self.assertRaises(DeviceIdentityError):
++            self.identity.initialize_for_activation()
++        self.inventory.handles[0].close.assert_called_once()
++        self.assertFalse(self.inventory.creates or self.store.writes)
++    def test_broken_locator_is_not_missing_and_blocks_any_creation(self):
++        self.store.value = DeviceIdentityError("KEY_IDENTITY_INVALID", "bad")
++        with self.assertRaises(DeviceIdentityError):
++            self.identity.initialize_for_activation()
++        self.assertFalse(self.inventory.reads or self.inventory.creates)
++    def test_record_failure_keeps_key_and_explicit_retry_records_same_identity(self):
++        self.store.write_error = DeviceIdentityError("KEY_IDENTITY_WRITE_FAILED", "cannot save")
++        with self.assertRaises(DeviceIdentityError):
++            self.identity.initialize_for_activation()
++        self.inventory.handles[0].close.assert_called_once()
++        original = self.inventory.values["tpm"]
++        self.store.write_error = None
++        with self.new_identity().initialize_for_activation() as key:
++            self.assertEqual(key.thumbprint, original)
++        self.assertEqual(len(self.inventory.creates), 1)
++    def test_parallel_initializers_create_only_one_key(self):
++        def run(_):
++            with self.new_identity().initialize_for_activation() as key:
++                return key.thumbprint
++        with ThreadPoolExecutor(max_workers=2) as executor:
++            self.assertEqual(len(set(executor.map(run, range(8)))), 1)
++        self.assertEqual(len(self.inventory.creates), 1)
++    def test_software_creation_needs_literal_permission(self):
++        for value in (False, None, 1, "true"):
++            with self.assertRaises(DeviceIdentityError):
++                self.identity.initialize_for_activation(protection="software", software_approved=value)
++        self.assertFalse(self.inventory.creates)
++    def test_repair_operates_on_original_software_key_and_never_initializes(self):
++        self.inventory.values["software"] = "S" * 43
++        api = Mock()
++        self.identity.repair_operator_access(api, "S-1-5-21-1-2-3-1001")
++        key, sid = api.grant_operator_read.call_args.args
++        self.assertEqual(key.protection, "software")
++        self.assertEqual(self.store.value, IdentityRecord("software", "S" * 43))
++        key.close.assert_called_once()
++        self.assertFalse(self.inventory.creates)
++    def test_repair_failure_keeps_key_and_does_not_write_success_record(self):
++        self.inventory.values["tpm"] = "T" * 43
++        api = Mock()
++        api.grant_operator_read.side_effect = DeviceIdentityError("KEY_ACCESS_DENIED", "denied")
++        with self.assertRaises(DeviceIdentityError):
++            self.identity.repair_operator_access(api, "S-1-5-21-1-2-3-1001")
++        self.assertFalse(self.store.writes or self.inventory.creates)
++        self.inventory.handles[0].close.assert_called_once()
++    def test_repair_missing_key_never_creates(self):
++        api = Mock()
++        with self.assertRaises(DeviceIdentityError) as caught:
++            self.identity.repair_operator_access(api, "S-1-5-21-1-2-3-1001")
++        self.assertEqual(caught.exception.code, "KEY_NOT_FOUND")
++        api.grant_operator_read.assert_not_called()
++        self.assertFalse(self.store.writes or self.inventory.creates)
++    def test_actual_interactive_adapter_uses_managed_identity_without_native_reads(self):
++        with patch("jyd_probe.device_identity_setup.MachineDeviceIdentity", return_value=self.identity) as factory:
++            adapter = InteractiveWindowsDeviceIdentity(coordinator=Mock())
++        factory.assert_called_once_with()
++        self.assertFalse(self.inventory.reads or self.store.writes)
++        self.assertIsNone(adapter.open_existing())
++
++
++class RegistryTests(unittest.TestCase):
++    def setUp(self):
++        self.api = MagicMock()
++        for name, value in (("HKEY_LOCAL_MACHINE", 0x80000002), ("KEY_QUERY_VALUE", 1),
++                            ("KEY_SET_VALUE", 2), ("KEY_WOW64_64KEY", 256), ("REG_SZ", 1)):
++            setattr(self.api, name, value)
++        self.record = IdentityRecord("tpm", "T" * 43)
++        self.api.QueryValueEx.return_value = (self.record.encode(), 1)
++        self.store = RegistryIdentityStore(registry=self.api)
++    def test_round_trip_no_paths_versions_tokens_and_strict_invalid_values(self):
++        self.assertEqual(IdentityRecord.decode(self.record.encode()), self.record)
++        original = json.loads(self.record.encode())
++        for raw in ("", "x" * 513, "[]", "null", json.dumps({**original, "private_key": "not-allowed"}),
++                    json.dumps({**original, "protection": "other"}), json.dumps({**original, "thumbprint": "short"}),
++                    '{"schema":"x","schema":"y","protection":"tpm","thumbprint":"' + 'T'*43 + '"}'):
++            with self.assertRaises(DeviceIdentityError):
++                IdentityRecord.decode(raw)
++    def test_read_uses_machine_64bit_view_only_and_no_writes(self):
++        self.assertEqual(self.store.read(), self.record)
++        self.api.OpenKey.assert_called_once_with(0x80000002, REGISTRY_PATH, 0, 257)
++        self.api.CreateKeyEx.assert_not_called()
++        self.api.SetValueEx.assert_not_called()
++    def test_absent_is_distinct_from_access_denied_and_wrong_type(self):
++        self.api.OpenKey.side_effect = FileNotFoundError()
++        self.assertIsNone(self.store.read())
++        self.api.OpenKey.side_effect = PermissionError()
++        with self.assertRaises(DeviceIdentityError) as caught:
++            self.store.read()
++        self.assertEqual(caught.exception.code, "KEY_IDENTITY_UNAVAILABLE")
++        self.api.OpenKey.side_effect = None
++        self.api.QueryValueEx.return_value = (self.record.encode(), 3)
++        with self.assertRaises(DeviceIdentityError):
++            self.store.read()
++    def test_remember_existing_is_noop_and_conflict_does_not_overwrite(self):
++        self.store.remember(self.record)
++        with self.assertRaises(DeviceIdentityError):
++            self.store.remember(IdentityRecord("software", "S" * 43))
++        self.api.CreateKeyEx.assert_not_called()
++    def test_new_record_writes_only_fixed_value_and_flushes_in_same_view(self):
++        self.api.OpenKey.side_effect = FileNotFoundError()
++        self.store.remember(self.record)
++        self.api.CreateKeyEx.assert_called_once_with(0x80000002, REGISTRY_PATH, 0, 258)
++        handle = self.api.CreateKeyEx.return_value.__enter__.return_value
++        self.api.SetValueEx.assert_called_once_with(handle, REGISTRY_VALUE, 0, 1, self.record.encode())
++        self.api.FlushKey.assert_called_once_with(handle)
++        self.api.DeleteKey.assert_not_called()
++    def test_write_failure_preserves_error_and_never_deletes(self):
++        self.api.OpenKey.side_effect = FileNotFoundError()
++        self.api.SetValueEx.side_effect = PermissionError()
++        with self.assertRaises(DeviceIdentityError) as caught:
++            self.store.remember(self.record)
++        self.assertEqual(caught.exception.code, "KEY_IDENTITY_WRITE_FAILED")
++        self.api.DeleteValue.assert_not_called()
++
++
++class MutexTests(unittest.TestCase):
++    def api(self, result=0):
++        kernel, advapi = Mock(), Mock()
++        kernel.CreateMutexW.return_value = 99
++        kernel.WaitForSingleObject.return_value = result
++        advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.return_value = True
++        return kernel, advapi, MachineInitializationLock(kernel=kernel, advapi=advapi)
++    def test_fixed_global_name_admin_only_acl_and_release_after_success_or_exception(self):
++        for fail in (False, True):
++            kernel, advapi, lock = self.api()
++            try:
++                with lock:
++                    self.assertEqual(kernel.CreateMutexW.call_args.args[2], MUTEX_NAME)
++                    kernel.ReleaseMutex.assert_not_called()
++                    if fail:
++                        raise ValueError("simulation")
++            except ValueError:
++                pass
++            self.assertEqual(advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.call_args.args[0], "D:P(A;;GA;;;SY)(A;;GA;;;BA)")
++            kernel.WaitForSingleObject.assert_called_once_with(99, 10000)
++            kernel.ReleaseMutex.assert_called_once_with(99)
++            kernel.CloseHandle.assert_called_once_with(99)
++            kernel.LocalFree.assert_called_once()
++    def test_timeout_never_releases_mutex_not_owned_and_closes_handle(self):
++        kernel, _, lock = self.api(258)
++        with self.assertRaises(DeviceIdentityError):
++            with lock:
++                self.fail("timeout entered critical section")
++        kernel.ReleaseMutex.assert_not_called()
++        kernel.CloseHandle.assert_called_once_with(99)
++    def test_abandoned_mutex_is_owned_and_actual_state_can_be_rechecked(self):
++        kernel, _, lock = self.api(0x80)
++        with lock:
++            pass
++        kernel.ReleaseMutex.assert_called_once_with(99)
++    def test_failed_create_frees_descriptor_and_does_not_wait(self):
++        kernel, _, lock = self.api()
++        kernel.CreateMutexW.return_value = None
++        with self.assertRaises(DeviceIdentityError):
++            with lock:
++                self.fail("invalid handle accepted")
++        kernel.LocalFree.assert_called_once()
++        kernel.WaitForSingleObject.assert_not_called()
++    def test_pointer_width_and_structure_abi(self):
++        self.assertEqual(_SecurityAttributes.lpSecurityDescriptor.offset, 8 if ctypes.sizeof(ctypes.c_void_p) == 8 else 4)
++        self.assertEqual(ctypes.sizeof(_SecurityAttributes), 24 if ctypes.sizeof(ctypes.c_void_p) == 8 else 12)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_identity_setup.py
+@@
+         self.assertEqual(self.dispatch([HELPER_FLAG, "repair-access", "123:456"]), 0)
+-        self.api.grant_operator_read.assert_called_once_with(self.key, SID)
++        self.identity.repair_operator_access.assert_called_once_with(self.api, SID)
+         self.identity.initialize_for_activation.assert_not_called()
+-        self.identity.open_existing.return_value = None
++        self.identity.repair_operator_access.side_effect = DeviceIdentityError("KEY_NOT_FOUND", "no key")
+@@
+-        self.identity.open_existing.side_effect = RuntimeError(
++        self.identity.repair_operator_access.side_effect = RuntimeError(
+*** End Patch

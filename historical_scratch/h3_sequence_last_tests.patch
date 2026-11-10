@@ -1,0 +1,36 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_h3_video_sequence.py
+@@
+ @pytest.fixture
+ def real_clips(tmp_path):
+@@
+     return paths
++
++
++@pytest.mark.parametrize("busy", [True, False])
++def test_legacy_upgrade_preserves_active_work_and_user_upload(tmp_path, monkeypatch, busy):
++    store, project, client, coordinator, calls = three_segments(tmp_path, monkeypatch)
++    item = project["items"][0]
++    base_id = item["outputs"]["base_video"]["asset_id"]
++    with store._transaction() as connection:
++        meta = dict(item["outputs"]["base_video"]["metadata"])
++        meta.pop("video_sequence_version")
++        connection.execute("UPDATE project_assets SET metadata_json=? WHERE asset_id=?", (json.dumps(meta), base_id))
++        if busy:
++            connection.execute("UPDATE project_items SET status='POSTPROCESS_RUNNING' WHERE item_id=?", (item["item_id"],))
++    if not busy:
++        uploaded = tmp_path / "user.mp4"
++        uploaded.write_bytes(b"user-video")
++        store.add_asset(owner_user_id="u1", project_id=project["project_id"], item_id=item["item_id"],
++                        asset_type="composition_video", source_type="user_upload", status="READY",
++                        managed_path=str(uploaded), make_current=True)
++    after = coordinator.sync("u1", project["project_id"], "token")["project"]["items"][0]
++    assert after["outputs"]["base_video"]["asset_id"] == base_id
++    assert len(calls) == 1
++    assert after["allowed_actions"]["backfill_seedvr2"] is False
++    if busy:
++        assert after["status"] == "POSTPROCESS_RUNNING"
++    else:
++        assert after["outputs"]["composition_video"]["source_type"] == "user_upload"
++
+*** End Patch

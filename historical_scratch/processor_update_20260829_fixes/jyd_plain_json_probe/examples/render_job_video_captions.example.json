@@ -1,0 +1,37 @@
+{
+  "schema": "jyd.render_job.v1",
+  "source": {
+    "type": "video",
+    "media_path": "D:/素材/input.mp4",
+    "canvas": {
+      "width": 1080,
+      "height": 1920,
+      "fps": 30
+    }
+  },
+  "captions": {
+    "text": "大家好，今天介绍长文案自动字幕。程序会按标点和最大字数切分，并在一条字幕轨道上创建多个字幕片段。",
+    "start_us": 0,
+    "duration_us": 0,
+    "max_chars": 16,
+    "style_json_path": "D:/工作内容/轻盈健/公寓/text_style_library/抖音美好体测试.json",
+    "size": 15,
+    "color": "#FFFFFF",
+    "transform_x": 0.0,
+    "transform_y": -0.8,
+    "line_max_width": 0.82
+  },
+  "output": {
+    "draft_root": "D:/剪映草稿/JianyingPro Drafts",
+    "mp4_path": "D:/输出/captions_result.mp4",
+    "skip_export": true
+  },
+  "texts": [],
+  "audios": [],
+  "effects": [],
+  "export": {
+    "resolution": "1080P",
+    "framerate": "30fps",
+    "timeout": 1200
+  }
+}

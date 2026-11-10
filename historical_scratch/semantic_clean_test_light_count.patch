@@ -1,0 +1,12 @@
+diff --git a/jyd_plain_json_probe/tests/test_semantic_visuals.py b/jyd_plain_json_probe/tests/test_semantic_visuals.py
+--- a/jyd_plain_json_probe/tests/test_semantic_visuals.py
++++ b/jyd_plain_json_probe/tests/test_semantic_visuals.py
+@@ -421,7 +421,7 @@ def test_catalog_contains_images_and_registered_activity_videos() -> None:
+         _assets_for_media_policy(
+             catalog, "activity.light_daily", "mixed", usage="seam_broll"
+         )
+-    ) == 11
++    ) == 14
+     light_activity = recall_semantic_visual_candidates(
+         "每天保持日常轻活动，比如散步或者八段锦。", catalog=catalog
+     )

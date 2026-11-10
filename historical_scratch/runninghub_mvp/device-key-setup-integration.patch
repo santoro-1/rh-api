@@ -1,0 +1,120 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization_routes.py
+@@
+-from .device_identity_windows import DeviceIdentityError, WindowsDeviceIdentity
++from .device_identity_windows import DeviceIdentityError
++from .device_identity_setup import InteractiveWindowsDeviceIdentity as WindowsDeviceIdentity
+@@
+ class DeviceApplication(BaseModel):
+@@
+     confirm_initialize: StrictBool = False
+ 
+ 
++class DeviceAccessRepair(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    confirm_repair: StrictBool = False
++
++
+ def _same_origin_action(request: Request) -> None:
+@@
+         state = (
+-            "KEY_UNAVAILABLE"
++            ("KEY_INITIALIZING" if error.code == "KEY_SETUP_IN_PROGRESS" else "KEY_UNAVAILABLE")
+             if isinstance(error, DeviceIdentityError)
+@@
+     @app.post("/api/new/device-authorization/refresh")
+@@
+         except (DeviceAuthorizationError, DeviceIdentityError) as exc:
+             return failure(exc, session)
+ 
++    @app.post("/api/new/device-authorization/repair-key-access")
++    def repair_device_key_access(request: Request, payload: DeviceAccessRepair):
++        _same_origin_action(request)
++        if payload.confirm_repair is not True:
++            raise HTTPException(status_code=422, detail="请确认只修复原设备密钥的访问权限")
++        session = None
++        try:
++            session = session_for(request)
++            return response(session.repair_key_access())
++        except (DeviceAuthorizationError, DeviceIdentityError) as exc:
++            return failure(exc, session)
++
+     @app.on_event("shutdown")
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+         self.state = (
+-            "KEY_UNAVAILABLE"
++            ("KEY_INITIALIZING" if error.code == "KEY_SETUP_IN_PROGRESS" else "KEY_UNAVAILABLE")
+             if isinstance(error, DeviceIdentityError)
+@@
+-    def _registration_state(self, result: dict) -> str:
++    def repair_key_access(self) -> dict:
++        """Explicit existing-key ACL repair; never register or recover a new key."""
++        with self._lock:
++            try:
++                if self._closed:
++                    raise DeviceAuthorizationError("LOGIN_REQUIRED", "请重新登录账号", status_code=401)
++                self._credentials, self._nonce = None, None
++                if self._key is not None:
++                    self._key.close()
++                    self._key = None
++                self.identity.repair_operator_access()
++                return self.refresh(force=True)
++            except (DeviceAuthorizationError, DeviceIdentityError) as exc:
++                self._failed(exc)
++                raise
++
++    def _registration_state(self, result: dict) -> str:
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/processor_windows.py
+@@
+ def main(argv: list[str] | None = None) -> int:
++    from jyd_probe.device_identity_setup import dispatch_setup_helper
++
++    helper_result = dispatch_setup_helper(list(sys.argv[1:] if argv is None else argv))
++    if helper_result is not None:
++        return helper_result
+     args = build_parser().parse_args(argv)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.html
+@@
+-      <h2>申请这台处理机的使用权限</h2><p>提交后由管理员在网站后台批准，不需要自己生成或保管密钥。</p>
++      <h2>申请这台处理机的使用权限</h2><p>提交后由管理员在网站后台批准，不需要自己生成或保管密钥。首次初始化可能在实际处理机上弹出 Windows 权限确认；正常更新不会反复提权。</p>
+@@
+-    <section id="waiting-jobs" class="card" hidden>
++    <section id="key-repair" class="card" hidden>
++      <h2>修复原设备密钥的访问权限</h2><p>仅为运行工作台的 Windows 用户补充原密钥使用权限，不创建或替换密钥，不批准网站设备授权。请在实际处理机上完成 Windows 管理员确认。</p>
++      <form id="repair-form"><label class="check"><input id="repair-confirm" type="checkbox"><span>我确认仅修复当前处理机原密钥的访问权限，不重新激活。</span></label><button id="repair" type="submit" disabled>修复原密钥访问权限</button></form>
++    </section>
++    <section id="waiting-jobs" class="card" hidden>
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.js
+@@
+     KEY_UNAVAILABLE: ['无法读取本机设备密钥', '请先检查系统权限或 TPM 状态；程序不会自动删除或替换原密钥。', 'error'],
++    KEY_INITIALIZING: ['正在处理 Windows 权限确认', '请在实际运行工作台的电脑上完成确认。程序保留当前初始化过程，不会重复启动或替换原密钥；完成后重新校验。', 'warning'],
+@@
+       if (action === '/apply') {
+         options.headers['Content-Type'] = 'application/json';
+         options.body = JSON.stringify({label:el('label').value.trim(), confirm_initialize:true});
+       }
++      if (action === '/repair-key-access') {
++        options.headers['Content-Type'] = 'application/json';
++        options.body = JSON.stringify({confirm_repair:true});
++      }
+@@
+     el('application').hidden = state !== 'UNREGISTERED';
++    el('key-repair').hidden = (data.code || data.error_code) !== 'KEY_ACCESS_DENIED';
+@@
+-    if (['PENDING','ACTIVE','AUTH_REFRESH_REQUIRED','OFFLINE_GRACE'].includes(state)) {
++    if (['PENDING','ACTIVE','AUTH_REFRESH_REQUIRED','OFFLINE_GRACE','KEY_INITIALIZING'].includes(state)) {
+@@
+     el('apply').disabled = true;
++    el('repair').disabled = true;
+@@
+       el('apply').disabled = !el('confirm').checked;
++      el('repair').disabled = !el('repair-confirm').checked;
+@@
+   el('refresh').addEventListener('click', () => run('/refresh'));
++  el('repair-confirm').addEventListener('change', () => {el('repair').disabled = busy || !el('repair-confirm').checked;});
++  el('repair-form').addEventListener('submit', event => {
++    event.preventDefault();
++    if (!el('key-repair').hidden && el('repair-confirm').checked && !busy) run('/repair-key-access');
++  });
+*** End Patch

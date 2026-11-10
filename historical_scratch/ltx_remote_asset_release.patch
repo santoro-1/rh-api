@@ -1,0 +1,50 @@
+diff --git a/app/workers/task_worker.py b/app/workers/task_worker.py
+--- a/app/workers/task_worker.py
++++ b/app/workers/task_worker.py
+@@ -38,6 +38,7 @@ from app.services.runninghub_balance import (
+     persist_client_account_status,
+     save_balance_error,
+ )
++from app.services.runninghub_uploads import prepare_runninghub_retry_upload
+ from app.services.deployment_drain import is_deployment_draining
+ from app.services.runninghub_dispatch import (
+     DispatchReservation,
+@@ -1854,7 +1855,20 @@ def process_task(db: Session, task_id: str) -> None:
+         with tempfile.TemporaryDirectory(prefix="runninghub-upload-") as work_dir:
+             for asset in workflow.assets_for_task(task):
+                 asset_path = resolve_asset_path(asset, settings)
+-                upload_path = asset_path
++                upload_path = prepare_runninghub_retry_upload(
++                    task,
++                    asset,
++                    asset_path,
++                    Path(work_dir),
++                )
++                if upload_path != asset_path:
++                    log_event(
++                        logger,
++                        "video.remote_asset_refreshed",
++                        "RunningHub 远端视频素材丢失，已生成无损重封装副本后重传",
++                        asset_slot=asset.name,
++                        **_video_log_context(task),
++                    )
+                 if task.workflow_type == "digital_human" and asset.name == "audio":
+                     padding_seconds = generation_tail_padding_seconds(task)
+                     if padding_seconds > 0:
+diff --git a/DEVELOPER_GUIDE.md b/DEVELOPER_GUIDE.md
+--- a/DEVELOPER_GUIDE.md
++++ b/DEVELOPER_GUIDE.md
+@@ -259,6 +259,13 @@ RunningHub 明确返回 `FAILED` 时，默认最多自动重试 3 次，基础
+ 禁止盲目重提，因为远端可能已经创建并计费。`DOWNLOAD_FAILED` 且已有远程任务 ID 时
+ 只恢复查询和下载，不重新生成。
+ 
++LTX 的远程任务若明确在执行容器中报
++`/workspace/ComfyUI/input/openapi/*.mp4: No such file or directory`，下一次自动或人工重试会
++从保留的本地源视频创建临时 MP4 无损重封装副本。该副本只复制编码流并写入本次重试元数据，
++以改变 RunningHub 内容哈希、绕开“上传记录存在但对象缺失”的坏缓存；持久化源视频、编码、
++帧率和时长不变。每次再次出现同类失败都会使用新的重试序号产生不同哈希。OOM、普通模型失败、
++非 LTX 工作流及非 MP4 素材不进入此分支；FFmpeg 无法安全重封装时停止提交并保留原文件。
++
+ 新版工作台在 RunningHub 手动取消数字人阶段后，若用户又更换当前图片或分辨率，下一次
+ 4A 启动必须清除该行旧视频阶段、保留已审核 MiniMax 音频，并按本次图片 SHA-256 与分辨率
+ 创建全新的数字人命令。只有存在数字人取消任务且没有 SeedVR2 enhancement 时允许解除原

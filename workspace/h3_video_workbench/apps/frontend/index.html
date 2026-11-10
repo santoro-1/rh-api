@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiniMax H3 多参考工作台</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/overrides.css">
+</head>
+<body>
+  <div id="toast" class="toast" hidden></div>
+  <section id="loginView" class="login-shell">
+    <form id="loginForm" class="login-card">
+      <span class="eyebrow">REF2VA · 独立工作台</span>
+      <h1>MiniMax H3<br>多参考工作台</h1>
+      <p>脚本自动分段、共享人物图、逐行参考视频，并在生成前明确展示预计调用次数。</p>
+      <label>数字人网站账号<input name="username" autocomplete="username" required></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="primary" type="submit">登录工作台</button>
+    </form>
+  </section>
+
+  <div id="appView" class="app-shell" hidden>
+    <aside>
+      <div class="brand"><span>H3</span><div>多参考工作台<small id="cloudUrl"></small></div></div>
+      <button id="newProject" class="primary">＋ 新建项目</button>
+      <div id="projectList" class="project-list"></div>
+      <button id="logout" class="ghost">退出登录</button>
+    </aside>
+    <main>
+      <header>
+        <div><span class="eyebrow">MINIMAX H3 · REF2VA</span><input id="projectName" class="title-input" value="未命名 H3 项目"></div>
+        <div class="header-actions"><button id="saveProject" class="ghost">保存</button><button id="refresh" class="ghost">刷新状态</button></div>
+      </header>
+
+      <section class="card grid-two">
+        <div>
+          <h2>生成规则</h2>
+          <p class="hint">0.5 秒是 H3 生成窗口的安全余量；最终保留模型返回的完整同步音画，不按输入音频时长机械裁尾。</p>
+        </div>
+        <div class="form-grid">
+          <label>衔接模式<select id="continuity"></select></label>
+          <label>画面比例<select id="aspect"></select></label>
+          <label>清晰度（MP）<input id="megapixels" type="number" min="0.2" max="2" step="0.1" value="1"></label>
+          <label>生成尾部余量<input id="tail" type="number" min="0" max="1" step="0.1" value="0.5"></label>
+          <label class="wide">固定补充方向（可空）<textarea id="direction" rows="2" placeholder="例如：自然、自信、镜头稳定；不要写完整 H3 Prompt"></textarea></label>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-head"><div><h2>人物参考图 <span id="imageCount">0</span></h2><p class="hint">同一批次共用，只用于告诉模型人物长相。连续模式的尾帧由适配器单独预留，不占用户图片名额。</p></div><label class="file-button">上传人物图<input id="identityUpload" type="file" accept="image/png,image/jpeg,image/webp" hidden></label></div>
+        <div id="identityList" class="chips"><span class="empty">可以不传图片，仅依赖每行参考视频</span></div>
+      </section>
+
+      <section class="card">
+        <div class="section-head"><div><h2>脚本与素材</h2><p class="hint">每行绑定自己的参考视频，并从当前账号选择已生成的 MiniMax 完整音频；已审核音频可以重复测试，台词和版本自动冻结。</p></div><div class="header-actions"><button id="loadAudioSources" class="ghost">刷新 MiniMax 音频</button><button id="addRow" class="ghost">＋ 添加一行</button></div></div>
+        <div id="rows" class="rows"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-head"><div><h2>RunningHub 执行账号</h2><p class="hint">只显示安全状态，不会在本地保存 Key 或 workflowId。</p></div><button id="loadAccounts" class="ghost">重新读取</button></div>
+        <div id="accounts" class="account-grid"></div>
+      </section>
+
+      <section class="card action-card">
+        <div><h2>费用确认与运行</h2><p id="quoteText" class="hint">先保存项目并计算费用；计算费用不会创建付费任务。</p></div>
+        <div class="header-actions"><button id="reviewAudio" class="ghost">试听后审核声音</button><button id="prepare" class="ghost">计算分段与费用</button><button id="confirm" class="primary" disabled>确认费用并开始</button></div>
+      </section>
+      <section id="statusCard" class="card" hidden><h2>运行状态</h2><div id="status"></div></section>
+    </main>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

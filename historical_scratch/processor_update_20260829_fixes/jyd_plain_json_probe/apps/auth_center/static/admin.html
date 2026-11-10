@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>统一账号管理</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div><div class="eyebrow">JYD AUTH CENTER</div><h1>统一账号管理</h1></div>
+    <button id="logoutButton" class="secondary">退出管理员</button>
+  </header>
+  <main class="shell">
+    <section class="panel">
+      <div class="panel-heading"><div><h2>新增内测账号</h2><p>员工在自己的处理机上使用这里创建的账号登录。</p></div></div>
+      <form id="createUserForm" class="create-grid">
+        <label><span>登录账号</span><input id="newUsername" minlength="2" maxlength="40" required /></label>
+        <label><span>姓名 / 备注</span><input id="newDisplayName" maxlength="80" /></label>
+        <label><span>初始密码</span><input id="newPassword" type="password" minlength="8" maxlength="128" required /></label>
+        <button type="submit">新增账号</button>
+      </form>
+      <div id="message" class="message" aria-live="polite"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-heading"><div><h2>账号列表</h2><p>停用、删除或重置密码后，该账号原有登录立即失效。</p></div><strong id="userCount">0 个账号</strong></div>
+      <div class="table-shell">
+        <table>
+          <thead><tr><th>账号</th><th>姓名 / 备注</th><th>允许登录</th><th>重置密码</th><th>操作</th></tr></thead>
+          <tbody id="userRows"></tbody>
+        </table>
+        <div id="emptyState" class="empty">还没有内测账号</div>
+      </div>
+    </section>
+  </main>
+  <script src="/static/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_semantic_visuals.py
+@@
+ def test_video_overlay_loops_only_catalog_default_window_when_allowed(tmp_path: Path) -> None:
+     manifest = _write_v2_catalog(tmp_path)
+-    payload = _upgrade_test_catalog_to_v3(manifest)
++    payload = json.loads(manifest.read_text(encoding="utf-8"))
+     payload["assets"][1]["defaults"]["loop"] = True
+*** End Patch

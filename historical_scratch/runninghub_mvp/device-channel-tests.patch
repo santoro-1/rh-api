@@ -1,0 +1,207 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_initialization_channel.py
++"""Bounded IPC tests. The one native pipe test transfers synthetic JSON only.
++
++No persistent registry changes, CNG key access/creation, UAC or server traffic.
++The native test reads TokenUser only to restrict the ephemeral pipe's ACL.
++"""
++from __future__ import annotations
++
++import ctypes
++from ctypes import wintypes
++import json
++import os
++from pathlib import Path
++import sys
++import threading
++import unittest
++from unittest.mock import Mock
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from jyd_probe.device_identity_windows import DeviceIdentityError, NativeCngApi
++from jyd_probe.device_initialization_channel import (
++    MAX_MESSAGE, NativePipeIO, SoftwareInitializationChannel, pipe_name,
++)
++from jyd_probe.device_software_initialization import SoftwareInitializationContext
++from jyd_probe.device_identity_setup import DeviceSetupCoordinator
++
++
++SID = "S-1-5-21-1-2-3-1001"
++
++
++class ChannelTests(unittest.TestCase):
++    def setUp(self):
++        self.context = SoftwareInitializationContext(123, 456, SID)
++        self.api, self.permit = Mock(), Mock()
++        self.api.create_server.return_value = 88
++        self.api.peer_pid.return_value = 999
++        self.permit.initializer_handoff.return_value = {"test": "synthetic"}
++        self.written = threading.Event()
++        self.api.write.side_effect = lambda *args: self.written.set()
++    def test_delivers_once_only_to_expected_pid_and_keeps_buffer_until_helper_finishes(self):
++        channel = SoftwareInitializationChannel(self.context, self.permit, api=self.api)
++        try:
++            channel.bind_helper(999)
++            self.assertTrue(self.written.wait(2))
++            self.permit.initializer_handoff.assert_called_once_with(self.context)
++            self.api.peer_pid.assert_called_once_with(88, server=False)
++            self.api.close.assert_not_called()
++            self.assertEqual(json.loads(self.api.write.call_args.args[1]), {"test": "synthetic"})
++            with self.assertRaises(DeviceIdentityError):
++                channel.bind_helper(123)
++        finally:
++            channel.close()
++        self.api.close.assert_called_once_with(88)
++        self.assertFalse(channel._thread.is_alive())
++        self.assertIsNone(channel._permit)
++    def test_wrong_pid_never_consumes_or_sends_permit(self):
++        channel = SoftwareInitializationChannel(self.context, self.permit, api=self.api)
++        channel.bind_helper(1000)
++        channel._thread.join(2)
++        channel.close()
++        self.assertEqual(channel.error_code, "KEY_SETUP_CHANNEL_FAILED")
++        self.permit.initializer_handoff.assert_not_called()
++        self.api.write.assert_not_called()
++        self.api.close.assert_called_once_with(88)
++    def test_cancel_before_uac_completion_never_delivers(self):
++        channel = SoftwareInitializationChannel(self.context, self.permit, api=self.api)
++        channel.close()
++        self.assertFalse(channel._thread.is_alive())
++        self.permit.initializer_handoff.assert_not_called()
++        self.api.close.assert_called_once_with(88)
++    def test_expired_permit_closes_channel_without_logging_raw_error(self):
++        self.permit.initializer_handoff.side_effect = ValueError("SECRET SHOULD NOT BE RETURNED")
++        channel = SoftwareInitializationChannel(self.context, self.permit, api=self.api)
++        channel.bind_helper(999)
++        channel._thread.join(2)
++        channel.close()
++        self.assertEqual(channel.error_code, "KEY_SETUP_CHANNEL_FAILED")
++        self.api.write.assert_not_called()
++    def test_invalid_locator_cannot_open_arbitrary_local_or_remote_pipe(self):
++        for value in (None, "short", "x" * 129, "A" * 32 + "\\other", "\\\\server\\pipe\\x", "A" * 32 + "&calc"):
++            with self.assertRaises(DeviceIdentityError):
++                pipe_name(value)
++
++
++class NativePipeTests(unittest.TestCase):
++    def api(self):
++        kernel, advapi, ovapi = Mock(), Mock(), Mock()
++        kernel.CreateNamedPipeW.return_value = 88
++        kernel.CreateFileW.return_value = 99
++        kernel.WaitNamedPipeW.return_value = True
++        kernel.SetNamedPipeHandleState.return_value = True
++        advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.return_value = True
++        io = NativePipeIO(kernel=kernel, advapi=advapi, overlapped_api=ovapi)
++        return kernel, advapi, ovapi, io
++    def test_server_is_outbound_first_instance_message_mode_and_rejects_remote(self):
++        kernel, advapi, _, io = self.api()
++        self.assertEqual(io.create_server("N" * 43, SID), 88)
++        args = kernel.CreateNamedPipeW.call_args.args
++        self.assertEqual(args[0], pipe_name("N" * 43))
++        self.assertEqual(args[1], 2 | 0x40000000 | 0x80000)
++        self.assertEqual(args[2], 4 | 2 | 8)
++        self.assertEqual(args[3:7], (1, MAX_MESSAGE, 0, 10000))
++        self.assertEqual(advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.call_args.args[0], f"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{SID})")
++        kernel.LocalFree.assert_called_once()
++    def test_client_checks_server_pid_before_any_read(self):
++        kernel, _, ovapi, io = self.api()
++        def peer(_, target):
++            ctypes.cast(target, ctypes.POINTER(wintypes.DWORD))[0] = 999
++            return True
++        kernel.GetNamedPipeServerProcessId.side_effect = peer
++        with self.assertRaises(DeviceIdentityError):
++            io.receive("N" * 43, 1000)
++        ovapi.ReadFile.assert_not_called()
++        kernel.CloseHandle.assert_called_once_with(99)
++    def test_io_timeout_cancels_and_observes_operation_before_cleanup(self):
++        _, _, ovapi, io = self.api()
++        ovapi.WaitForMultipleObjects.return_value = 258
++        operation = Mock()
++        operation.GetOverlappedResult.return_value = (0, 995)
++        with self.assertRaises(DeviceIdentityError):
++            io._complete(operation, pending=True, timeout_ms=0)
++        operation.cancel.assert_called_once()
++        operation.GetOverlappedResult.assert_called_once_with(True)
++    def test_cancel_event_handles_close_before_connect_operation_exists(self):
++        _, _, ovapi, io = self.api()
++        operation = Mock()
++        operation.GetOverlappedResult.return_value = (0, 995)
++        stop = threading.Event()
++        stop.set()
++        with self.assertRaises(DeviceIdentityError):
++            io._complete(operation, pending=True, timeout_ms=120000, cancel_event=stop)
++        ovapi.WaitForMultipleObjects.assert_not_called()
++        operation.cancel.assert_called_once()
++    def test_oversized_or_nonbytes_message_never_calls_windows(self):
++        _, _, ovapi, io = self.api()
++        for value in (b"", b"a" * (MAX_MESSAGE + 1), "not bytes"):
++            with self.assertRaises(DeviceIdentityError):
++                io.write(88, value)
++        ovapi.WriteFile.assert_not_called()
++    @unittest.skipUnless(os.name == "nt", "requires a Windows named pipe, not a TPM")
++    def test_actual_windows_pipe_synthetic_transfer_and_handle_cleanup(self):
++        # This only reads the Windows access token; no NCrypt operation is called.
++        sid = NativeCngApi().current_user_sid()
++        context = SoftwareInitializationContext(os.getpid(), 12345, sid)
++        permit = Mock()
++        payload = {"test_only": "no-license-no-private-key", "body": "x" * 9000}
++        permit.initializer_handoff.return_value = payload
++        channel = SoftwareInitializationChannel(context, permit)
++        try:
++            channel.bind_helper(os.getpid())
++            raw = NativePipeIO().receive(context.nonce, os.getpid())
++            self.assertEqual(json.loads(raw), payload)
++            self.assertIsNone(channel.error_code)
++        finally:
++            channel.close()
++        self.assertFalse(channel._thread.is_alive())
++        self.assertIsNone(channel._handle)
++
++
++class SoftwareCoordinatorTests(unittest.TestCase):
++    def setUp(self):
++        self.api, self.channel, self.permit = Mock(), Mock(), Mock()
++        self.context = SoftwareInitializationContext(123, 456, SID)
++        self.api.software_context.return_value = self.context
++        self.api.launch.return_value = 77
++        self.api.process_id.return_value = 999
++        self.api.wait.return_value = 0
++        self.provider = Mock(return_value=self.permit)
++        self.channel_factory = Mock(return_value=self.channel)
++        self.coordinator = DeviceSetupCoordinator(api_factory=lambda: self.api, channel_factory=self.channel_factory)
++    def test_gets_permission_before_uac_and_publishes_real_process_id(self):
++        self.coordinator.run_software(self.provider)
++        self.provider.assert_called_once_with(context=self.context)
++        self.channel_factory.assert_called_once_with(self.context, self.permit)
++        self.api.launch.assert_called_once_with("initialize-software", nonce=self.context.nonce)
++        self.channel.bind_helper.assert_called_once_with(999)
++        self.channel.close.assert_called_once()
++        self.api.close.assert_called_once_with(77)
++    def test_permission_denial_does_not_create_channel_or_uac(self):
++        self.provider.side_effect = ValueError("denied")
++        with self.assertRaises(ValueError):
++            self.coordinator.run_software(self.provider)
++        self.channel_factory.assert_not_called()
++        self.api.launch.assert_not_called()
++    def test_uac_cancel_closes_ephemeral_channel_without_pending_handle(self):
++        self.api.launch.side_effect = DeviceIdentityError("KEY_SETUP_CANCELLED", "cancel")
++        with self.assertRaises(DeviceIdentityError):
++            self.coordinator.run_software(self.provider)
++        self.channel.close.assert_called_once()
++        self.assertIsNone(self.coordinator._channel)
++        self.assertIsNone(self.coordinator._handle)
++    def test_timeout_keeps_original_helper_and_channel_until_observed_terminal(self):
++        self.api.wait.side_effect = [None, None, 0]
++        for action in (lambda: self.coordinator.run_software(self.provider), self.coordinator.check_pending):
++            with self.assertRaises(DeviceIdentityError):
++                action()
++        self.provider.assert_called_once()
++        self.api.launch.assert_called_once()
++        self.channel.close.assert_not_called()
++        self.coordinator.check_pending()
++        self.channel.close.assert_called_once()
++    def test_ordinary_mode_cannot_bypass_software_permit(self):
++        with self.assertRaises(DeviceIdentityError):
++            self.coordinator.run("initialize-software")
++        self.api.launch.assert_not_called()
+*** End Patch

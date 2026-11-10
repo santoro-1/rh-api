@@ -1,0 +1,286 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_routes.py
++"""Central Agent HTTP surface: verify the executing machine, not the launcher."""
++
++from __future__ import annotations
++
++from typing import Any
++from urllib.parse import quote
++
++from fastapi import Body, HTTPException, Request
++from fastapi.responses import JSONResponse
++
++from . import device_agent_operations as operations
++from .device_agent_gate import AgentAuthorizationGate
++from .device_agent_protocol import AgentRequestContext, fail
++from .device_local_execution import requires_device_authorization
++from .device_local_queue import sync_authorization_status
++
++
++def install_device_agent_routes(app, *, queue, settings, require_agent_token):
++    gate = AgentAuthorizationGate(queue.store, settings.auth_server_url)
++    app.state.agent_authorization_gate = gate
++
++    def response(value):
++        return JSONResponse(value, headers={"Cache-Control": "no-store"})
++
++    def origin(request):
++        if request.url.query:
++            fail("INVALID_AGENT_REQUEST", "处理机接口不接受查询参数", 422)
++        return f"{request.url.scheme}://{request.url.netloc}"
++
++    def decision(request, agent_id, payload):
++        require_agent_token(request)
++        if not requires_device_authorization() and not any(
++            key in request.headers for key in ("x-workbench-agent-permit", "x-workbench-agent-proof")
++        ):
++            return None  # Unconfigured source development only, never frozen.
++        permit = request.headers.get("x-workbench-agent-permit", "")
++        if not permit:
++            fail("DEVICE_AGENT_PROTOCOL_REQUIRED", "请使用支持设备授权的处理机并登录获准账号", 409)
++        path = request.scope.get("raw_path", b"").decode("ascii")
++        context = AgentRequestContext.for_request(origin(request), agent_id, path, payload)
++        return gate.verify(context, permit=permit, proof=request.headers.get("x-workbench-agent-proof", ""))
++
++    @app.post("/api/agents/device-authorization/challenge")
++    def challenge(request: Request, payload: dict[str, Any] = Body(...)):
++        require_agent_token(request)
++        if set(payload) != {"agent_id", "path", "payload"} or not isinstance(payload["path"], str):
++            fail("INVALID_AGENT_REQUEST", "处理机挑战参数无效", 422)
++        context = AgentRequestContext.for_request(origin(request), payload["agent_id"], payload["path"], payload["payload"])
++        return response(gate.challenge(context))
++
++    @app.post("/api/agents/register")
++    def register(request: Request, payload: dict[str, Any] = Body(...)):
++        agent_id = payload.get("agent_id")
++        if not isinstance(agent_id, str) or not agent_id:
++            fail("INVALID_AGENT_REQUEST", "缺少处理机编号", 422)
++        authorized = decision(request, agent_id, payload)
++        if authorized is None:
++            return response(queue.register_agent(agent_id, payload))
++        return response(operations.register_agent(queue.store, agent_id, payload, authorized))
++
++    @app.post("/api/agents/{agent_id}/heartbeat")
++    def heartbeat(agent_id: str, request: Request, payload: dict[str, Any] = Body(default={})):
++        authorized = decision(request, agent_id, payload)
++        if authorized is not None:
++            return response(operations.heartbeat_agent(queue.store, agent_id, authorized))
++        try:
++            return response(queue.heartbeat_agent(agent_id, payload))
++        except KeyError:
++            raise HTTPException(status_code=404, detail="处理机尚未注册") from None
++
++    @app.post("/api/agents/{agent_id}/claim")
++    def claim(agent_id: str, request: Request, payload: dict[str, Any] = Body(default={})):
++        authorized = decision(request, agent_id, payload)
++        if payload:
++            fail("INVALID_AGENT_REQUEST", "领取任务不接受自报账号、权限或任务编号", 422)
++        try:
++            return response({"job": queue.claim_agent_job(agent_id, authorization=authorized)})
++        except KeyError:
++            raise HTTPException(status_code=404, detail="处理机尚未注册") from None
++
++    @app.post("/api/agents/{agent_id}/jobs/{job_id}/start")
++    def start(agent_id: str, job_id: str, request: Request, payload: dict[str, Any] = Body(...)):
++        authorized = decision(request, agent_id, payload)
++        if authorized is None or set(payload) != {"execution_id"}:
++            fail("DEVICE_AGENT_PROTOCOL_REQUIRED", "启动回执需要完整执行机授权", 409)
++        if queue.execution_mode != "agent":
++            fail("DEVICE_AGENT_START_DENIED", "中央服务当前不是独立处理机模式", 409)
++        receipt = operations.start_job(queue.store, agent_id, job_id, payload["execution_id"], authorized,
++                                       lease_seconds=settings.agent_lease_seconds)
++        sync_authorization_status(settings.storage_root / "jobs" / job_id / "status.json", queue.store.get_status(job_id))
++        return response(receipt)
++
++    @app.post("/api/agents/{agent_id}/jobs/{job_id}/heartbeat")
++    def job_heartbeat(agent_id: str, job_id: str, request: Request, payload: dict[str, Any] = Body(default={})):
++        authorized = decision(request, agent_id, payload)
++        try:
++            return response(queue.heartbeat_agent_job(agent_id, job_id, payload, authorization=authorized))
++        except KeyError:
++            raise HTTPException(status_code=409, detail="任务未分配给当前处理机") from None
++
++    @app.post("/api/agents/{agent_id}/jobs/{job_id}/complete")
++    def complete(agent_id: str, job_id: str, request: Request, payload: dict[str, Any] = Body(...)):
++        authorized = decision(request, agent_id, payload)
++        result = payload.get("result")
++        if not isinstance(result, dict):
++            fail("INVALID_AGENT_REQUEST", "result 必须是对象", 422)
++        try:
++            return response(queue.finish_agent_job(agent_id, job_id, result=result, authorization=authorized,
++                                                    execution_id=payload.get("execution_id")))
++        except KeyError:
++            raise HTTPException(status_code=409, detail="任务未分配给当前处理机") from None
++
++    @app.post("/api/agents/{agent_id}/jobs/{job_id}/fail")
++    def failed(agent_id: str, job_id: str, request: Request, payload: dict[str, Any] = Body(default={})):
++        authorized = decision(request, agent_id, payload)
++        try:
++            return response(queue.finish_agent_job(agent_id, job_id, error=str(payload.get("error") or "处理机报告任务失败"),
++                                                    authorization=authorized, execution_id=payload.get("execution_id")))
++        except KeyError:
++            raise HTTPException(status_code=409, detail="任务未分配给当前处理机") from None
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/task_store.py
+@@
+         with self._transaction() as connection:
+             if authorization is not None:
+                 require_decision(authorization, "execute")
++                from .device_agent_operations import require_agent_binding
++                require_agent_binding(connection, agent_id, authorization)
+@@
+-                    if status.get("agent_recovery_required"):
++                    if status.get("agent_recovery_required") and status.get("agent_execution"):
+                         fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "原处理任务状态待确认，未重复分配", 409)
+                     if not render_operation_scopes(_object(row["payload_json"], {})) <= authorization.scopes:
+                         fail("DEVICE_SCOPE_DENIED", "此执行机当前没有原任务所需权限")
++                    if status.get("agent_recovery_required"):
++                        # No durable start receipt exists: the compliant Agent
++                        # has not been authorized to invoke its renderer yet.
++                        status.pop("agent_recovery_required", None)
++                        status.pop("recovery_reason", None)
++                        status.update(heartbeat_at=now, lease_expires_at=lease_expires_at)
++                        connection.execute("UPDATE jobs SET status_json=?,heartbeat_at=?,lease_expires_at=? WHERE job_id=?",
++                                           (_json(status), now, lease_expires_at, row["job_id"]))
++                        row = dict(row)
++                        row.update(status_json=_json(status), lease_expires_at=lease_expires_at)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+-    def claim_agent_job(self, agent_id: str) -> dict[str, Any] | None:
++    def claim_agent_job(self, agent_id: str, *, authorization=None) -> dict[str, Any] | None:
+         from .device_local_execution import requires_device_authorization
+-        if requires_device_authorization():
+-            # Never let an old Agent token stand in for the executing machine's
+-            # device proof. Its dedicated authorization protocol is still pending.
++        if requires_device_authorization() and authorization is None:
+             raise DeviceAuthorizationError("DEVICE_AGENT_PROTOCOL_REQUIRED",
+-                                           "独立处理机尚未接入设备授权，请使用本机内置处理模式", status_code=409)
++                                           "独立处理机需要本机持钥授权，旧接入密码不能替代", status_code=409)
+@@
+         claimed = self.store.claim_job(
+-            agent_id, lease_seconds=self.settings.agent_lease_seconds
++            agent_id, lease_seconds=self.settings.agent_lease_seconds, authorization=authorization
+         )
+         if claimed is not None:
+-            _write_json(
++            sync_authorization_status(
+                 _job_dir(self.settings, str(claimed["job_id"])) / "status.json",
+@@
+     def heartbeat_agent_job(
+-        self, agent_id: str, job_id: str, payload: dict[str, Any]
++        self, agent_id: str, job_id: str, payload: dict[str, Any], *, authorization=None
+     ) -> dict[str, Any]:
++        if authorization is not None:
++            from .device_agent_operations import report_job
++            status, _ = report_job(self.store, agent_id, job_id, payload.get("execution_id"), authorization,
++                                   action="heartbeat", payload=payload, lease_seconds=self.settings.agent_lease_seconds)
++            sync_authorization_status(_job_dir(self.settings, job_id) / "status.json", status)
++            return status
+         status = self.store.heartbeat_job(
+@@
+     def finish_agent_job(
+         self,
+         agent_id: str,
+         job_id: str,
+         *,
+         result: dict[str, Any] | None = None,
+         error: str = "",
++        authorization=None,
++        execution_id=None,
+     ) -> dict[str, Any]:
++        if authorization is not None:
++            from .device_agent_operations import report_job
++            status, changed = report_job(
++                self.store, agent_id, job_id, execution_id, authorization,
++                action="complete" if result is not None else "fail", payload={"result": result, "error": error},
++                retention={"expires_at": _expiry_after(self.settings.completed_output_retention_hours if result is not None else self.settings.failed_output_retention_hours),
++                           "draft_expires_at": _expiry_after(self.settings.draft_retention_hours),
++                           "metadata_expires_at": _expiry_after(self.settings.metadata_retention_days * 24)},
++            )
++            sync_authorization_status(_job_dir(self.settings, job_id) / "status.json", status)
++            if changed:
++                # Reporting is already committed. Housekeeping must never turn
++                # a saved successful result into an HTTP failure/re-render.
++                try:
++                    job_path = _job_dir(self.settings, job_id) / "job.json"
++                    if job_path.is_file():
++                        _extend_job_media_expiration(self.settings, _read_json(job_path))
++                    if status.get("batch_id"):
++                        self._cleanup_batch_once_templates(str(status["batch_id"]))
++                except Exception:
++                    logging.getLogger("jyd_probe.agent").warning("处理机结果已保存，后续清理暂未完成")
++            return status
+         status = self.store.finish_job(agent_id, job_id, result=result, error=error)
+@@
+-    @app.post("/api/agents/register")
+-    def register_render_agent(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+-        require_agent_token(request)
+-        agent_id = str(_required(payload, "agent_id"))
+-        try:
+-            return render_queue.register_agent(agent_id, payload)
+-        except (ValueError, KeyError) as exc:
+-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+-
+-    @app.post("/api/agents/{agent_id}/heartbeat")
+-    def heartbeat_render_agent(
+-        agent_id: str, request: Request, payload: dict[str, Any] = Body(default={})
+-    ) -> dict[str, Any]:
+-        require_agent_token(request)
+-        try:
+-            return render_queue.heartbeat_agent(agent_id, payload)
+-        except KeyError as exc:
+-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+-
+-    @app.post("/api/agents/{agent_id}/claim")
+-    def claim_render_job(agent_id: str, request: Request) -> dict[str, Any]:
+-        require_agent_token(request)
+-        try:
+-            return {"job": render_queue.claim_agent_job(agent_id)}
+-        except KeyError as exc:
+-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+-
+-    @app.post("/api/agents/{agent_id}/jobs/{job_id}/heartbeat")
+-    def heartbeat_render_job(
+-        agent_id: str,
+-        job_id: str,
+-        request: Request,
+-        payload: dict[str, Any] = Body(default={}),
+-    ) -> dict[str, Any]:
+-        require_agent_token(request)
+-        try:
+-            return render_queue.heartbeat_agent_job(agent_id, job_id, payload)
+-        except KeyError as exc:
+-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+-
+-    @app.post("/api/agents/{agent_id}/jobs/{job_id}/complete")
+-    def complete_render_job(
+-        agent_id: str,
+-        job_id: str,
+-        request: Request,
+-        payload: dict[str, Any] = Body(...),
+-    ) -> dict[str, Any]:
+-        require_agent_token(request)
+-        result = payload.get("result")
+-        if not isinstance(result, dict):
+-            raise HTTPException(status_code=400, detail="result 必须是对象")
+-        try:
+-            return render_queue.finish_agent_job(agent_id, job_id, result=result)
+-        except KeyError as exc:
+-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+-
+-    @app.post("/api/agents/{agent_id}/jobs/{job_id}/fail")
+-    def fail_render_job(
+-        agent_id: str,
+-        job_id: str,
+-        request: Request,
+-        payload: dict[str, Any] = Body(default={}),
+-    ) -> dict[str, Any]:
+-        require_agent_token(request)
+-        try:
+-            return render_queue.finish_agent_job(
+-                agent_id, job_id, error=str(payload.get("error") or "处理机报告任务失败")
+-            )
+-        except KeyError as exc:
+-            raise HTTPException(status_code=409, detail=str(exc)) from exc
++    from .device_agent_routes import install_device_agent_routes
++    install_device_agent_routes(app, queue=render_queue, settings=settings, require_agent_token=require_agent_token)
+*** End Patch

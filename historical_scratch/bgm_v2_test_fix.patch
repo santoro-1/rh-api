@@ -1,0 +1,12 @@
+*** Begin Patch
+*** Update File: D:\工作内容\轻盈健\公寓\jyd_plain_json_probe\tests\test_new_frontend.py
+@@
+-        self.assertIn("script?.postprocessSettings?.bgm_loudness?.fade_in_us", workspace)
++        self.assertIn("postprocessSettings?.bgm_loudness?.fade_in_us", workspace)
+*** Update File: D:\工作内容\轻盈健\公寓\jyd_plain_json_probe\tests\test_project_postprocess.py
+@@
+ sys.path.insert(0, str(PROJECT_ROOT / "src"))
+ 
++from jyd_probe.bgm_loudness import BGM_FALLBACK_VOLUME  # noqa: E402
+ from jyd_probe.project_store import ProjectStore  # noqa: E402
+*** End Patch

@@ -1,0 +1,31 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/DEVELOPER_GUIDE.md
+@@
+-### 2026-08-31 设备授权基础与本地登记接口（开发中）
++### 2026-08-31 设备授权、H3 持钥请求与激活页面（开发中）
+@@
+-- 待完成 UAC/ACL、软件模式身份恢复、激活页面、刷新调度、现有 API/队列/Agent/CLI 准入和打包公钥/排敏。未修改生成算法，不因本阶段就启用强制保护。完整范围见 [设备授权开发文档](../../../数字人/runninghub_mvp/工作台设备授权与免重复激活开发文档.md)。
++- `device_business_transport.py` 与 `AuthCenterClient` 接通 H3 POST/GET 合同。已配置发布信任根时只向匹配源地址发送设备证明；绑定请求移除旧正文令牌、不修改输入及业务幂等键。没有可用设备凭据时可在发送前采用一次账号请求读取结果或接收云端强制拒绝，不是本地放行；发送后的拒绝不降级重发。下载证明禁止跟随重定向，也不发给 RunningHub 直达地址。
++- `AuthCenterDeviceError` 保留设备错误码，H3 代理响应带 `device_authorization_required` 与 `X-Workbench-Device-Error`；设备层 401 对业务页面转为 409，不退出网站账号。真正登录失败仍为 401。页面从账号菜单进入 `/app/new/device-authorization`，只在用户明确勾选后申请，其他状态不自动登记。
++- 页面可见时待审/待刷新状态每 15 秒查询，有效状态每 5 分钟校验并刷新；查询到批准不等于获准执行，必须取得签名凭据。页面关闭后的独立后台刷新尚待实施，业务调用继续按需刷新。网络异常仅展示会话已有且未过期的短期状态；到期、撤销、密钥故障和账号退出分别提示。
++- 当前工作台 H3/授权/媒体/费用预览相关回归 `126 passed`（85.53 秒），两端真实客户端合同与云端队列检查 `35 passed`（31.35 秒）。独立本地模拟页面经临时 Edge 检查申请确认、状态提示及 390px 布局，无脚本错误；未对真实机器申请授权。本轮未重跑网站全量。
++- 待完成 UAC/ACL、软件模式身份恢复、独立后台刷新、本地执行/其他 API/队列/Agent/CLI 准入和打包公钥/排敏。H3 已接线不等于整包受保护；发布信任根仍为空、云端默认 OFF，未修改生成算法或启用生产强制保护。完整范围见 [设备授权开发文档](../../../数字人/runninghub_mvp/工作台设备授权与免重复激活开发文档.md)。
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/WEB_API.md
+@@
+-## 2026-08-31 设备授权登记接口（开发中）
++## 2026-08-31 设备授权接口与 H3 请求（开发中）
+@@
+-- 这是登记与凭据接入，不代表现有 H3、渲染、Agent 或 CLI 已完成强制校验。UAC/ACL 实机验证、激活页面、后台调度及业务准入仍待实施。
++- `GET /app/new/device-authorization` 为独立授权页面，入口在账号菜单。页面只有明确确认才调用申请 POST；可见状态下按 15 秒待审/5 分钟有效轮询，需要时调用刷新，不把状态 JSON 当作执行权限。
++- 授权 API 的设备凭据 HTTP 401 有 `code/state`，前端不得等同于账号未登录；`LOGIN_REQUIRED` 才要求重新登录。授权到期、需升级和密钥故障单独显示。网络异常时，仅会话已有原有效凭据可返回 `OFFLINE_GRACE`；不延长有效期，不退回重新申请。
++- H3 业务代理通过 `AuthCenterClient.device_header_provider` 使用当前网站账号、本处理机的 v2 凭据和 DPoP；绑定请求移除正文 `access_token`。无可用设备凭据时，发送前最多使用一次原账号请求，由云端按读/新业务区分；请求已发出后不降级重发。强制模式下旧账号令牌仍不能启动新业务。
++- H3 设备错误响应保留 `code`、`device_authorization_required:true` 与 `X-Workbench-Device-Error`。设备层 401 映射为本地业务 HTTP 409，避免通用登录处理误退出账号；其他归属/账号校验仍保留。设备证明不跟随重定向或发送给第三方下载地址。
++- UAC/ACL 实机验证、本地渲染/Agent/CLI 和其他私有入口、独立后台调度与发布包保护仍未完成；不能据 H3 接线和页面测试就开启生产整包强制保护。
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_LAYOUT.md
+@@
+ 非权威缓存；`device_authorization_routes.py` 提供复用网站账号的本地登记接口。
+-这些模块不属于音视频处理算法。现有生成/渲染入口和完整包保护尚未全部接入。
++`device_business_transport.py` 将设备会话接到 `auth_center.py` 的已审计 H3 业务路径，防止证明流向第三方或拒绝后降级重发。
++`apps/processor/frontend/new/device-authorization.html/.css/.js` 为账号菜单中的独立激活页面，由 `web_api.py` 的 `/app/new/device-authorization` 提供。
++这些模块不属于音视频处理算法。H3 持钥请求已接通，本地执行/其他私有入口和完整包保护尚未全部接入。
+*** End Patch

@@ -1,0 +1,847 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>剪映批量剪辑工作台</title>
+    <link rel="stylesheet" href="/app-static/product.css?v=20260803-1" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-inner">
+        <div>
+          <h1>剪映批量剪辑工作台</h1>
+          <p>上传剪映草稿作为母版，或选择母版、视频直接生成批量成片。</p>
+        </div>
+        <div class="header-actions">
+          <span id="currentUserLabel" class="status">账号读取中</span>
+          <button id="siteLogoutBtn" type="button" class="header-button">退出账号</button>
+          <button id="recentBatchesBtn" type="button" class="header-button">最近任务</button>
+          <div class="service-statuses" aria-label="服务状态">
+            <span id="collectorStatus" class="status">本机草稿工具检测中</span>
+            <span id="apiStatus" class="status">网站服务连接中</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div id="recentBatchesDialog" class="dialog-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="recentBatchesTitle">
+      <section class="dialog-panel">
+        <div class="dialog-heading">
+          <div>
+            <h2 id="recentBatchesTitle">最近任务</h2>
+            <p>任务记录尚未到期时，可以重新打开结果。</p>
+          </div>
+          <button id="closeRecentBatchesBtn" type="button" class="dialog-close" aria-label="关闭">×</button>
+        </div>
+        <div id="recentBatchesList" class="recent-batch-list"></div>
+      </section>
+    </div>
+
+    <div id="batchCoverDialog" class="dialog-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="batchCoverTitle">
+      <section class="dialog-panel batch-cover-dialog-panel">
+        <div class="dialog-heading">
+          <div>
+            <h2 id="batchCoverTitle">设置母版封面</h2>
+            <p id="batchCoverMotherName">拖动视频选择画面，同一母版生成的所有视频使用这一张封面。</p>
+          </div>
+          <button id="closeBatchCoverBtn" type="button" class="dialog-close" aria-label="关闭">×</button>
+        </div>
+        <div class="batch-cover-dialog-body">
+          <div id="batchCoverPreviewWrap" class="batch-cover-preview-wrap cover-editor-preview">
+            <video id="batchCoverPreview" controls preload="metadata"></video>
+            <div id="batchCoverLivePreview" class="cover-live-preview">
+              <div id="batchCoverPreviewShade" class="cover-live-shade"></div>
+              <strong id="batchCoverPreviewText1" class="cover-live-text">默认文本</strong>
+              <strong id="batchCoverPreviewText2" class="cover-live-text">默认文本</strong>
+            </div>
+            <span class="cover-ratio-badge">3:4 封面</span>
+            <span id="batchCoverCurrentTime" class="batch-cover-time-badge">0.00 秒</span>
+          </div>
+          <div class="batch-cover-fields">
+            <label class="field">
+              <span>封面画面时间（秒）</span>
+              <input id="batchCoverFrameTimeSeconds" type="number" min="0" step="0.01" value="0" />
+            </label>
+            <label class="field">
+              <span>第一行文字</span>
+              <input id="batchCoverTextLine1" type="text" maxlength="30" value="默认文本" />
+            </label>
+            <label class="field">
+              <span>第二行文字</span>
+              <input id="batchCoverTextLine2" type="text" maxlength="30" value="默认文本" />
+            </label>
+            <label class="field">
+              <span>封面文字字体</span>
+              <select id="batchCoverFont"></select>
+            </label>
+            <fieldset class="cover-control-group">
+              <legend>3:4 封面画面位置</legend>
+              <label><span>左右移动 <output id="batchCoverFrameOffsetXValue">0</output></span><input id="batchCoverFrameOffsetX" type="range" min="-100" max="100" step="1" value="0" /></label>
+              <label><span>上下移动 <output id="batchCoverFrameOffsetYValue">0</output></span><input id="batchCoverFrameOffsetY" type="range" min="-100" max="100" step="1" value="0" /></label>
+            </fieldset>
+            <fieldset class="cover-control-group">
+              <legend>黑色矩形</legend>
+              <label><span>宽度</span><input id="batchCoverOverlayWidth" type="range" min="20" max="100" step="1" value="100" /></label>
+              <label><span>高度</span><input id="batchCoverOverlayHeight" type="range" min="8" max="80" step="1" value="36" /></label>
+              <label><span>上下移动 <output id="batchCoverOverlayYValue">36</output></span><input id="batchCoverOverlayY" type="range" min="-100" max="100" step="1" value="36" /></label>
+              <label><span>透明度 <output id="batchCoverOverlayAlphaValue">50%</output></span><input id="batchCoverOverlayAlpha" type="range" min="0" max="100" step="1" value="50" /></label>
+            </fieldset>
+            <fieldset class="cover-control-group cover-text-control-group">
+              <legend>第一行样式</legend>
+              <label><span>左右位置</span><input id="batchCoverLine1X" type="range" min="-100" max="100" step="1" value="0" /></label>
+              <label><span>上下位置</span><input id="batchCoverLine1Y" type="range" min="-100" max="100" step="1" value="-28" /></label>
+              <label><span>字号</span><input id="batchCoverLine1Size" type="range" min="4" max="36" step="0.5" value="12" /></label>
+              <label><span>颜色</span><input id="batchCoverLine1Color" type="color" value="#ffffff" /></label>
+            </fieldset>
+            <fieldset class="cover-control-group cover-text-control-group">
+              <legend>第二行样式</legend>
+              <label><span>左右位置</span><input id="batchCoverLine2X" type="range" min="-100" max="100" step="1" value="0" /></label>
+              <label><span>上下位置</span><input id="batchCoverLine2Y" type="range" min="-100" max="100" step="1" value="-55" /></label>
+              <label><span>字号</span><input id="batchCoverLine2Size" type="range" min="4" max="36" step="0.5" value="12" /></label>
+              <label><span>颜色</span><input id="batchCoverLine2Color" type="color" value="#ffffff" /></label>
+            </fieldset>
+            <p class="cover-editor-hint">左侧直接显示 3:4 封面效果。画面、黑框和文字都通过右侧控件调整，不需要在视频上拖动。</p>
+          </div>
+          <div id="batchCoverMessage" class="message hidden"></div>
+        </div>
+        <div class="batch-cover-dialog-actions">
+          <button id="cancelBatchCoverBtn" type="button" class="secondary-button">取消</button>
+          <button id="saveBatchCoverBtn" type="button">保存封面设置</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="batchVisualPreviewDialog" class="dialog-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="batchVisualPreviewTitle">
+      <section class="dialog-panel visual-preview-dialog-panel">
+        <div class="dialog-heading">
+          <div>
+            <h2 id="batchVisualPreviewTitle">人物裁剪预览</h2>
+            <p id="batchVisualPreviewDescription">查看母版画面后调整人物位置。</p>
+          </div>
+          <button id="closeBatchVisualPreviewBtn" type="button" class="dialog-close" aria-label="关闭">×</button>
+        </div>
+        <div class="visual-preview-dialog-body">
+          <div class="visual-preview-stage">
+            <video id="batchVisualPreviewVideo" muted controls playsinline preload="metadata"></video>
+            <div id="batchVisualCropGuide" class="visual-crop-guide"><span id="batchVisualCropGuideLabel">1:1 裁剪区域</span></div>
+          </div>
+          <div class="visual-preview-controls">
+            <label class="field"><span>预览裁剪比例</span><select id="batchCropPreviewRatio"><option value="1:1">1:1</option><option value="3:4">3:4</option></select></label>
+            <label class="field"><span>人物上下微调 <output id="batchCropOffsetYValue">0</output></span><input id="batchCropOffsetY" type="range" min="-100" max="100" step="1" value="0" /></label>
+            <label class="field"><span>裁剪画面缩放 <output id="batchCropZoomValue">100%</output></span><input id="batchCropZoom" type="range" min="100" max="140" step="1" value="100" /></label>
+            <button id="resetBatchCropBtn" type="button" class="secondary-button">恢复自动定位</button>
+          </div>
+        </div>
+        <div class="batch-cover-dialog-actions">
+          <button id="finishBatchVisualPreviewBtn" type="button">完成设置</button>
+        </div>
+      </section>
+    </div>
+
+    <main class="workspace">
+      <section class="section mode-section">
+        <div class="section-heading">
+          <div>
+            <h2>选择要做的事情</h2>
+            <p>上传草稿用于建立剪辑母版；生成视频用于选择来源并批量导出。</p>
+          </div>
+        </div>
+        <div class="workspace-switch" role="radiogroup" aria-label="工作模式">
+          <label>
+            <input type="radio" name="workspaceMode" value="upload" checked />
+            <span><strong>上传草稿</strong><small>读取本机剪映草稿并上传为母版</small></span>
+          </label>
+          <label>
+            <input type="radio" name="workspaceMode" value="generate" />
+            <span><strong>生成视频</strong><small>使用剪映母版或上传视频生成</small></span>
+          </label>
+          <label>
+            <input type="radio" name="workspaceMode" value="digital_human" />
+            <span><strong>数字人任务</strong><small>自动读取当前账号待后期的视频</small></span>
+          </label>
+          <label>
+            <input type="radio" name="workspaceMode" value="excel" />
+            <span><strong>批量任务</strong><small>批量上传母版，统一设置后直接生成</small></span>
+          </label>
+          <label id="localAssetsWorkspaceChoice">
+            <input type="radio" name="workspaceMode" value="assets" />
+            <span><strong>素材管理</strong><small>管理当前处理机上的全部素材</small></span>
+          </label>
+        </div>
+        <div id="processingModePanel" class="workspace-switch" role="radiogroup" aria-label="处理位置">
+          <label id="localProcessingChoice">
+            <input type="radio" name="processingMode" value="local" checked disabled />
+            <span><strong>本机处理</strong><small>视频不上传，直接控制这台电脑的剪映</small></span>
+          </label>
+          <label id="sharedProcessingChoice">
+            <input type="radio" name="processingMode" value="shared" disabled />
+            <span><strong>其他工作台</strong><small>打开负责人发来的工作台，交给其他剪映电脑处理</small></span>
+          </label>
+        </div>
+        <div id="sharedWorkspaceActions" class="shared-workspace-actions">
+          <div class="shared-workspace-buttons">
+            <button id="configureSharedWorkspaceBtn" type="button" class="secondary-button">管理其他工作台</button>
+            <button id="refreshSharedWorkspacesBtn" type="button" class="secondary-button">刷新状态</button>
+          </div>
+          <div>
+            <small>每行粘贴一个负责人发来的工作台地址，系统会自动打开在线且任务最少的一台。</small>
+            <div id="sharedWorkspaceStatusList" class="shared-workspace-status-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="digitalHumanWorkspace" class="section hidden">
+        <div class="section-heading">
+          <div>
+            <h2>数字人任务收件箱</h2>
+            <p>使用当前登录的数字人账号自动拉取任务。页面每 15 秒刷新一次，不会自动开始导出。</p>
+          </div>
+          <button id="refreshDigitalHumanTasksBtn" type="button" class="secondary-button">立即刷新</button>
+        </div>
+        <div id="digitalHumanTaskMessage" class="source-note">等待读取数字人任务。</div>
+        <div id="digitalHumanTaskList" class="digital-human-task-list"></div>
+      </section>
+
+      <section id="uploadDraftWorkspace" class="section">
+        <div class="section-heading">
+          <div>
+            <h2>上传剪映草稿</h2>
+            <p>扫描本机 JianyingPro Drafts，分析素材依赖并上传为网站剪辑母版；上传后保留 48 小时。</p>
+          </div>
+        </div>
+        <details id="collectorPanel" class="collector-panel standalone" open>
+            <summary>
+              <span>
+                <strong>本机剪映草稿工具</strong>
+                <small>连接本机采集器后扫描、分析并上传草稿</small>
+              </span>
+              <span id="collectorInlineStatus" class="inline-status">正在连接</span>
+            </summary>
+
+            <div class="collector-body">
+              <details class="collector-advanced">
+                <summary>高级设置（通常无需修改）</summary>
+                <div class="collector-config-grid">
+                <label class="field">
+                  <span>本机草稿工具地址</span>
+                  <input id="collectorUrl" type="url" value="http://127.0.0.1:8765" autocomplete="off" />
+                </label>
+                <label class="field collector-root-field">
+                  <span>剪映草稿目录</span>
+                  <input id="collectorDraftRoot" type="text" autocomplete="off" placeholder="D:\剪映草稿\JianyingPro Drafts" />
+                </label>
+                <label class="field">
+                  <span>网站内部访问密码</span>
+                  <input id="collectorAccessToken" type="password" autocomplete="off" placeholder="已配置时可留空" />
+                </label>
+                  <button id="saveCollectorConfigBtn" type="button" class="secondary-button">保存并扫描</button>
+                </div>
+                <p class="collector-help">系统会读取剪映自己的草稿索引，并检查 C、D 等磁盘中实际含有草稿的目录；只有自动识别失败时才需要修改。</p>
+              </details>
+              <p class="collector-help">双击启动本机草稿工具后，本页面会自动连接，不需要填写地址或密码。</p>
+              <div id="collectorMessage" class="message hidden"></div>
+
+              <div class="collector-draft-row">
+                <label class="field">
+                  <span>搜索草稿</span>
+                  <input id="collectorDraftSearch" type="search" autocomplete="off" placeholder="输入草稿名称" />
+                </label>
+                <label class="field">
+                  <span>本机草稿 <small id="collectorDraftCount">尚未读取</small></span>
+                  <select id="collectorDraftSelect"></select>
+                </label>
+                <button id="refreshCollectorDraftsBtn" type="button" class="secondary-button">重新扫描</button>
+                <button id="analyzeCollectorDraftBtn" type="button">分析草稿</button>
+              </div>
+
+              <section id="collectorAnalysis" class="collector-analysis hidden">
+                <div class="collector-analysis-heading">
+                  <div>
+                    <strong id="collectorAnalysisTitle">草稿分析</strong>
+                    <span id="collectorAnalysisMeta"></span>
+                  </div>
+                  <span id="collectorPackagingStatus" class="inline-status"></span>
+                </div>
+                <div id="collectorWarnings" class="collector-warnings hidden"></div>
+                <div id="collectorDependencyProblems" class="collector-dependency-details hidden"></div>
+                <div id="collectorMetrics" class="collector-metrics"></div>
+
+                <div class="collector-policy-heading">
+                  <strong>上传前保留策略</strong>
+                  <span>原视频、字幕内容、字幕时间线和复合文字模板始终保留。</span>
+                </div>
+                <div class="collector-policy-grid">
+                  <label class="field">
+                    <span>BGM / 音效</span>
+                    <select id="collectorPolicyAudio">
+                      <option value="keep" selected>保留原素材</option>
+                      <option value="replace">后续替换，不上传旧素材</option>
+                      <option value="remove">从输出中删除</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>视频特效</span>
+                    <select id="collectorPolicyEffects">
+                      <option value="keep" selected>保留原特效</option>
+                      <option value="replace">后续替换，不上传旧特效</option>
+                      <option value="remove">从输出中删除</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>字幕 / 文字样式</span>
+                    <select id="collectorPolicyTextStyle">
+                      <option value="keep" selected>保留原样式和字体</option>
+                      <option value="replace">保留文字，替换样式</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>花字</span>
+                    <select id="collectorPolicyTextEffects">
+                      <option value="keep" selected>保留原花字</option>
+                      <option value="replace">后续替换，不上传旧花字</option>
+                      <option value="remove">删除花字，保留普通文字</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div id="collectorPlanSummary" class="collector-plan-summary hidden"></div>
+                <div id="collectorPlanDetails" class="collector-plan-details hidden">
+                  <div class="collector-detail-heading">
+                    <strong id="collectorPlanDetailsTitle">上传清单详情</strong>
+                    <span id="collectorPlanDetailsMeta"></span>
+                  </div>
+                  <div id="collectorPlanIssueList" class="collector-issue-list"></div>
+                </div>
+                <div class="collector-actions">
+                  <button id="extractCollectorFontsBtn" type="button" class="secondary-button">提取本草稿字体</button>
+                  <button id="buildCollectorPlanBtn" type="button" class="secondary-button">生成上传清单</button>
+                  <button id="uploadCollectorPlanBtn" type="button" disabled>上传并使用这个母版</button>
+                </div>
+              </section>
+            </div>
+        </details>
+      </section>
+
+      <section id="personalAssetsWorkspace" class="section personal-assets-workspace hidden">
+        <div class="section-heading">
+          <div>
+            <h2>本机素材管理</h2>
+            <p>从草稿采集新素材，并管理当前处理机基础库和采集库中的全部素材。该页面只能在处理机本机打开。</p>
+          </div>
+        </div>
+        <div id="personalAssetMessage" class="message hidden"></div>
+        <div class="personal-asset-source">
+          <label class="field">
+            <span>素材草稿</span>
+            <select id="personalAssetDraftSelect"></select>
+          </label>
+          <button id="refreshPersonalAssetDraftsBtn" type="button" class="secondary-button">重新扫描</button>
+        </div>
+        <fieldset class="personal-asset-kinds">
+          <legend>选择要采集的素材</legend>
+          <label><input type="checkbox" name="personalAssetKind" value="audio" checked /><span>背景音乐</span></label>
+          <label><input type="checkbox" name="personalAssetKind" value="effects" /><span>视频特效</span></label>
+          <label><input type="checkbox" name="personalAssetKind" value="fonts" /><span>字体</span></label>
+          <label><input type="checkbox" name="personalAssetKind" value="stickers" /><span>全屏贴纸</span></label>
+          <label><input type="checkbox" name="personalAssetKind" value="corner_stickers" /><span>四角贴纸</span></label>
+          <label><input type="checkbox" name="personalAssetKind" value="text_effects" /><span>花字</span></label>
+          <label><input type="checkbox" name="personalAssetKind" value="text_templates" /><span>文字模板</span></label>
+        </fieldset>
+        <div class="personal-asset-actions">
+          <span>四角贴纸与全屏贴纸分库存储；采集四角贴纸时只勾选四角贴纸。</span>
+          <button id="uploadPersonalAssetsBtn" type="button">提取并上传所选素材</button>
+        </div>
+        <div class="personal-asset-manager">
+          <div class="personal-asset-manager-heading">
+            <div>
+              <h3>管理本机素材</h3>
+              <p>母版、基础素材与后续采集素材统一显示。停用后不会参与生成；删除后保留 7 天，之后自动清理实际文件。</p>
+            </div>
+            <button id="refreshPersonalAssetsBtn" type="button" class="secondary-button">刷新素材</button>
+          </div>
+          <div class="personal-asset-toolbar">
+            <label class="field"><span>搜索</span><input id="personalAssetSearch" type="search" placeholder="素材名称或 ID" /></label>
+            <label class="field">
+              <span>类型</span>
+              <select id="personalAssetKindFilter">
+                <option value="">全部类型</option>
+                <option value="audio">背景音乐</option>
+                <option value="effect">视频特效</option>
+                <option value="font">字体</option>
+                <option value="sticker">全屏贴纸</option>
+                <option value="corner_sticker">四角贴纸</option>
+                <option value="text_effect">花字</option>
+                <option value="text_template">文字模板</option>
+                <option value="template">母版</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>状态</span>
+              <select id="personalAssetStatusFilter">
+                <option value="active">已启用</option>
+                <option value="disabled">已停用</option>
+                <option value="deleted">回收站</option>
+                <option value="all">全部状态</option>
+              </select>
+            </label>
+          </div>
+          <div class="personal-asset-table-shell">
+            <table class="personal-asset-table">
+              <thead><tr><th>素材</th><th>类型</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="personalAssetRows"></tbody>
+            </table>
+            <div id="personalAssetEmpty" class="personal-asset-empty hidden">没有符合条件的本机素材</div>
+            <div class="personal-asset-pagination">
+              <span id="personalAssetPageSummary">0 项</span>
+              <div>
+                <button id="personalAssetPreviousBtn" type="button" class="secondary-button">上一页</button>
+                <strong id="personalAssetPageNumber">1 / 1</strong>
+                <button id="personalAssetNextBtn" type="button" class="secondary-button">下一页</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="excelBatchWorkspace" class="section excel-batch-workspace hidden">
+        <div class="section-heading">
+          <div>
+            <h2>批量任务编辑器</h2>
+            <p>批量上传母版后自动生成任务。相同参数统一设置一次，只有少量特殊任务需要单独修改。</p>
+          </div>
+        </div>
+
+        <details id="excelMotherUploadPanel" class="excel-mother-upload-panel" open>
+          <summary>
+            <span><strong>第 1 步：选择母版</strong><small>从本机草稿列表多选；上传后自动一母版生成一行任务</small></span>
+            <span id="excelLocalDraftCount">尚未读取</span>
+          </summary>
+          <div class="excel-mother-upload-body">
+            <div class="excel-mother-toolbar">
+              <button id="loadExcelLocalDraftsBtn" type="button" class="secondary-button">读取本机草稿</button>
+              <label><input id="selectAllExcelDrafts" type="checkbox" /> 全选当前列表</label>
+              <span id="excelSelectedDraftCount">已选 0 个</span>
+            </div>
+            <div id="excelLocalDraftList" class="excel-local-draft-list">
+              <p>请先启动本机草稿采集工具，然后读取草稿。</p>
+            </div>
+            <div class="excel-mother-upload-actions">
+              <span>批量上传的母版仅供本批次使用，批次结束后保留 24 小时再自动删除。</span>
+              <button id="uploadSelectedExcelDraftsBtn" type="button" disabled>上传并生成任务行</button>
+            </div>
+          </div>
+        </details>
+
+        <div id="excelBatchMessage" class="message hidden"></div>
+        <section id="excelBatchPreview" class="excel-preview">
+          <div class="batch-default-panel">
+            <div class="batch-default-heading">
+              <div>
+                <strong>第 2 步：统一设置任务参数</strong>
+                <span>先勾选任务行，再把下面的设置一次应用到所有选中任务。</span>
+              </div>
+              <button id="addBatchTaskBtn" type="button" class="secondary-button">添加已有母版</button>
+            </div>
+            <div class="batch-default-grid">
+              <label class="field"><span>背景音乐</span><select id="batchDefaultAudio"></select></label>
+              <label class="field"><span>视频特效</span><select id="batchDefaultEffect"></select></label>
+              <label class="field"><span>全屏贴纸</span><select id="batchDefaultSticker"></select></label>
+              <label class="field"><span>字幕字体</span><select id="batchDefaultFont"></select></label>
+              <label class="field"><span>画面变化套装</span><select id="batchDefaultVisual"><option value="none">不使用</option><option value="enabled" selected>使用套装</option></select></label>
+              <label class="field"><span>制作封面</span><select id="batchDefaultCover"><option value="none">不制作</option><option value="enabled" selected>制作，每行单独选画面</option></select></label>
+              <label class="field batch-count-field"><span>每个母版生成数量</span><input id="batchDefaultCount" type="number" min="1" max="500" step="1" value="20" /></label>
+            </div>
+            <div id="batchVisualSettings" class="batch-visual-settings hidden">
+              <label class="field"><span>镜像间隔（秒）</span><input id="batchMirrorIntervalSeconds" type="number" min="1" max="3600" step="1" value="10" /></label>
+              <fieldset class="variant-choice-group">
+                <legend>裁剪比例</legend>
+                <label><input id="batchVariantRatioSquare" type="checkbox" checked /><span>1:1</span></label>
+                <label><input id="batchVariantRatioThreeFour" type="checkbox" checked /><span>3:4</span></label>
+              </fieldset>
+            </div>
+            <div class="batch-media-adjustments">
+              <fieldset id="batchVariantColorSettings" class="variant-choice-group color-choice-group">
+                <legend>背景填充色</legend>
+                <label><input id="batchUseVariantColor1" type="checkbox" checked /><input id="batchVariantColor1" type="color" value="#000000" /><span>颜色 1</span></label>
+                <label><input id="batchUseVariantColor2" type="checkbox" checked /><input id="batchVariantColor2" type="color" value="#ffffff" /><span>颜色 2</span></label>
+                <label><input id="batchUseVariantColor3" type="checkbox" checked /><input id="batchVariantColor3" type="color" value="#dbe7f5" /><span>颜色 3</span></label>
+                <label><input id="batchUseVariantColor4" type="checkbox" checked /><input id="batchVariantColor4" type="color" value="#f2dddd" /><span>颜色 4</span></label>
+              </fieldset>
+              <div class="batch-volume-stack">
+                <label class="field"><span>BGM 音量 <output id="batchBgmVolumeValue">25%</output></span><input id="batchBgmVolume" type="range" min="0" max="100" step="1" value="25" /></label>
+                <label class="field"><span>原视频声音 <output id="batchOriginalVolumeValue">100%</output></span><input id="batchOriginalVolume" type="range" min="0" max="150" step="1" value="100" /></label>
+              </div>
+            </div>
+            <div class="batch-default-actions">
+              <span id="batchSelectedRowCount">已选 0 个任务</span>
+              <button id="applyBatchDefaultsBtn" type="button" disabled>应用到选中任务</button>
+              <button id="deleteSelectedBatchRowsBtn" type="button" class="danger-outline" disabled>移除选中任务</button>
+            </div>
+          </div>
+
+          <div class="excel-summary">
+            <div><span>任务数量</span><strong id="excelRowCount">0</strong></div>
+            <div><span>已选任务</span><strong id="excelEnabledCount">0</strong></div>
+            <div><span>预计视频</span><strong id="excelVideoCount">0</strong></div>
+            <div><span>配置错误</span><strong id="excelErrorCount">0</strong></div>
+          </div>
+          <p class="excel-edit-note">第 3 步：检查特殊任务。每行都可以单独修改；不需要运行的任务直接移除。</p>
+          <div class="excel-table-wrap">
+            <table class="excel-task-table">
+              <thead>
+                <tr>
+                  <th><label class="batch-select-all"><input id="selectAllBatchRows" type="checkbox" /> 全选</label></th>
+                  <th>剪辑母版</th>
+                  <th>背景音乐</th>
+                  <th>视频特效</th>
+                  <th>全屏贴纸</th>
+                  <th>字幕字体</th>
+                  <th>画面套装</th>
+                  <th>封面</th>
+                  <th>生成数量</th>
+                  <th>校验结果</th>
+                </tr>
+              </thead>
+              <tbody id="excelTaskRows"></tbody>
+            </table>
+          </div>
+          <div class="excel-submit-row">
+            <span id="excelSubmitSummary">请检查任务配置</span>
+            <div class="excel-submit-actions">
+              <button id="submitExcelBatchBtn" type="button">确认创建任务</button>
+            </div>
+          </div>
+        </section>
+
+        <div id="excelProgressPanel" class="progress-panel hidden">
+          <div class="progress-line"><span id="excelProgressBar"></span></div>
+          <div class="progress-meta">
+            <strong id="excelProgressText">准备任务</strong>
+            <span id="excelProgressCounts"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="generateVideoWorkspace" class="section source-section generation-workspace hidden">
+        <div class="section-heading">
+          <span class="step">1</span>
+          <div>
+            <h2>选择生成来源</h2>
+            <p id="sourceModeHelp">使用已经上传的剪映母版，或者直接选择一条本机视频作为剪辑来源。</p>
+          </div>
+        </div>
+
+        <div class="source-switch" role="radiogroup" aria-label="生成来源">
+          <label>
+            <input type="radio" name="sourceMode" value="mother" checked />
+            <span>使用剪映母版</span>
+          </label>
+          <label>
+            <input type="radio" name="sourceMode" value="video" />
+            <span id="videoSourceModeLabel">选择视频</span>
+          </label>
+        </div>
+
+        <div id="motherSourcePanel" class="source-panel">
+          <div class="mother-library-row">
+            <label class="field">
+              <span>已上传的剪辑母版</span>
+              <select id="motherSelect"></select>
+            </label>
+            <button id="refreshMothersBtn" type="button" class="secondary-button">刷新母版</button>
+          </div>
+          <div id="motherMeta" class="source-note">还没有选择母版。</div>
+        </div>
+
+        <div id="videoSourcePanel" class="source-panel hidden">
+          <label id="publicVideoPicker" class="file-drop hidden">
+            <input id="videoFile" type="file" accept="video/*" />
+            <strong id="videoFileName">选择 MP4 视频</strong>
+            <span>支持 MP4、MOV、AVI、MKV、WebM</span>
+          </label>
+          <div id="localVideoPicker" class="file-drop">
+            <button id="selectLocalVideoBtn" type="button">选择本机视频</button>
+            <strong id="localVideoFileName">尚未选择视频</strong>
+            <span>直接读取原文件，不上传、不复制</span>
+          </div>
+        </div>
+
+        <div id="localOutputPanel" class="source-panel">
+          <div class="mother-library-row">
+            <label class="field">
+              <span>导出到</span>
+              <input id="localOutputFolder" type="text" readonly placeholder="请选择生成视频保存文件夹" />
+            </label>
+            <button id="selectLocalOutputFolderBtn" type="button" class="secondary-button">选择导出文件夹</button>
+          </div>
+          <div id="localOutputStatus" class="source-note">生成完成后可直接打开视频或在资源管理器中定位文件。</div>
+        </div>
+
+        <div class="source-preview">
+          <video id="sourcePreview" controls preload="metadata"></video>
+          <div id="singleCoverLivePreview" class="cover-live-preview hidden" aria-hidden="true">
+            <div class="cover-safe-frame"></div>
+            <div id="singleCoverPreviewShade" class="cover-live-shade"></div>
+            <strong id="singleCoverPreviewText1" class="cover-live-text">默认文本</strong>
+            <strong id="singleCoverPreviewText2" class="cover-live-text">默认文本</strong>
+          </div>
+          <div id="previewEmpty" class="preview-empty">选择内容后可在这里预览</div>
+        </div>
+
+        <div class="cover-panel">
+          <label class="switch-label cover-switch">
+            <input id="useCover" type="checkbox" checked />
+            <span class="switch" aria-hidden="true"></span>
+            <span>
+              <strong>制作封面</strong>
+              <small>选取一个画面，在视频最前面保留 3 帧</small>
+            </span>
+          </label>
+          <div id="coverSettings" class="cover-settings hidden">
+            <label class="field cover-time-field">
+              <span>封面画面时间（秒）</span>
+              <div class="cover-time-row">
+                <input id="coverFrameTimeSeconds" type="number" min="0" step="0.01" value="0" />
+                <button id="usePreviewTimeBtn" type="button" class="secondary-button">使用当前预览画面</button>
+              </div>
+            </label>
+            <label class="field">
+              <span>第一行文字</span>
+              <input id="coverTextLine1" type="text" maxlength="30" value="默认文本" />
+            </label>
+            <label class="field">
+              <span>第二行文字</span>
+              <input id="coverTextLine2" type="text" maxlength="30" value="默认文本" />
+            </label>
+            <button id="editSingleCoverBtn" type="button" class="secondary-button">调整封面布局和样式</button>
+            <div class="cover-note">右侧会实时预览黑框和文字；封面字体跟随“字体”轮换选择，全部轮换时这里预览第一种字体。同一母版生成的全部视频使用同一封面画面。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section generation-workspace hidden">
+        <div class="section-heading">
+          <span class="step">2</span>
+          <div>
+            <h2>选择要变化的内容</h2>
+            <p>开启后，该类素材库中的可用内容将自动参与排列组合。</p>
+          </div>
+        </div>
+
+        <div class="change-list">
+          <div class="change-row">
+            <label class="switch-label">
+              <input id="useAudio" type="checkbox" checked />
+              <span class="switch" aria-hidden="true"></span>
+              <span><strong>背景音乐</strong><small id="audioCount">0 首可用</small></span>
+            </label>
+            <label class="field compact">
+              <span>音乐分类</span>
+              <select id="audioCategory"></select>
+            </label>
+            <label class="field compact">
+              <span>BGM 音量 <output id="bgmVolumeValue">25%</output></span>
+              <input id="bgmVolume" type="range" min="0" max="100" step="1" value="25" />
+            </label>
+            <label class="field compact">
+              <span>原视频声音 <output id="originalVolumeValue">100%</output></span>
+              <input id="originalVolume" type="range" min="0" max="150" step="1" value="100" />
+            </label>
+          </div>
+
+          <div class="change-row">
+            <label class="switch-label">
+              <input id="useEffects" type="checkbox" />
+              <span class="switch" aria-hidden="true"></span>
+              <span><strong>视频特效</strong><small id="effectCount">0 个可用</small></span>
+            </label>
+            <span class="row-note">使用特效库中的全部可用特效</span>
+          </div>
+
+          <div class="change-row">
+            <label class="switch-label">
+              <input id="useStickers" type="checkbox" />
+              <span class="switch" aria-hidden="true"></span>
+              <span><strong>全屏贴纸</strong><small id="stickerCount">0 个可用</small></span>
+            </label>
+            <span class="row-note">每条视频使用一个全屏装饰贴纸，局部贴纸仍由剪辑人员手工处理。</span>
+          </div>
+
+          <div class="change-row visual-variant-row">
+            <label class="switch-label">
+              <input id="useVisualVariant" type="checkbox" checked />
+              <span class="switch" aria-hidden="true"></span>
+              <span><strong>画面变化套装</strong><small id="cornerStickerCount">0 个四角贴纸可用</small></span>
+            </label>
+            <span class="row-note">四个角都会有贴纸；系统先定位人脸，再按所选比例裁剪并保留最终画布尺寸。</span>
+            <div id="visualVariantSettings" class="visual-variant-settings full-field">
+              <label class="field">
+                <span>镜像间隔（秒）</span>
+                <input id="mirrorIntervalSeconds" type="number" min="1" max="3600" step="1" value="10" />
+              </label>
+              <fieldset class="variant-choice-group">
+                <legend>裁剪比例</legend>
+                <label><input id="variantRatioSquare" type="checkbox" checked /><span>1:1</span></label>
+                <label><input id="variantRatioThreeFour" type="checkbox" checked /><span>3:4</span></label>
+              </fieldset>
+              <label class="field">
+                <span>四角贴纸透明度 <output id="cornerStickerOpacityValue">50%</output></span>
+                <input id="cornerStickerOpacity" type="range" min="0" max="100" step="1" value="50" />
+              </label>
+              <div class="visual-crop-editor full-field">
+                <div class="visual-crop-preview-wrap">
+                  <video id="visualCropPreview" muted playsinline preload="metadata"></video>
+                  <div id="visualCropGuide" class="visual-crop-guide"><span id="visualCropGuideLabel">1:1 裁剪区域</span></div>
+                </div>
+                <div class="visual-crop-controls">
+                  <label class="field"><span>预览比例</span><select id="cropPreviewRatio"><option value="1:1">1:1</option><option value="3:4">3:4</option></select></label>
+                  <label class="field"><span>人物上下微调 <output id="cropOffsetYValue">0</output></span><input id="cropOffsetY" type="range" min="-100" max="100" step="1" value="0" /></label>
+                  <label class="field"><span>裁剪画面缩放 <output id="cropZoomValue">100%</output></span><input id="cropZoom" type="range" min="100" max="140" step="1" value="100" /></label>
+                  <button id="resetCropAdjustBtn" type="button" class="secondary-button">恢复自动定位</button>
+                  <p class="field-help">蓝框用于观察裁剪比例和微调幅度；实际生成以自动人脸定位为起点，再应用这里的上下偏移与缩放。</p>
+                </div>
+              </div>
+              <fieldset class="variant-choice-group color-choice-group">
+                <legend>背景填充色</legend>
+                <label><input id="useVariantColor1" type="checkbox" checked /><input id="variantColor1" type="color" value="#000000" /><span>颜色 1</span></label>
+                <label><input id="useVariantColor2" type="checkbox" checked /><input id="variantColor2" type="color" value="#ffffff" /><span>颜色 2</span></label>
+                <label><input id="useVariantColor3" type="checkbox" checked /><input id="variantColor3" type="color" value="#dbe7f5" /><span>颜色 3</span></label>
+                <label><input id="useVariantColor4" type="checkbox" checked /><input id="variantColor4" type="color" value="#f2dddd" /><span>颜色 4</span></label>
+              </fieldset>
+            </div>
+          </div>
+
+          <div class="change-row text-change-row">
+            <label class="switch-label">
+              <input id="useCaptions" type="checkbox" />
+              <span class="switch" aria-hidden="true"></span>
+              <span><strong id="captionModeTitle">添加字幕</strong><small id="fontCount">0 种字体可用</small></span>
+            </label>
+            <label class="field compact">
+              <span>字体</span>
+              <select id="fontSelection"></select>
+            </label>
+            <div id="fontPreview" class="font-preview full-field">
+              <span id="fontPreviewName">字体预览</span>
+              <strong id="fontPreviewSample">人生没有白走的路，每一步都算数 123</strong>
+            </div>
+            <span id="textStyleNote" class="row-note full-field">上传视频时填写文案，系统会自动切分成字幕。</span>
+            <div id="captionSettings" class="caption-settings full-field">
+              <label class="field">
+                <span>基础样式</span>
+                <select id="captionStylePreset"></select>
+              </label>
+              <label class="field">
+                <span>字号</span>
+                <input id="captionSize" type="number" min="1" max="30" step="0.5" value="8" />
+              </label>
+              <label class="field">
+                <span>颜色</span>
+                <input id="captionColor" type="color" value="#ffffff" />
+              </label>
+              <label class="field">
+                <span>位置</span>
+                <select id="captionPosition">
+                  <option value="-0.72">底部</option>
+                  <option value="-0.55">下方</option>
+                  <option value="0">居中</option>
+                </select>
+              </label>
+              <label id="captionField" class="field caption-text-field">
+                <span>长文案</span>
+                <textarea id="captionText" rows="5" placeholder="粘贴完整文案，系统会按竖屏字幕规则自动切分"></textarea>
+              </label>
+            </div>
+          </div>
+
+          <div id="flowerRow" class="change-row text-change-row">
+            <label class="switch-label">
+              <input id="useTextEffects" type="checkbox" />
+              <span class="switch" aria-hidden="true"></span>
+              <span><strong>花字标题</strong><small id="textEffectCount">0 种可用</small></span>
+            </label>
+            <span class="row-note">仅用于上传视频；剪辑母版中的花字暂时保留原设计。</span>
+            <label class="field full-field">
+              <span>花字内容</span>
+              <input id="flowerText" type="text" placeholder="例如：今日推荐" />
+            </label>
+          </div>
+        </div>
+
+        <div class="protected-note">
+          <strong>复合文字模板不会参与自动变化</strong>
+          <span>剪辑母版中的多段文字、装饰和排版始终按人工设计原样保留。</span>
+        </div>
+      </section>
+
+      <section class="section submit-section generation-workspace hidden">
+        <div class="section-heading">
+          <span class="step">3</span>
+          <div>
+            <h2>生成视频</h2>
+            <p>处理机会按顺序调用剪映导出，完成后可直接预览和下载。</p>
+          </div>
+        </div>
+        <div class="generation-bar">
+          <div class="combination-overview">
+            <span>预计生成</span>
+            <strong id="combinationCount">1</strong>
+            <span>种完整组合</span>
+            <small id="combinationFilterNote">每个结果相对原视频至少改变两个核心元素</small>
+          </div>
+          <label class="generation-limit" for="generationLimit">
+            <span>本次生成</span>
+            <input id="generationLimit" type="number" min="1" max="500" step="1" value="100" />
+            <span>个</span>
+          </label>
+          <button id="generateBtn" type="button">开始生成</button>
+        </div>
+        <div id="validationMessage" class="message hidden"></div>
+        <div id="progressPanel" class="progress-panel hidden">
+          <div class="progress-line"><span id="progressBar"></span></div>
+          <div class="progress-meta">
+            <strong id="progressText">准备任务</strong>
+            <span id="progressCounts"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="resultsSection" class="section results-section generation-workspace hidden">
+        <div class="section-heading">
+          <span class="step done">4</span>
+          <div>
+            <h2>生成结果</h2>
+            <p>名称由实际使用元素的前两个字组成；重名时自动增加序号。</p>
+          </div>
+        </div>
+        <div id="resultToolbar" class="result-toolbar">
+          <label id="resultSelectionControl" class="result-select-all">
+            <input id="selectAllResults" type="checkbox">
+            <span id="selectedResultCount">已选 0 个</span>
+          </label>
+          <div class="result-actions">
+            <button id="backToEditorBtn" type="button">返回修改</button>
+            <button id="downloadSelectedBtn" type="button" disabled>下载选中</button>
+            <button id="deleteSelectedBtn" type="button" class="danger-button" disabled>删除选中</button>
+            <button id="cancelBatchBtn" type="button" disabled>取消未开始</button>
+            <button id="retryFailedBtn" type="button" disabled>重试失败项</button>
+          </div>
+        </div>
+        <div id="resultRetentionNote" class="result-retention-note hidden"></div>
+        <div id="resultActionMessage" class="result-action-message hidden"></div>
+        <div id="resultGrid" class="result-grid"></div>
+      </section>
+    </main>
+
+    <dialog id="personalAssetPreviewDialog" class="personal-asset-preview-dialog">
+      <div class="personal-asset-preview-head">
+        <div><strong id="personalAssetPreviewTitle">素材预览</strong><span id="personalAssetPreviewMeta"></span></div>
+        <button id="closePersonalAssetPreviewBtn" type="button" class="secondary-button">关闭</button>
+      </div>
+      <div id="personalAssetPreviewBody" class="personal-asset-preview-body"></div>
+    </dialog>
+
+    <script src="/app-static/product.js?v=20260803-1"></script>
+  </body>
+</html>

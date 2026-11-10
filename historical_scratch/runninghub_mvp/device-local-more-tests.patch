@@ -1,0 +1,80 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_execution.py
+@@
+ def render_operation_scopes(data):
++    source = data.get("source") if isinstance(data.get("source"), dict) else {}
++    kind = str(source.get("type") or source.get("kind") or data.get("source_kind") or "auto").replace("_", "-").lower()
++    if kind == "existing-draft":
++        # This path always exports; discovery recovery can also create a new draft.
++        return _SCOPES
+     output = data.get("output") if isinstance(data.get("output"), dict) else {}
+@@
+         not isinstance(decision, LocalDecision)
++        or type(decision.user_id) is not int
+         or decision.scopes != scopes
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_local_execution.py
+@@
+-def settings_for(root):
++def test_existing_draft_export_cannot_claim_draft_only_scope():
++    assert render_operation_scopes({"source": {"type": "existing-draft"}, "output": {"skip_export": True}}) == {"local:draft", "local:render"}
++
++
++@pytest.mark.parametrize("mode", ["OFF", "OBSERVE"])
++def test_signed_rollout_mode_does_not_initialize_unregistered_machine(licensed, mode):
++    licensed.transport.mode = mode
++    licensed.identity.signer = None
++    decision = licensed.authorizer.authorize({"local:draft"})
++    assert decision.mode == mode and decision.thumbprint is None
++    assert licensed.identity.created == 0
++
++
++def settings_for(root):
+@@
+-def test_actual_web_app_keeps_device_errors_and_blocks_preflight_before_coordinator(
++def test_authorized_queue_completes_once_preserves_binding_and_releases_session(queue, licensed, enforced, tmp_path):
++    with local_authorization_context(licensed.authorizer):
++        result = queue.submit({"output": {"skip_export": True}})
++    job_id = result["job_id"]
++    queue.store.claim_job("embedded-local")
++    output = Mock()
++    output.as_dict.return_value = {"exported": False, "output_draft_dir": str(tmp_path / "result")}
++    output.exported, output.output_mp4, output.output_draft_dir = False, None, tmp_path / "result"
++    with patch("jyd_probe.web_api.run_render_job", return_value=output) as render:
++        queue._run_job(job_id, already_claimed=True)
++        render.assert_called_once()
++    status = queue.store.get_status(job_id)
++    assert status["status"] == "completed"
++    assert status["device_authorization"]["user_id"] == 7
++    assert job_id not in queue._device_authorizers
++
++
++def test_resume_endpoint_requires_same_origin_owner_and_fresh_authorization(queue, licensed, enforced, monkeypatch):
++    from jyd_probe.web_api import create_app
++    with local_authorization_context(licensed.authorizer):
++        result = queue.submit({"output": {"skip_export": True}})
++    job_id = result["job_id"]
++    queue.store.pause_for_device_authorization(job_id, "DEVICE_LOCAL_CONTEXT_REQUIRED")
++    queue._device_authorizers.clear()
++    monkeypatch.setattr("jyd_probe.web_api.RenderJobQueue", lambda settings: queue)
++    def user_for(token):
++        return {"user_id": "8" if token == "other-account" else "7", "username": "test"} if token else None
++    with patch("jyd_probe.auth_center.AuthCenterClient.verify", side_effect=user_for):
++        app = create_app(queue.settings)
++        app.state.device_sessions._factory = lambda **_: licensed.session
++        with TestClient(app) as client:
++            endpoint = f"/api/jobs/{job_id}/resume-authorization"
++            client.cookies.set(queue.settings.site_cookie_name, "account-token")
++            assert client.post(endpoint).status_code == 403
++            headers = {"Origin": "http://testserver", "X-Device-Authorization-Action": "1"}
++            client.cookies.set(queue.settings.site_cookie_name, "other-account")
++            assert client.post(endpoint, headers=headers).status_code == 404
++            client.cookies.set(queue.settings.site_cookie_name, "account-token")
++            response = client.post(endpoint, headers=headers)
++            assert response.status_code == 200, response.text
++            assert response.json()["device_authorization"]["waiting"] is False
++            assert job_id in queue._device_authorizers
++            assert client.post(endpoint, headers=headers).status_code == 409
++
++
++def test_actual_web_app_keeps_device_errors_and_blocks_preflight_before_coordinator(
+*** End Patch

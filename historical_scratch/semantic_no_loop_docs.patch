@@ -1,0 +1,47 @@
+*** Begin Patch
+*** Update File: tests/test_new_frontend.py
+@@
+         self.assertIn("function normalizeAutomaticSemanticOverlay(overlay)", html)
++        self.assertIn("normalized.loop_to_target = false", html)
++        self.assertIn("semanticVisualDraft[index].loop_to_target = false", html)
++        self.assertIn("const configuredDurationUs = Number(effective.source_duration_us", html)
+         self.assertIn(".map(normalizeAutomaticSemanticOverlay)", html)
+*** Update File: docs/SEMANTIC_VISUAL_LIBRARY.md
+@@
+-- 图片不得声明全屏 B-roll 或接缝 B-roll；`seam_broll` 只能是视频。历史 `loop` / `loop_allowed`
+-  字段决定视频能否循环；全屏或接缝目标区间长于源片时，只有 `loop_allowed=true` 才循环补足。
++- 图片不得声明全屏 B-roll 或接缝 B-roll；`seam_broll` 只能是视频。历史 `loop` / `loop_allowed`
++  字段只为旧目录兼容保留，不再决定语义视频的播放行为；小窗视频、普通全屏空镜和接缝空镜
++  一律只播放一次，目标区间长于获准源片窗口时提前结束。
+@@
+-- 视频目标区间超过源片可用区间时，只播放从 `source_start_us` 起的剩余内容并提前结束，
+-  `loop_allowed=true` 时从源片起点循环补足，否则提前结束；无论是否循环，该资产仍不允许在
+-  同一成片的其他时间再次自动出现。
++- 视频目标区间超过源片可用区间时，只播放从 `source_start_us` 起、长度不超过
++  `defaults.duration_us` 的获准窗口并提前结束，不循环、不定格；该资产仍不允许在同一成片的
++  其他时间再次自动出现。
+@@
+-- 自动空镜的 `source_start_us + defaults.duration_us` 必须是完整复核过的连续干净窗口；暂停、加载、
+-  鼠标点击/回放图标、播放器控件不得进入该窗口。允许循环时只循环这个干净窗口，不循环整条源视频。
++- 自动空镜的 `source_start_us + defaults.duration_us` 必须是完整复核过的连续干净窗口；暂停、加载、
++  鼠标点击/回放图标、播放器控件不得进入该窗口。语义视频只播放一次该干净窗口，旧目录即使
++  留有 `loop=true` / `loop_allowed=true` 也会被运行时强制忽略。
+*** Update File: docs/DEVELOPER_GUIDE.md
+@@
+-  保留。配方先登记手工锁定项，再按接缝、通用全屏空镜、显式语义的顺序占位和更新
+-  `used_asset_ids`。视频源短于冻结目标区间时，浏览器预览和渲染器都会让该 overlay 提前结束，
+-  不循环也不定格补足。
++  保留。配方先登记手工锁定项，再按接缝、通用全屏空镜、显式语义的顺序占位和更新
++  `used_asset_ids`。视频源短于冻结目标区间时，浏览器预览和渲染器都会让该 overlay 提前结束，
++  不循环也不定格补足；该规则同时覆盖自动、人工锁定和历史冻结配方，旧
++  `loop_to_target=true` 在 API 保存、配方消费及渲染任务三层都会被强制关闭。
+*** Update File: docs/PROJECT_STATUS.md
+@@
+ 更新时间：2026-08-15
+ 
++> 2026-08-15：语义小窗视频、普通全屏空镜和接缝空镜统一改为只播放一次获准源片窗口；
++> API 保存、冻结配方消费、浏览器预览和剪映任务都会忽略历史 `loop_to_target=true`，素材不足
++> 目标时长时自然提前结束。普通空镜尝试参数保持 `VISUAL_BROLL_TARGET_INTERVAL_SECONDS=10`。
++
+ > 2026-08-15：普通全屏空镜改为约每 10 秒尝试、实际至少间隔 6 秒，并先于显式小窗占位；
+*** End Patch

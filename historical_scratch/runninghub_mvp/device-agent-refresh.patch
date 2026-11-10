@@ -1,0 +1,32 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_client.py
+@@
+-            result = session._transport.request(
+-                method="POST",
+-                path=PERMIT_PATH,
+-                headers=headers,
+-                payload={
+-                    "nonce": nonce,
+-                    "context_hash": context.digest,
+-                    "intent": context.intent,
+-                },
+-            )
++            def request_permit(request_headers):
++                return session._transport.request(
++                    method="POST", path=PERMIT_PATH, headers=request_headers,
++                    payload={"nonce": nonce, "context_hash": context.digest, "intent": context.intent},
++                )
++
++            try:
++                result = request_permit(headers)
++            except DeviceAuthorizationError as exc:
++                if (exc.code != "AUTH_REFRESH_REQUIRED" or context.intent != "execute"
++                    or not headers["Authorization"].startswith("DPoP ")):
++                    raise
++                # Only the permit is retried once. No queue request or paid work
++                # has been sent; refresh keeps the original device/grant.
++                session.refresh(force=True)
++                headers = session.request_headers(method="POST", path=PERMIT_PATH, scope=None)
++                key = session._ensure_key()
++                result = request_permit(headers)
+*** End Patch

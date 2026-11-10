@@ -1,0 +1,38 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_recovery.py
+@@
+     def identity(info):
+-        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+-    if identity(before) != identity(after) or identity(after) != identity(final):
++        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
++    # In this Windows runtime fstat and path.stat expose different ctime values
++    # after a rewrite. Compare ctime only within the same open-handle API; use
++    # stable file id/size/mtime across APIs, plus the content digest for review.
++    if (identity(before) != identity(after) or before.st_ctime_ns != after.st_ctime_ns or
++            identity(after) != identity(final)):
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_operations.py
+@@
+-        if execution is None and row["status"] == "running" and action == "fail":
++        if execution is None and row["status"] == "running" and action == "fail" and recovery is None:
+@@
+-            recovery_record = _validate_recovery(row, status, execution_id, recovery)
++            recovery_record = validate_recovery(recovery)
++            if (recovery["execution_id"] != execution_id or recovery["resolution"] != {"complete": "completed", "fail": "failed"}.get(action) or
++                    recovery["result"] != result or recovery["error"] != error):
++                fail("INVALID_AGENT_RECOVERY", "核实结论与原结果回报不一致", 422)
+@@
+-def _validate_recovery(row, status, execution_id, recovery):
++def validate_recovery(recovery):
+@@
+     execution_id_value(recovery["request_id"])
+-    if (recovery["execution_id"] != execution_id or
+-        recovery["confirm_stopped"] is not True or recovery["confirm_reviewed"] is not True or
++    execution_id_value(recovery["execution_id"])
++    if (recovery["confirm_stopped"] is not True or recovery["confirm_reviewed"] is not True or
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_routes.py
+@@
+-from urllib.parse import quote
+@@
+-        operations._validate_recovery(None, None, payload.get("execution_id"), payload)
++        operations.validate_recovery(payload)
+*** End Patch

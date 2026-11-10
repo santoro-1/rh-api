@@ -1,0 +1,139 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+             "DEVICE_REVOKED": "REVOKED",
++            "DEVICE_GRANT_EXPIRED": "EXPIRED",
+             "LOGIN_REQUIRED": "LOGIN_REQUIRED",
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization_routes.py
+@@
+-    def failure(error):
++    def failure(error, session=None):
+@@
+             "DEVICE_SUSPENDED": "SUSPENDED",
++            "DEVICE_GRANT_EXPIRED": "EXPIRED",
++            "CLIENT_UPGRADE_REQUIRED": "CLIENT_UPGRADE_REQUIRED",
+             "LOGIN_REQUIRED": "LOGIN_REQUIRED",
+@@
+-        return response(
+-            {"state": state, "code": error.code, "detail": str(error)}, status
+-        )
++        payload = {"state": state, "code": error.code, "detail": str(error)}
++        if session is not None and isinstance(error, DeviceAuthorizationError) and error.transient:
++            summary = session.summary()
++            # Only the session's already-valid signed lease can indicate grace.
++            # Do not convert an expired lease or an ordinary server error to ACTIVE.
++            if summary.get("state") == "OFFLINE_GRACE":
++                payload.update(summary)
++        return response(payload, status)
+@@
+     @app.get("/api/new/device-authorization")
+     def device_authorization_status(request: Request):
++        session = None
+         try:
+@@
+         except (DeviceAuthorizationError, DeviceIdentityError) as exc:
+-            return failure(exc)
++            return failure(exc, session)
+@@
+     @app.post("/api/new/device-authorization/refresh")
+     def refresh_device_authorization(request: Request):
+         _same_origin_action(request)
++        session = None
+         try:
+-            return response(session_for(request).refresh(force=True))
++            session = session_for(request)
++            return response(session.refresh(force=True))
+         except (DeviceAuthorizationError, DeviceIdentityError) as exc:
+-            return failure(exc)
++            return failure(exc, session)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.js
+@@
+-    if (response.status === 401) body.state = 'LOGIN_REQUIRED';
++    if (response.status === 401 && (!body.code || body.code === 'LOGIN_REQUIRED')) body.state = 'LOGIN_REQUIRED';
+@@
+-      if (!action && data.state === 'AUTH_REFRESH_REQUIRED' && data.thumbprint && !data.code && !data.error_code) data = await api('/refresh');
++      if (!action && ['ACTIVE','AUTH_REFRESH_REQUIRED'].includes(data.state) && data.thumbprint && !data.code && !data.error_code) data = await api('/refresh');
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization.py
+@@
+     def test_clock_rollback_cannot_extend_offline_grace(self):
++        self.session.refresh()
++        self.clock.wall -= 100
++        self.transport.error = DeviceAuthorizationError(
++            "DEVICE_AUTH_UNREACHABLE", "offline", transient=True
++        )
++        with self.assertRaises(DeviceAuthorizationError):
++            self.session.require_local("local:draft")
++        self.assertEqual(self.identity.created, 0)
++
++    def test_grant_expiration_is_not_login_failure_or_new_machine(self):
++        self.session.refresh()
++        self.transport.error = DeviceAuthorizationError("DEVICE_GRANT_EXPIRED", "expired")
++        with self.assertRaises(DeviceAuthorizationError):
++            self.session.refresh(force=True)
++        self.assertEqual(self.session.summary()["state"], "EXPIRED")
++        self.assertNotIn("exp", self.session.summary())
++        self.assertEqual(self.identity.created, 0)
++
++    def test_status_failure_preserves_only_original_valid_grace(self):
+         self.session.refresh()
+-        self.clock.wall -= 100
+         self.transport.error = DeviceAuthorizationError(
+-            "DEVICE_AUTH_UNREACHABLE", "offline", transient=True
++            "DEVICE_AUTH_UNREACHABLE", "offline", status_code=503, transient=True
+         )
+         with self.assertRaises(DeviceAuthorizationError):
+-            self.session.require_local("local:draft")
++            self.session.status()
++        self.assertEqual(self.session.summary()["state"], "OFFLINE_GRACE")
++        self.clock.advance(1800)
++        with self.assertRaises(DeviceAuthorizationError):
++            self.session.status()
++        self.assertEqual(self.session.summary()["state"], "AUTH_REFRESH_REQUIRED")
++        self.assertNotIn("exp", self.session.summary())
+         self.assertEqual(self.identity.created, 0)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization_routes.py
+@@
+-    def test_registry_reuses_session_but_never_shares_other_account_or_login(self):
++    def test_expired_upgrade_and_credential_errors_are_not_account_login_errors(self):
++        self.login()
++        for code, state, status in (
++            ("DEVICE_GRANT_EXPIRED", "EXPIRED", 403),
++            ("CLIENT_UPGRADE_REQUIRED", "CLIENT_UPGRADE_REQUIRED", 409),
++            ("DEVICE_TOKEN_EXPIRED", "AUTH_REFRESH_REQUIRED", 401),
++        ):
++            with self.subTest(code=code):
++                self.session.refresh.side_effect = DeviceAuthorizationError(code, "denied", status_code=status)
++                response = self.client.post("/api/new/device-authorization/refresh", headers=self.headers)
++                self.assertEqual(response.status_code, status)
++                self.assertEqual(response.json()["state"], state)
++                self.assertEqual(response.json()["code"], code)
++        self.session.register.assert_not_called()
++
++    def test_network_error_reports_existing_grace_without_extending_it(self):
++        self.login()
++        error = DeviceAuthorizationError("DEVICE_AUTH_UNREACHABLE", "offline", status_code=503, transient=True)
++        self.session.status.side_effect = error
++        self.session.refresh.side_effect = error
++        for state in ("OFFLINE_GRACE", "AUTH_REFRESH_REQUIRED"):
++            self.session.summary.return_value = {"state": state, "user_id": 7, "exp": 1234}
++            for method, path in (("GET", ""), ("POST", "/refresh")):
++                with self.subTest(state=state, path=path):
++                    response = self.client.request(method, "/api/new/device-authorization" + path, headers=self.headers)
++                    self.assertEqual(response.status_code, 503)
++                    self.assertEqual(response.json()["state"], state)
++                    if state == "OFFLINE_GRACE":
++                        self.assertEqual(response.json()["exp"], 1234)
++                    else:
++                        self.assertNotIn("exp", response.json())
++        self.session.register.assert_not_called()
++
++    def test_revocation_never_reuses_grace_summary(self):
++        self.login()
++        self.session.refresh.side_effect = DeviceAuthorizationError("DEVICE_REVOKED", "revoked")
++        self.session.summary.return_value = {"state": "OFFLINE_GRACE", "exp": 9999999999}
++        response = self.client.post("/api/new/device-authorization/refresh", headers=self.headers)
++        self.assertEqual(response.json()["state"], "REVOKED")
++        self.assertNotIn("exp", response.json())
++
++    def test_registry_reuses_session_but_never_shares_other_account_or_login(self):
+*** End Patch

@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from app.models import GenerationTask
+from app.services.audio import (
+    format_duration_timecode,
+    format_timecode,
+    validate_time_range,
+)
+from app.services.media_segmentation import (
+    DIGITAL_HUMAN_GENERATION_TAIL_SECONDS,
+    DIGITAL_HUMAN_PROVIDER_MAX_INPUT_SECONDS,
+)
+from app.workflows.base import WorkflowAsset, WorkflowOutput
+
+
+DIGITAL_HUMAN_MAX_SECONDS = DIGITAL_HUMAN_PROVIDER_MAX_INPUT_SECONDS
+DIGITAL_HUMAN_TAIL_PADDING_SECONDS = DIGITAL_HUMAN_GENERATION_TAIL_SECONDS
+DIGITAL_HUMAN_DEFAULT_INSTANCE_TYPE = "plus"
+EXACT_TIMESTAMP_TIMING_MODE = "exact_timestamps"
+GENERATION_TAIL_PARAMETER = "generation_tail_seconds"
+WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS = 1.0
+WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER = "workbench_final_segment_tail_seconds"
+
+
+def _boolean_parameter(value: Any, *, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("SeedVR2 放大开关不合法")
+
+
+def _uses_exact_timestamp_timing(task: GenerationTask) -> bool:
+    """Return whether an internal timestamped handoff forbids legacy tail padding."""
+
+    try:
+        payload = json.loads(str(getattr(task, "input_payload", "") or ""))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    parameters = payload.get("parameters")
+    return bool(
+        isinstance(parameters, dict)
+        and parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
+    )
+
+
+def generation_tail_padding_seconds(task: GenerationTask) -> float:
+    """Return a safe provider-only tail without changing the speech asset."""
+
+    if task.start_seconds > 0.001:
+        return 0.0
+    if task.end_seconds + 0.01 < task.audio_duration_seconds:
+        return 0.0
+    task_input = DigitalHumanWorkflow()._input(task)
+    parameters = task_input.get("parameters")
+    if isinstance(parameters, dict) and parameters.get(GENERATION_TAIL_PARAMETER) is not None:
+        try:
+            requested_padding = float(parameters[GENERATION_TAIL_PARAMETER])
+        except (TypeError, ValueError):
+            requested_padding = 0.0
+        return max(
+            0.0,
+            min(
+                requested_padding,
+                DIGITAL_HUMAN_MAX_SECONDS - task.audio_duration_seconds,
+            ),
+        )
+    # Compatibility for tasks frozen before generation_tail_seconds existed.
+    if _uses_exact_timestamp_timing(task):
+        return 0.0
+    if not (
+        getattr(task, "batch_item_id", None)
+        or getattr(task, "segment_id", None)
+    ):
+        return 0.0
+    return max(
+        0.0,
+        min(
+            0.5,
+            DIGITAL_HUMAN_MAX_SECONDS - task.audio_duration_seconds,
+        ),
+    )
+
+
+class DigitalHumanWorkflow:
+    key = "digital_human"
+    display_name = "数字人视频"
+    default_ai_app_id = "2062251097452007426"
+    default_prompt = "人物自然地说话，表情自然，动作自然，镜头保持稳定。"
+    submission_type = "ai-app"
+
+    # This is intentionally private to this adapter.  Other workflows define
+    # their own node map rather than extending generic task or worker code.
+    _NODES = {
+        "resolution": ("503", "value", "1024", "最长分辨率"),
+        "person_mode": ("753", "select", "1", "单双人模式选择"),
+        "image": ("240", "image", None, "参考图像"),
+        "audio": ("339", "audio", None, "总参考音频"),
+        "start_time": ("341", "start_time", None, "音频开始时间"),
+        "end_time": ("341", "end_time", None, "音频结束时间"),
+        "prompt": ("422", "text", None, "提示词"),
+    }
+    _DUAL_PERSON_AUDIO_NODES = {
+        "left_audio": ("739", "audio", "左边人物音频"),
+        "right_audio": ("738", "audio", "右边人物音频"),
+    }
+
+    def validate_parameters(
+        self, parameters: dict[str, Any], asset_metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        prompt = str(parameters.get("prompt") or "").strip()
+        if not 1 <= len(prompt) <= 5000:
+            raise ValueError("提示词长度必须在 1 到 5000 个字符之间")
+        duration = float(asset_metadata.get("audio_duration_seconds") or 0)
+        start_seconds, end_seconds = validate_time_range(
+            str(parameters.get("start_time") or ""),
+            str(parameters.get("end_time") or ""),
+            duration,
+        )
+        person_mode = str(parameters.get("person_mode", "1")).strip()
+        if person_mode not in {"0", "1"}:
+            raise ValueError("单双人模式不合法")
+        resolution = str(parameters.get("resolution", "1024")).strip()
+        try:
+            if int(resolution) <= 0:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("最长分辨率必须是正整数") from exc
+        requested_instance_type = str(
+            parameters.get("instance_type")
+            or DIGITAL_HUMAN_DEFAULT_INSTANCE_TYPE
+        ).strip()
+        if requested_instance_type not in {"default", "plus"}:
+            raise ValueError("实例类型不合法")
+        timing_mode = (
+            EXACT_TIMESTAMP_TIMING_MODE
+            if parameters.get("timing_mode") == EXACT_TIMESTAMP_TIMING_MODE
+            else None
+        )
+        raw_generation_tail = parameters.get(GENERATION_TAIL_PARAMETER)
+        try:
+            generation_tail_seconds = (
+                None if raw_generation_tail is None else float(raw_generation_tail)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("数字人生成静音尾时长不合法") from exc
+        if generation_tail_seconds is not None and not (
+            0.0 <= generation_tail_seconds <= DIGITAL_HUMAN_TAIL_PADDING_SECONDS
+        ):
+            raise ValueError("数字人生成静音尾时长不合法")
+        try:
+            final_segment_tail_seconds = float(
+                parameters.get(WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER) or 0.0
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("新版工作台最终分段收尾时间不合法") from exc
+        if final_segment_tail_seconds not in {
+            0.0,
+            WORKBENCH_FINAL_SEGMENT_TAIL_SECONDS,
+        }:
+            raise ValueError("新版工作台最终分段收尾时间不合法")
+        if final_segment_tail_seconds and timing_mode != EXACT_TIMESTAMP_TIMING_MODE:
+            raise ValueError("最终分段收尾时间只允许用于新版工作台精确时间轴")
+        return {
+            "prompt": prompt,
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "start_time": format_timecode(start_seconds),
+            "end_time": format_timecode(end_seconds),
+            "person_mode": person_mode,
+            "resolution": resolution,
+            "instance_type": requested_instance_type,
+            "seedvr2_enabled": _boolean_parameter(
+                parameters.get("seedvr2_enabled"), default=False
+            ),
+            "timing_mode": timing_mode,
+            GENERATION_TAIL_PARAMETER: generation_tail_seconds,
+            WORKBENCH_FINAL_SEGMENT_TAIL_PARAMETER: final_segment_tail_seconds,
+        }
+
+    def serialize_input(
+        self,
+        assets: list[WorkflowAsset],
+        parameters: dict[str, Any],
+        asset_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "assets": {
+                asset.name: {
+                    "kind": asset.kind,
+                    "path": asset.relative_path,
+                    "original_name": asset.original_name,
+                }
+                for asset in assets
+            },
+            "parameters": parameters,
+            "metadata": asset_metadata,
+        }
+
+    def _input(self, task: GenerationTask) -> dict[str, Any]:
+        if task.input_payload:
+            try:
+                value = json.loads(task.input_payload)
+                if isinstance(value, dict):
+                    return value
+            except json.JSONDecodeError:
+                pass
+        # Compatibility for tasks created before workflow adapters existed.
+        return {
+            "assets": {
+                "image": {
+                    "kind": "image",
+                    "path": task.image_path,
+                    "original_name": task.image_original_name,
+                },
+                "audio": {
+                    "kind": "audio",
+                    "path": task.audio_path,
+                    "original_name": task.audio_original_name,
+                },
+            },
+            "parameters": {
+                "prompt": task.prompt,
+                "start_seconds": task.start_seconds,
+                "end_seconds": task.end_seconds,
+                "start_time": format_timecode(task.start_seconds),
+                "end_time": format_timecode(task.end_seconds),
+            },
+            "metadata": {"audio_duration_seconds": task.audio_duration_seconds},
+        }
+
+    def assets_for_task(self, task: GenerationTask) -> list[WorkflowAsset]:
+        assets = self._input(task).get("assets")
+        if not isinstance(assets, dict):
+            raise ValueError("数字人任务缺少素材定义")
+        parameters = self._input(task).get("parameters")
+        if not isinstance(parameters, dict):
+            raise ValueError("数字人任务参数不合法")
+        names = ["image", "audio"]
+        if str(parameters.get("person_mode", "1")) == "0":
+            names.extend(["left_audio", "right_audio"])
+        result: list[WorkflowAsset] = []
+        for name in names:
+            value = assets.get(name)
+            if not isinstance(value, dict) or not value.get("path"):
+                raise ValueError(f"数字人任务缺少 {name} 素材")
+            result.append(
+                WorkflowAsset(
+                    name=name,
+                    kind=str(value.get("kind") or name),
+                    relative_path=str(value["path"]),
+                    original_name=str(value.get("original_name") or name),
+                )
+            )
+        return result
+
+    def build_payload(
+        self,
+        task: GenerationTask,
+        uploaded_files: dict[str, str],
+        *,
+        ai_app_id: str,
+        instance_type: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        del ai_app_id, settings  # The client owns the URL; this app has no extra settings yet.
+        if instance_type not in {"default", "plus"}:
+            raise ValueError("实例类型不合法")
+        values = self._input(task).get("parameters")
+        if not isinstance(values, dict):
+            raise ValueError("数字人任务参数不合法")
+        selected_instance_type = str(
+            values.get("instance_type")
+            or DIGITAL_HUMAN_DEFAULT_INSTANCE_TYPE
+        ).strip()
+        if selected_instance_type not in {"default", "plus"}:
+            raise ValueError("实例类型不合法")
+        values = {
+            **values,
+            "image": uploaded_files["image"],
+            "audio": uploaded_files["audio"],
+            "start_time": str(values.get("start_time") or format_timecode(task.start_seconds)),
+            "end_time": str(values.get("end_time") or format_timecode(task.end_seconds)),
+            "prompt": str(values.get("prompt") or task.prompt),
+        }
+        tail_padding = generation_tail_padding_seconds(task)
+        if tail_padding > 0:
+            values["end_time"] = format_duration_timecode(
+                task.audio_duration_seconds + tail_padding
+            )
+        nodes = [
+            {
+                "nodeId": node_id,
+                "fieldName": field_name,
+                "fieldValue": values.get(name, default_value),
+                "description": description,
+            }
+            for name, (node_id, field_name, default_value, description) in self._NODES.items()
+        ]
+        if str(values.get("person_mode", "1")) == "0":
+            nodes.extend(
+                {
+                    "nodeId": node_id,
+                    "fieldName": field_name,
+                    "fieldValue": uploaded_files[name],
+                    "description": description,
+                }
+                for name, (
+                    node_id,
+                    field_name,
+                    description,
+                ) in self._DUAL_PERSON_AUDIO_NODES.items()
+            )
+        return {
+            "nodeInfoList": nodes,
+            # The serialized task input is the immutable per-task snapshot.
+            "instanceType": selected_instance_type,
+            "usePersonalQueue": False,
+        }
+
+    def select_output(self, task: GenerationTask, result: dict[str, Any]) -> WorkflowOutput | None:
+        del task
+        results = result.get("results")
+        if not isinstance(results, list):
+            return None
+        # Prefer a video result if the workflow emits intermediate images too.
+        candidates = [item for item in results if isinstance(item, dict) and item.get("url")]
+        if not candidates:
+            return None
+        item = next(
+            (
+                candidate
+                for candidate in candidates
+                if str(candidate.get("outputType") or "").lower() in {"mp4", "mov", "webm"}
+            ),
+            candidates[0],
+        )
+        extension = str(item.get("outputType") or "mp4").lower().lstrip(".")
+        return WorkflowOutput(url=str(item["url"]), extension=extension, metadata=item)

@@ -1,0 +1,165 @@
+*** Begin Patch
+*** Update File: src/jyd_probe/semantic_visuals.py
+@@
+-FIXED_NAMEPLATE_TRANSFORM_Y = -0.22258064516128995
++FIXED_NAMEPLATE_TRANSFORM_Y = -0.18
+*** Update File: src/jyd_probe/render_job.py
+@@
+-                layer_order=10,
++                layer_order=10,
+@@
+-                layer_order=30 if fullscreen else 10,
++                layer_order=30 if fullscreen else 10,
+@@
+-    """Build automatic branding layers after semantic images and below captions."""
++    """Build branding first, directly above the base video and below every overlay."""
+@@
+-                layer_order=20,
++                layer_order=0,
+*** Update File: src/jyd_probe/project_postprocess.py
+@@
+-CAPTION_TRANSFORM_Y = -856 / 1920
++CAPTION_TRANSFORM_Y = -780 / 1920
+@@
+-TOP_TITLE_MAX_LABEL_CHARS = 12
+-TOP_TITLE_MAX_HEADLINE_CHARS = 20
+-COVER_TITLE_MAX_LINE_CHARS = 5
++TOP_TITLE_MAX_LABEL_CHARS = 5
++TOP_TITLE_MAX_HEADLINE_CHARS = 14
++COVER_TITLE_MAX_LINE_1_CHARS = 5
++COVER_TITLE_MAX_LINE_2_CHARS = 14
+@@
+-    for index, text in enumerate((line_1, line_2), start=1):
+-        if len(text) > COVER_TITLE_MAX_LINE_CHARS:
++    for index, (text, limit) in enumerate(
++        (
++            (line_1, COVER_TITLE_MAX_LINE_1_CHARS),
++            (line_2, COVER_TITLE_MAX_LINE_2_CHARS),
++        ),
++        start=1,
++    ):
++        if len(text) > limit:
+             raise ValueError(
+-                f"封面第 {index} 行最多 {COVER_TITLE_MAX_LINE_CHARS} 个字符"
++                f"封面第 {index} 行最多 {limit} 个字符"
+             )
+*** Update File: src/jyd_probe/project_content_analysis.py
+@@
+ from .unified_visual_plan import (
+@@
+ )
++from .project_postprocess import normalize_cover_title
+@@
+-    if music_status not in _BRANCH_STATUSES or subtitle_status not in _BRANCH_STATUSES:
++    title_status = str(payload.get("title_analysis_status") or "").upper()
++    if (
++        music_status not in _BRANCH_STATUSES
++        or subtitle_status not in _BRANCH_STATUSES
++        or title_status not in _BRANCH_STATUSES
++    ):
+         raise ValueError("数字人网站返回的内容分析分支状态无效")
+@@
+         if "".join(texts) != original_script:
+             raise ValueError("subtitle_units 未逐字符重建原始脚本")
++    title = payload.get("title")
++    if title_status == "SUCCESS":
++        title = normalize_cover_title(title)
++        if not title["line_1"] or not title["line_2"]:
++            raise ValueError("标题分析成功但缺少两行标题")
+@@
+         "subtitle_analysis_status": subtitle_status,
++        "title_analysis_status": title_status,
+@@
+         "subtitle_units": subtitle_units if isinstance(subtitle_units, list) else None,
++        "title": dict(title) if isinstance(title, Mapping) else None,
+@@
+             "subtitle": _branch_error(payload, "subtitle"),
++            "title": _branch_error(payload, "title"),
+*** Update File: src/jyd_probe/project_store.py
+@@
+-def _analysis_overall_status(music_status: str, subtitle_status: str) -> str:
++def _analysis_overall_status(
++    music_status: str, subtitle_status: str, title_status: str
++) -> str:
+     success_count = sum(
+-        status == "SUCCESS" for status in (music_status, subtitle_status)
++        status == "SUCCESS" for status in (music_status, subtitle_status, title_status)
+     )
+-    if success_count == 2:
++    if success_count == 3:
+@@
+         "subtitle_analysis_status": "NOT_REQUESTED",
++        "title_analysis_status": "NOT_REQUESTED",
+@@
+         "subtitle_units": None,
+-        "errors": {"music": None, "subtitle": None, "request": None},
++        "title": None,
++        "errors": {"music": None, "subtitle": None, "title": None, "request": None},
+@@
+             else:
+                 subtitle_status = "FAILED"
+                 subtitle_units = None
+                 subtitle_error = errors.get("subtitle")
++
++            title_status = str(result.get("title_analysis_status") or "FAILED")
++            if title_status == "SUCCESS":
++                title = result.get("title")
++                title_error = None
++            elif baseline.get("title_analysis_status") == "SUCCESS":
++                title_status = "SUCCESS"
++                title = baseline.get("title")
++                title_error = None
++            else:
++                title_status = "FAILED"
++                title = None
++                title_error = errors.get("title")
+@@
+                 "overall_status": _analysis_overall_status(
+-                    music_status, subtitle_status
++                    music_status, subtitle_status, title_status
+                 ),
+@@
+                 "subtitle_analysis_status": subtitle_status,
++                "title_analysis_status": title_status,
+@@
+                 "subtitle_units": subtitle_units,
++                "title": title,
+@@
+                     "subtitle": subtitle_error,
++                    "title": title_error,
+@@
+-            connection.execute(
++            if title_status == "SUCCESS" and isinstance(title, dict):
++                line_1 = str(title.get("line_1") or "").strip()
++                line_2 = str(title.get("line_2") or "").strip()
++                settings = _object(item["settings_json"], {})
++                postprocess = dict(settings.get("postprocess") or {})
++                canonical_title = {"line_1": line_1, "line_2": line_2}
++                postprocess.update(
++                    {
++                        "title": canonical_title,
++                        "cover_title": canonical_title,
++                        "top_title": {"label": line_1, "headline": line_2},
++                    }
++                )
++                settings["postprocess"] = postprocess
++                connection.execute(
++                    "UPDATE project_items SET settings_json=? WHERE item_id=?",
++                    (_json(settings), item_id),
++                )
++            connection.execute(
+                 "UPDATE project_items SET content_analysis_json=?, updated_at=? WHERE item_id=?",
+@@
+         failed = {
+@@
+-            "errors": {"music": error, "subtitle": error},
++            "title_analysis_status": "FAILED",
++            "errors": {"music": error, "subtitle": error, "title": error},
+*** Update File: apps/processor/frontend/new/index.html
+@@
+-                <img id="video-preview-fixed-nameplate" class="hidden absolute z-[15] pointer-events-none object-contain drop-shadow-xl" src="/api/new/fixed-visuals/nameplate/preview" alt="张雒人名牌">
++                <img id="video-preview-fixed-nameplate" class="hidden absolute z-[9] pointer-events-none object-contain drop-shadow-xl" src="/api/new/fixed-visuals/nameplate/preview" alt="张雒人名牌">
+@@
+-            const transformY = -0.22258064516128995;
++            const transformY = -0.18;
+*** End Patch

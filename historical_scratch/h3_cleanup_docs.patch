@@ -1,0 +1,74 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/DEVELOPER_GUIDE.md
+@@
+ # 开发者指南
++
++### 2026-08-31 H3 本地片头声音清理
++
++新版工作台 H3 接口默认启用 `jyd.h3-head-silence.v1`。复用现有
++`JYD_ASR_BASE_URL`（默认 `http://127.0.0.1:18084`）的 Paraformer 字词时间戳，
++不会修改云端 H3 输出合同或恢复旧的 300ms 裁剪。声音条件仍是 H3 实际输出，不换回 MiniMax。
++
++- 原片 `segment-cache/<id>/current.mp4` 和下载摘要不变。逐段独立解码，ASR 用 16k 单声道；
++  清理用原采样率/声道的 16-bit PCM，避免立体声反相杂音被分析下混抵消。
++- 匹配分段台词开头最多三个连续 token，只用 ASR 实际时间戳、不用字幕插值；最多允许两个
++  前导误识别 token，不匹配则本地失败。首词超过 5 秒保护上限也失败，不做固定时长降级。
++- 首词之前以 10ms RMS 窗、5ms 步长找最后一个至少 20ms 的低能量区间；阈值相对首三个词
++  的语音 RMS 低 25dB，并限制在一个量化单位到 -40dBFS。静音此前样本，在该区间最后 10ms
++  做半余弦淡入。恢复点之后 PCM 完全不变，总样本数不变；无可用间隙则记录 `NO_HEAD_GAP`
++  并保持原声。参数是当前口播样本的起始方案，不是适用于所有音频的保证。
++- 清理缓存按原片 SHA256、完整分段台词摘要和全部算法配置寻址。产物为独立 `clean.wav`、
++  `preview.mp4`、`report.json`，报告最后原子发布；不会累积处理已经清理的文件。
++- 共享后台线程池最多同时处理两段，最多排队 16 段，不在状态请求中等待 ASR。
++  失败落盘，间隔 60 秒最多自动尝试三次，之后用片段检查的本地重试按钮恢复。
++  后台仅写派生文件，状态轮询负责版本回填；重启可恢复未完成清理。
++- 单段预览用清理版，原始素材下载显式用原片；清理 PCM 按实际视频边界及原音视频起点差
++  组合为最终权威 WAV，再封装母版 AAC。不能从原 AAC 拼接母版重新抽声音覆盖清理结果。
++  MP4 中音频会重编码，正文样本不变的约束指权威 PCM，不宣称 AAC 字节级不变。
++- 合成缓存和素材 metadata 包含清理版本及逐段 key；旧本地结果状态同步可重新准备派生素材，
++  不重做付费 H3、不覆盖已经打开或导出的用户草稿。清理未完成前不自动启动该行 4B。
++- 本轮不改独立视频片段建轨、接缝视觉叠化、全局降噪或段尾脉冲处理。
++
++回归：`test_h3_audio_cleanup.py`、`test_h3_audio_cleanup_coordinator.py`、
++`test_project_h3.py`、`test_project_h3_media.py`、`test_project_h3_api.py`、
++`test_caption_alignment.py`、`test_new_frontend.py`。
+ 
+ ### 2026-08-31 文件夹语义图库
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/WEB_API.md
+@@
+ # Web API
++
++## 2026-08-31 H3 片头本地清理
++
++- H3 状态响应在每段增加 `local_audio_cleanup`：`status` 为 `PENDING`、`PROCESSING`、
++  `RETRY_WAIT`、`FAILED` 或 `READY`，包含 `version`、`key`；就绪时包含
++  `muted_until_seconds` / `restored_at_seconds`，失败时包含 `error`。
++- `local_preview_ready` / `local_preview_is_current` 继续表示原始下载缓存状态，不能据此
++  宣称声音清理完成。页面仅在清理就绪后播放清理版。`/h3-segments/{number}/preview`
++  返回清理版 MP4；清理未就绪返回 404 提示。`/h3-segments/download` 始终打包原片，
++  不要求 ASR 成功，不得把下载路径解析默认改成清理版。
++- `POST /api/new/projects/{project_id}/h3/segments/{segment_id}/audio-cleanup/retry`
++  使用当前登录和项目归属校验，仅重置该当前原片的本地清理失败预算并入队。
++  返回 `{"cleanup": {...}}`。不存在/跨用户项目返回 404，过期片段或原片未就绪返回 409。
++  该接口不调用云端提交、重新生成、收费确认或云端账号数据库写入。
++- 清理后的 H3 audio/base/master metadata 包含 `head_cleanup_version`、
++  `head_cleanup_keys`、`head_cleanup_reports`；媒体签名包含清理 key，以免旧缓存覆盖新声音。
++
++算法及缓存约束见 `DEVELOPER_GUIDE.md` 的 H3 本地片头声音清理章节。
+ 
+ ## 2026-08-31 文件夹语义素材来源
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_LAYOUT.md
+@@
+ src/jyd_probe/project_audio.py    新版音色校验、数字人音频批次编排、状态同步和版本落盘
++src/jyd_probe/h3_audio_cleanup.py H3 原片逐段本地 ASR、等长片头静音、派生缓存和后台处理队列
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_STATUS.md
+@@
+ # 项目状态与后续顺序
++
++> 2026-08-31：新增 H3 本地逐段片头声音清理。复用当前本机 Paraformer ASR，保持原片、
++> 视频时间线和正文 PCM 不变；清理版供分段预览和后续合成，原始素材下载保持原片。
++> 本地后台重试不触发 H3 付费生成。已用现有三段原片制作独立 A/B 文件，未覆盖用户草稿。
++> 仅本地源码修复，无生产部署；独立片段建轨按用户要求留到声音清理验证之后。
+ 
+ 更新时间：2026-08-15
+*** End Patch

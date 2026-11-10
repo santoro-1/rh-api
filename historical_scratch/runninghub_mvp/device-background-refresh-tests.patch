@@ -1,0 +1,212 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_background_refresh.py
++from __future__ import annotations
++
++from pathlib import Path
++import sys
++import threading
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from test_device_authorization import Clock, Signer, Identity, Issuer, Transport
++from jyd_probe.device_authorization import DeviceAuthorizationSession
++from jyd_probe.device_auth_protocol import DeviceAuthorizationError
++from jyd_probe.device_authorization_routes import DeviceSessionRegistry, install_device_authorization_routes
++from jyd_probe.device_background_refresh import DeviceBackgroundRefresher
++
++
++@pytest.fixture
++def device():
++    clock, signer = Clock(), Signer()
++    identity = Identity(signer)
++    issuer = Issuer(clock, signer)
++    transport = Transport(issuer)
++    session = DeviceAuthorizationSession(user_id=7, login_token="account-token", trust=issuer.trust,
++        identity=identity, transport=transport, wall_clock=lambda: clock.wall, monotonic_clock=lambda: clock.mono)
++    yield SimpleNamespace(clock=clock, signer=signer, identity=identity, issuer=issuer, transport=transport, session=session)
++    session.close()
++
++
++def test_background_refresh_reuses_identity_and_five_minute_deadline(device):
++    assert device.session.background_refresh()
++    first = device.session.summary()
++    calls = len(device.transport.calls)
++    assert first["state"] == "ACTIVE" and device.identity.created == 0
++    assert not device.session.background_refresh()
++    device.clock.advance(299)
++    assert not device.session.background_refresh()
++    device.clock.advance(1)
++    assert device.session.background_refresh()
++    assert len(device.transport.calls) == calls + 2
++    latest = device.session.summary()
++    assert (latest["device_id"], latest["grant_id"], latest["thumbprint"]) == (first["device_id"], first["grant_id"], first["thumbprint"])
++    assert not any(call["path"].endswith("/register") for call in device.transport.calls)
++
++
++def test_missing_key_is_not_automatically_created_or_registered(device):
++    device.identity.signer = None
++    assert device.session.background_refresh()
++    assert device.session.summary()["state"] == "UNREGISTERED"
++    device.clock.advance(1000)
++    assert not device.session.background_refresh()
++    assert device.identity.created == 0 and device.transport.calls == []
++
++
++def test_pending_approval_refreshes_without_another_registration(device):
++    device.session.register()
++    device.transport.calls.clear()
++    device.transport.error = DeviceAuthorizationError("DEVICE_PENDING", "waiting")
++    assert device.session.background_refresh()
++    assert device.session.summary()["state"] == "PENDING"
++    device.clock.advance(14)
++    assert not device.session.background_refresh()
++    device.transport.error = None
++    device.clock.advance(1)
++    assert device.session.background_refresh()
++    assert device.session.summary()["state"] == "ACTIVE"
++    assert not any(call["path"].endswith("/register") for call in device.transport.calls)
++
++
++def test_offline_backoff_does_not_extend_lease_or_resume_jobs(device):
++    device.session.refresh()
++    expiration = device.session.summary()["exp"]
++    device.transport.error = DeviceAuthorizationError("NETWORK_ERROR", "offline", transient=True)
++    device.clock.advance(300)
++    assert device.session.background_refresh()
++    assert device.session.summary()["state"] == "OFFLINE_GRACE"
++    assert device.session.summary()["exp"] == expiration
++    assert not device.session.background_refresh()
++    device.clock.advance(1500)
++    assert device.session.background_refresh()
++    assert device.session.summary()["state"] == "AUTH_REFRESH_REQUIRED"
++    assert "exp" not in device.session.summary()
++    assert all(call["path"].startswith("/api/workbench/device-auth/") for call in device.transport.calls)
++
++
++@pytest.mark.parametrize("code,state", [("DEVICE_REVOKED", "REVOKED"), ("DEVICE_SUSPENDED", "SUSPENDED"),
++    ("DEVICE_GRANT_EXPIRED", "EXPIRED"), ("LOGIN_REQUIRED", "LOGIN_REQUIRED"), ("CLIENT_UPGRADE_REQUIRED", "CLIENT_UPGRADE_REQUIRED")])
++def test_authoritative_denial_clears_credentials_without_reactivation(device, code, state):
++    device.session.refresh()
++    device.clock.advance(300)
++    device.transport.error = DeviceAuthorizationError(code, "rejected")
++    assert device.session.background_refresh()
++    assert device.session.summary()["state"] == state
++    assert device.session._credentials is None
++    assert not device.session.background_refresh()
++    assert device.identity.created == 0
++
++
++def test_clock_rollback_cannot_keep_offline_lease(device):
++    device.session.refresh()
++    device.clock.wall -= 60
++    device.transport.error = DeviceAuthorizationError("NETWORK_ERROR", "offline", transient=True)
++    assert device.session.background_refresh()
++    assert device.session._credentials is None
++    assert device.session.summary()["state"] == "AUTH_REFRESH_REQUIRED"
++
++
++def test_closed_session_never_contacts_server(device):
++    device.session.refresh()
++    calls = len(device.transport.calls)
++    device.session.close()
++    assert not device.session.background_refresh()
++    assert len(device.transport.calls) == calls
++
++
++def test_busy_account_is_skipped_without_waiting_for_foreground(device):
++    locked, release = threading.Event(), threading.Event()
++    def hold():
++        with device.session._lock:
++            locked.set()
++            release.wait(3)
++    worker = threading.Thread(target=hold)
++    worker.start()
++    try:
++        assert locked.wait(2)
++        assert not device.session.background_refresh()
++        assert device.transport.calls == []
++    finally:
++        release.set()
++        worker.join(timeout=2)
++
++
++def test_slow_account_does_not_block_other_account_or_duplicate_itself():
++    started, release, fast_done = threading.Event(), threading.Event(), threading.Event()
++    slow, fast = Mock(), Mock()
++    def slow_refresh():
++        started.set()
++        release.wait(3)
++    slow.background_refresh.side_effect = slow_refresh
++    fast.background_refresh.side_effect = fast_done.set
++    refresher = DeviceBackgroundRefresher(lambda: (slow, fast), interval=3600, workers=2)
++    refresher.start()
++    try:
++        refresher.schedule_once()
++        assert started.wait(2) and fast_done.wait(2)
++        refresher.schedule_once()
++        assert slow.background_refresh.call_count == 1
++    finally:
++        release.set()
++        refresher.stop()
++    assert not any(thread.is_alive() for thread in refresher._threads)
++
++
++def test_worker_error_does_not_leak_exception_secrets_or_kill_service(caplog):
++    failed, healthy = Mock(), Mock()
++    done = threading.Event()
++    failed.background_refresh.side_effect = RuntimeError("private-account-token-do-not-log")
++    healthy.background_refresh.side_effect = done.set
++    refresher = DeviceBackgroundRefresher(lambda: (failed, healthy), interval=3600, workers=1)
++    refresher.start()
++    try:
++        refresher.schedule_once()
++        assert done.wait(2)
++    finally:
++        refresher.stop()
++    assert "RuntimeError" in caplog.text and "private-account-token" not in caplog.text
++
++
++def test_registry_logout_removes_session_and_stops_future_refresh(device):
++    registry = DeviceSessionRegistry("https://license.example", session_factory=lambda **_: device.session)
++    registry.get("7", "account-token")
++    assert registry.active_sessions() == (device.session,)
++    registry.forget("account-token")
++    assert registry.active_sessions() == ()
++    assert not device.session.background_refresh()
++    registry.close()
++
++
++def test_app_lifecycle_refreshes_without_any_page_or_business_request(device):
++    done = threading.Event()
++    device.session.background_refresh = Mock(side_effect=done.set)
++    registry = DeviceSessionRegistry("https://license.example", session_factory=lambda **_: device.session)
++    registry.get("7", "account-token")
++    registry._background._interval = 0.02
++    app = FastAPI()
++    install_device_authorization_routes(app, base_url=registry.base_url, cookie_name="site",
++        current_user=lambda _: {"user_id": "7"}, registry=registry)
++    with TestClient(app):
++        assert done.wait(2)  # No browser requests were made.
++        threads = tuple(registry._background._threads)
++        assert any(thread.is_alive() for thread in threads)
++    assert all(not thread.is_alive() for thread in threads)
++    assert registry.active_sessions() == ()
++
++
++def test_start_is_idempotent_and_stop_drops_pending_work():
++    refresher = DeviceBackgroundRefresher(lambda: (), interval=3600, workers=1)
++    refresher.start()
++    first = tuple(refresher._threads)
++    refresher.start()
++    assert tuple(refresher._threads) == first
++    refresher.stop()
++    assert not any(thread.is_alive() for thread in first)
++    refresher.start()
++    assert tuple(refresher._threads) != first
++    refresher.stop()
+*** End Patch

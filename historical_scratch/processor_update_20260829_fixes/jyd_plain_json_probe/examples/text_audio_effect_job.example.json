@@ -1,0 +1,49 @@
+{
+  "template_draft_dir": "D:/剪映草稿/JianyingPro Drafts/用来测试",
+  "decrypt": {
+    "enabled": true,
+    "force": false,
+    "work_root": "",
+    "exe": "",
+    "install_dir": "",
+    "debug": false
+  },
+  "draft_root": "D:/剪映草稿/JianyingPro Drafts",
+  "draft_name": "",
+  "output_mp4": "D:/输出/result.mp4",
+  "skip_export": true,
+  "video": null,
+  "texts": [
+    {
+      "type": "replace",
+      "scope": "top",
+      "track_index": 0,
+      "segment_index": 0,
+      "text": "这里是新的标题",
+      "style_json_path": "D:/工作内容/轻盈健/公寓/text_style_library/抖音美好体测试.json",
+      "apply_clip": true
+    }
+  ],
+  "audios": [
+    {
+      "type": "add",
+      "media_path": "D:/素材/music.mp3",
+      "target_start_us": 0,
+      "target_duration_us": 0
+    }
+  ],
+  "effects": [
+    {
+      "effect_json_path": "D:/工作内容/轻盈健/公寓/effect_library/流星雨.json",
+      "target_video_track_index": 0,
+      "target_video_segment_index": 0,
+      "start_us": -1,
+      "duration_us": 0
+    }
+  ],
+  "export": {
+    "resolution": "1080P",
+    "framerate": "30fps",
+    "timeout": 1200
+  }
+}

@@ -1,0 +1,82 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/RENDER_JOB_SCHEMA.md
+@@
+-模板模式用于套用已经存在的剪映草稿。模板可能是明文，也可能是高版本加密草稿；加密草稿会按 `decrypt` 配置自动解密到工作副本：
++H3 与上述 MiniMax/SeedVR2 时间策略不同：当前 `base_video.metadata` 保存
++`video_sequence_version=jyd.h3-video-sequence.v1`、有序 `source_segment_asset_ids`、
++`source_segment_ids` 与 `segment_count`。H3 分段使用实际生成的视频时长，不按输入语音
++裁尾/放慢，也不触发历史短差回退。原片音量为 0，清理后的 H3 权威音频只铺一次；原生
++叠化继承当前母版的 `visual_dissolve_seconds`，不缩短时间轴。
++
++账号模板新增顶层 `main_video_sequence`：
++
++```json
++{
++  "source": {"type": "template", "template_draft_dir": "D:/模板"},
++  "timeline_duration_us": 8000000,
++  "main_video_sequence": {
++    "track_index": 0,
++    "segment_index": 0,
++    "items": [
++      {"media_path": "D:/素材/片段1.mp4", "target_duration_us": 4000000, "volume": 0, "transition_after_us": 500000},
++      {"media_path": "D:/素材/片段2.mp4", "target_duration_us": 4000000, "volume": 0}
++    ]
++  }
++}
++```
++
++它只在输出副本中把指定视频槽替换成多个原生片段，保留构图等视觉参数和其他模板轨道。
++`track_index=-1` 表示模板没有主视频占位，新增底层主视频轨。主轨其他片段重叠或总时长
++不一致时拒绝替换。模板尾部时长适配先于分段插入，防止中间片段被错误拉长。工作台自动
++仅对 H3 模板路径使用此字段，旧数字人模板路径不变。
++
++模板模式用于套用已经存在的剪映草稿。模板可能是明文，也可能是高版本加密草稿；加密草稿会按 `decrypt` 配置自动解密到工作副本：
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/DEVELOPER_GUIDE.md
+@@
+ ## 9. 自动化测试
++
++### H3 独立片段建轨（2026-08-31，本地源码）
++
++- `h3_video_segments.py` 将可替换的 `segment-cache/current.mp4` 冻结为按 SHA-256 隔离的
++  原片，登记 `original_video_segment/source_type=h3`。重生成更换引用，不改历史文件。
++- 基础视频冻结 `jyd.h3-video-sequence.v1`、段数、段 ID 和有序素材 ID。建轨逐项复核
++  当前批次、行、签名、顺序、文件和总时长；缺段不得回退为合并视频。
++- `outputs.original_video_segments` 对 H3 只返回当前绑定集合，全部版本留在
++  `asset_history.original_video_segment`，防止原始素材下载混入历史段。
++- 4B/变体按 H3 实际视频时长逐段建轨，原片全部静音，继续铺一次清理后的 H3 权威音轨。
++  不按 MiniMax 输入时长裁尾，不改变现有 0.5 秒保时长视觉转场配置。
++- 已清理声音的旧结果通过状态同步补清单并创建基础视频元数据新版本；音频文件和已有
++  ASR 绑定不变，不重跑识别或付费生成。重新生成后期草稿才会看到分段，既有草稿不覆盖；
++  进行中的后期/变体和手工上传的成片不会被该升级替换。
++- 模板通过 `main_video_sequence` / `video_sequence_apply.py` 替换主视频槽，或在无主视频
++  模板中新增底层轨道；只处理输出副本，其他字幕、贴纸和模板内容沿用原规则。
++- 专项测试为 `tests/test_h3_video_sequence.py`，覆盖乱序、旧结果恢复、历史隔离、缺段、
++  模板参数、真实独立片段草稿和唯一权威音轨。未调用付费服务或部署生产。
++
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/DIGITAL_HUMAN_INTEGRATION_20260803.md
+@@
+ ## 连接方式
++
++> 2026-08-31 H3 分段补充：主工作台登记不可变原片及精确版本清单，普通和账号模板草稿
++> 均按 H3 实际时长写入独立主轨片段。浏览器仍可播放合并预览，但草稿不再使用一整条
++> 合并素材。清理后的 H3 权威音轨只铺一次；旧结果可零付费补清单，历史草稿不覆盖。
++> 已用三段实片在隔离目录验证 3 个独立视频片段和 1 条语音，未执行 GUI 导出。
++
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_LAYOUT.md
+@@
+ src/jyd_probe/h3_audio_cleanup.py H3 原片逐段本地 ASR、等长片头静音、派生缓存和后台处理队列
++src/jyd_probe/h3_video_segments.py H3 不可变原片快照、有序版本清单与完整性校验
++src/jyd_probe/video_sequence_apply.py 账号模板主视频槽的原生独立片段替换
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_STATUS.md
+@@
+ # 项目状态与后续顺序
++
++> 2026-08-31 后续：H3 独立片段建轨已完成本地修复。普通与账号模板草稿使用有序、不可变
++> 原片，保持 H3 视频时钟和清理后的唯一权威音轨；旧结果补清单不重跑付费生成。
++> 三段实片已生成隔离验收草稿：8s、11.541667s、9.416667s，原草稿未修改。
++> 未部署、未提交云端任务、未执行剪映 GUI 导出。
++
+@@
+-> 仅本地源码修复，无生产部署；独立片段建轨按用户要求留到声音清理验证之后。
++> 仅本地源码修复，无生产部署；声音清理之后已完成独立片段建轨，见上方后续记录。
+*** End Patch

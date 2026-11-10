@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}后处理清单{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>{{ item.row_key }} · 后处理清单</h1>
+    <p class="muted">{{ batch.name }} · 当前阶段：{{ current_status_label }}</p>
+  </div>
+  <div class="button-row">
+    <a class="button secondary" href="/batches/{{ batch.id }}">返回批次详情</a>
+    <a class="button secondary" href="/api/batches/{{ batch.id }}/items/{{ item.id }}/postproduction">查看 JSON 接口</a>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-heading"><h2>下一步怎么处理</h2></div>
+  {% if manifest.mode == "AUTO_POSTPROCESS" %}
+    <p class="success-text"><strong>可自动后期</strong>：这是文本生成语音且未切分的单条视频，可以直接带着精确字幕进入工作台。</p>
+  {% elif manifest.manual_edit_reason == "UPLOADED_AUDIO" %}
+    <p><strong>需要人工处理</strong>：这是上传音频任务。请下载原始生成片段，在剪映中粗剪成片后再交给工作台。</p>
+  {% elif manifest.manual_edit_reason == "SEGMENTED_VIDEO" %}
+    <p><strong>需要人工粗剪</strong>：视频由多个图生视频片段组成，自动拼接只能作为顺序预览。</p>
+  {% else %}
+    <p><strong>需要人工处理</strong>：请确认成片后再进入工作台。</p>
+  {% endif %}
+  <p class="muted">内部状态：{{ manifest.status }} · 输入方式：{{ "文本" if manifest.input_mode == "text" else "上传音频" }}</p>
+</section>
+
+<section class="panel">
+  <div class="panel-heading"><h2>原始视频素材（{{ manifest.source.videos|length }} 段）</h2></div>
+  {% if manifest.source.videos %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>片段</th><th>时间范围</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>
+          {% for video in manifest.source.videos %}
+            <tr>
+              <td>第 {{ video.index }} 段</td>
+              <td>{{ "%.3f"|format(video.start_seconds or 0) }}–{{ "%.3f"|format(video.end_seconds or 0) }} 秒</td>
+              <td>{{ video.status }}</td>
+              <td>
+                {% if video.status == "SUCCESS" %}
+                  <a href="{{ video.preview_url }}">预览</a>
+                  · <a href="{{ video.download_url }}">下载原始片段</a>
+                {% else %}
+                  <span class="muted">尚无可下载视频</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">视频任务尚未创建完成，请稍后刷新。</p>
+  {% endif %}
+  {% if manifest.source.quick_preview_url %}
+    <p><a class="button secondary" href="{{ manifest.source.quick_preview_url }}">查看快速拼接预览</a></p>
+  {% endif %}
+</section>
+
+{% if manifest.captions %}
+<section class="panel">
+  <div class="panel-heading"><h2>精确字幕</h2></div>
+  <p>共 {{ manifest.captions.cues|length }} 条 MiniMax 时间戳。{% if manifest.caption_timeline_is_final %}可直接交给工作台。{% else %}粗剪后时间轴会变化，请在剪映中重新识别或调整。{% endif %}</p>
+</section>
+{% endif %}
+{% endblock %}

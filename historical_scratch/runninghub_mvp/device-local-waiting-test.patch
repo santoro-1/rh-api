@@ -1,0 +1,18 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_local_execution.py
+@@
+             client.cookies.set(queue.settings.site_cookie_name, "account-token")
++            waiting = client.get("/api/new/device-authorization/waiting-jobs")
++            assert waiting.status_code == 200 and waiting.headers["cache-control"] == "no-store"
++            assert [row["job_id"] for row in waiting.json()["jobs"]] == [job_id]
++            assert "payload" not in waiting.text and "account-token" not in waiting.text
+             assert client.post(endpoint).status_code == 403
+@@
+             client.cookies.set(queue.settings.site_cookie_name, "other-account")
++            assert client.get("/api/new/device-authorization/waiting-jobs").json()["jobs"] == []
+             assert client.post(endpoint, headers=headers).status_code == 404
+@@
+             assert job_id in queue._device_authorizers
++            assert client.get("/api/new/device-authorization/waiting-jobs").json()["jobs"] == []
+             assert client.post(endpoint, headers=headers).status_code == 409
+*** End Patch

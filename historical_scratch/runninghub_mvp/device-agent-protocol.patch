@@ -1,0 +1,326 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_protocol.py
++"""Agent-only signed permits and proof-of-possession; no launcher trust shortcut."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++import hmac
++import re
++import secrets
++from urllib.parse import quote, urlsplit
++
++import jwt
++
++from .device_auth_protocol import (
++    DeviceAuthorizationError, PRODUCT, b64url, canonical_json, canonical_uri,
++    jwk_thumbprint, public_key, sha256_b64, strict_jwt_parts,
++)
++
++PERMIT_TYPE = "workbench-agent-request+jwt"
++PERMIT_AUDIENCE = PRODUCT + ":agent-request"
++PERMIT_SCHEMA = "publicvideo.agent-request.v1"
++PROOF_TYPE = "workbench-agent-proof+jwt"
++LOCAL_SCOPES = frozenset({"local:draft", "local:render"})
++PERMIT_SECONDS = 90
++HASH_PATTERN = r"[A-Za-z0-9_-]{43}"
++
++
++def fail(code="INVALID_AGENT_AUTHORIZATION", message="处理机授权或请求证明无效", status=403):
++    raise DeviceAuthorizationError(code, message, status_code=status)
++
++
++def agent_id_value(value):
++    if not isinstance(value, str) or not 1 <= len(value) <= 96 or any(
++        not (c.isalnum() or c in "-_.") for c in value
++    ):
++        fail("INVALID_AGENT_REQUEST", "处理机编号无效", 422)
++    return value
++
++
++def agent_origin(value):
++    try:
++        origin = canonical_uri(value).rstrip("/")
++        if urlsplit(origin).path:
++            raise ValueError()
++        return origin
++    except (TypeError, ValueError):
++        fail("INVALID_AGENT_REQUEST", "中央服务地址必须是完整的服务根地址", 422)
++
++
++@dataclass(frozen=True)
++class AgentRequestContext:
++    agent_id: str
++    uri: str
++    intent: str
++    body_hash: str
++
++    @classmethod
++    def for_request(cls, origin, agent_id, path, payload):
++        agent_id = agent_id_value(agent_id)
++        prefix = "/api/agents/" + quote(agent_id, safe="-_.")
++        intent = "execute"
++        if path == "/api/agents/register":
++            if not isinstance(payload, dict) or payload.get("agent_id") != agent_id:
++                fail("INVALID_AGENT_REQUEST", "注册请求的处理机编号不一致", 422)
++        elif path in {prefix + "/claim", prefix + "/heartbeat"}:
++            pass
++        elif re.fullmatch(re.escape(prefix) + r"/jobs/[A-Za-z0-9_.-]{1,128}/(?:heartbeat|complete|fail)", path):
++            intent = "report"
++        else:
++            fail("INVALID_AGENT_REQUEST", "处理机授权不能用于该接口", 422)
++        if not isinstance(payload, dict):
++            fail("INVALID_AGENT_REQUEST", "处理机请求必须为对象", 422)
++        try:
++            body = canonical_json(payload)
++            if len(body) > 65536:
++                raise ValueError()
++            uri = agent_origin(origin) + path
++            if canonical_uri(uri) != uri:
++                raise ValueError()
++        except (ValueError, TypeError, RecursionError):
++            fail("INVALID_AGENT_REQUEST", "处理机请求格式无效或过大", 422)
++        return cls(agent_id, uri, intent, sha256_b64(body))
++
++    @property
++    def digest(self):
++        return sha256_b64(canonical_json({
++            "schema": "publicvideo.agent-context.v1", "agent_id": self.agent_id,
++            "htm": "POST", "htu": self.uri, "intent": self.intent, "body_hash": self.body_hash,
++        }))
++
++
++@dataclass(frozen=True)
++class AgentDecision:
++    user_id: int
++    mode: str
++    scopes: frozenset[str]
++    thumbprint: str | None
++    device_id: str | None
++    grant_id: str | None
++    nonce: str
++    context_hash: str
++    intent: str
++    expires_at: int
++    control_revision: int
++
++    def snapshot(self):
++        return {"schema": "publicvideo.agent-assignment.v1", "user_id": self.user_id,
++                "mode": self.mode, "scopes": sorted(self.scopes), "thumbprint": self.thumbprint,
++                "device_id": self.device_id, "grant_id": self.grant_id}
++
++
++def verify_agent_permit(trust, token, context, *, now, nonce=None, user_id=None):
++    try:
++        header, claims = strict_jwt_parts(token)
++        if set(header) != {"alg", "typ", "kid"} or header["alg"] != "ES256" or header["typ"] != PERMIT_TYPE:
++            raise ValueError()
++        jwt.decode(token, trust.verification_keys[header["kid"]], algorithms=["ES256"],
++                   issuer=trust.issuer, audience=PERMIT_AUDIENCE,
++                   options={"verify_iat": False, "verify_exp": False, "verify_nbf": False,
++                            "require": ["iss", "aud", "sub", "iat", "nbf", "exp", "jti"]})
++        expected = {"schema", "iss", "aud", "product", "environment", "sub", "user_id",
++                    "intent", "nonce", "context_hash", "mode", "control_revision", "scopes",
++                    "cnf", "device_id", "grant_id", "iat", "nbf", "exp", "jti"}
++        if (set(claims) != expected or claims["schema"] != PERMIT_SCHEMA
++            or claims["aud"] != PERMIT_AUDIENCE or claims["product"] != PRODUCT
++            or claims["environment"] != trust.environment or claims["intent"] != context.intent
++            or claims["mode"] not in {"OFF", "OBSERVE", "ENFORCE"}):
++            raise ValueError()
++        for field in ("user_id", "control_revision", "iat", "nbf", "exp"):
++            if type(claims[field]) is not int or claims[field] < 1:
++                raise ValueError()
++        if (claims["sub"] != str(claims["user_id"]) or (user_id is not None and claims["user_id"] != user_id)
++            or claims["nbf"] != claims["iat"] or claims["iat"] > now + 5
++            or now >= claims["exp"] or not 0 < claims["exp"] - claims["iat"] <= PERMIT_SECONDS
++            or claims["context_hash"] != context.digest):
++            raise ValueError()
++        if (not isinstance(claims["nonce"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", claims["nonce"])
++            or (nonce is not None and claims["nonce"] != nonce)
++            or not isinstance(claims["jti"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", claims["jti"])):
++            raise ValueError()
++        scopes = claims["scopes"]
++        if not isinstance(scopes, list) or not all(isinstance(v, str) for v in scopes) or len(scopes) != len(set(scopes)) or not set(scopes) <= LOCAL_SCOPES:
++            raise ValueError()
++        if context.intent == "report" and scopes or context.intent == "execute" and not scopes:
++            raise ValueError()
++        thumbprint = None
++        cnf = claims["cnf"]
++        if cnf is not None:
++            if not isinstance(cnf, dict) or set(cnf) != {"jkt"} or not isinstance(cnf["jkt"], str) or not re.fullmatch(HASH_PATTERN, cnf["jkt"]):
++                raise ValueError()
++            thumbprint = cnf["jkt"]
++        if claims["mode"] == "ENFORCE" and thumbprint is None:
++            raise ValueError()
++        for field in ("device_id", "grant_id"):
++            value = claims[field]
++            if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 128):
++                raise ValueError()
++        if claims["mode"] == "ENFORCE" and context.intent == "execute" and (not claims["device_id"] or not claims["grant_id"]):
++            raise ValueError()
++        return AgentDecision(claims["user_id"], claims["mode"], frozenset(scopes), thumbprint,
++                             claims["device_id"], claims["grant_id"], claims["nonce"],
++                             context.digest, context.intent, claims["exp"], claims["control_revision"])
++    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, jwt.PyJWTError):
++        fail()
++
++
++def sign_agent_request(signer, permit, context, *, nonce, now):
++    if type(now) is not int or not hmac.compare_digest(jwk_thumbprint(signer.public_jwk), signer.thumbprint):
++        fail()
++    header = {"alg": "ES256", "typ": PROOF_TYPE, "jwk": signer.public_jwk}
++    claims = {"htm": "POST", "htu": context.uri, "context_hash": context.digest,
++              "ath": sha256_b64(permit), "nonce": nonce, "iat": now, "jti": secrets.token_urlsafe(24)}
++    message = b64url(canonical_json(header).encode("ascii")) + "." + b64url(canonical_json(claims).encode("ascii"))
++    signature = signer.sign(message.encode("ascii"))
++    if len(signature) != 64:
++        fail()
++    return message + "." + b64url(signature)
++
++
++def verify_agent_request_proof(permit, proof, context, decision, *, now):
++    if decision.thumbprint is None:
++        if proof or decision.mode == "ENFORCE":
++            fail()
++        return  # Explicit signed OFF/OBSERVE only; not a device approval.
++    try:
++        header, claims = strict_jwt_parts(proof)
++        if set(header) != {"alg", "typ", "jwk"} or header["alg"] != "ES256" or header["typ"] != PROOF_TYPE:
++            raise ValueError()
++        key = public_key(header["jwk"])
++        if not hmac.compare_digest(jwk_thumbprint(header["jwk"]), decision.thumbprint):
++            raise ValueError()
++        jwt.decode(proof, key, algorithms=["ES256"],
++                   options={"verify_aud": False, "verify_iat": False, "verify_exp": False, "verify_nbf": False})
++        if set(claims) != {"htm", "htu", "context_hash", "ath", "nonce", "iat", "jti"}:
++            raise ValueError()
++        if (claims["htm"] != "POST" or claims["htu"] != context.uri or claims["context_hash"] != context.digest
++            or claims["ath"] != sha256_b64(permit) or claims["nonce"] != decision.nonce
++            or type(claims["iat"]) is not int or not now - 30 <= claims["iat"] <= now + 5
++            or not isinstance(claims["jti"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", claims["jti"])):
++            raise ValueError()
++    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, jwt.PyJWTError):
++        fail()
++
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_gate.py
++"""Durable central-queue challenge consumption; credentials never enter jobs."""
++
++from __future__ import annotations
++
++import secrets
++import time
++
++from .device_agent_protocol import (
++    AgentDecision, agent_id_value, fail, verify_agent_permit, verify_agent_request_proof,
++)
++from .device_auth_protocol import bundled_trust, sha256_b64
++
++
++class AgentAuthorizationGate:
++    def __init__(self, store, authority_url, *, trust_resolver=bundled_trust, clock=time.time):
++        self.store, self.authority_url = store, authority_url
++        self.trust_resolver, self.clock = trust_resolver, clock
++        with store._transaction() as db:
++            db.execute("""CREATE TABLE IF NOT EXISTS device_agent_challenges (
++                nonce_hash TEXT PRIMARY KEY, agent_id TEXT NOT NULL, context_hash TEXT NOT NULL,
++                expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)""")
++            db.execute("CREATE INDEX IF NOT EXISTS idx_device_agent_challenge_expiry ON device_agent_challenges(expires_at)")
++
++    def challenge(self, context):
++        self.trust_resolver(self.authority_url)  # Missing roots fail before issuing a challenge.
++        now = int(self.clock())
++        nonce = secrets.token_urlsafe(32)
++        with self.store._transaction() as db:
++            db.execute("DELETE FROM device_agent_challenges WHERE expires_at <= ?", (now,))
++            if db.execute("SELECT COUNT(*) FROM device_agent_challenges").fetchone()[0] >= 4096:
++                fail("AGENT_CHALLENGE_BUSY", "处理机验证请求过多，请稍后重试", 429)
++            count = db.execute("SELECT COUNT(*) FROM device_agent_challenges WHERE agent_id=? AND consumed=0",
++                               (context.agent_id,)).fetchone()[0]
++            if count >= 16:
++                fail("AGENT_CHALLENGE_BUSY", "此处理机验证请求过多，请稍后重试", 429)
++            db.execute("INSERT INTO device_agent_challenges(nonce_hash,agent_id,context_hash,expires_at) VALUES(?,?,?,?)",
++                       (sha256_b64(nonce), context.agent_id, context.digest, now + 120))
++        return {"schema": "publicvideo.agent-challenge.v1", "nonce": nonce, "expires_in": 120}
++
++    def verify(self, context, *, permit, proof):
++        now = int(self.clock())
++        decision = verify_agent_permit(self.trust_resolver(self.authority_url), permit, context, now=now)
++        verify_agent_request_proof(permit, proof, context, decision, now=now)
++        with self.store._transaction() as db:
++            updated = db.execute(
++                "UPDATE device_agent_challenges SET consumed=1 WHERE nonce_hash=? AND agent_id=? "
++                "AND context_hash=? AND expires_at>? AND consumed=0",
++                (sha256_b64(decision.nonce), context.agent_id, context.digest, now),
++            )
++            if updated.rowcount != 1:
++                fail("AGENT_PROOF_REPLAYED", "处理机挑战已失效或已使用，请重新验证", 409)
++        return decision
++
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_client.py
++"""Acquire narrowly scoped Agent permits using this process's account/key."""
++
++from __future__ import annotations
++
++from .device_agent_protocol import verify_agent_permit, sign_agent_request
++from .device_auth_protocol import DeviceAuthorizationError, make_proof
++from .device_identity_windows import DeviceIdentityError
++
++PERMIT_PATH = "/api/workbench/device-auth/agent-permit"
++
++
++class AgentRequestAuthorizer:
++    def __init__(self, session):
++        self.session = session
++
++    def headers(self, context, nonce):
++        session = self.session
++        with session._lock:
++            if session._closed:
++                raise DeviceAuthorizationError("LOGIN_REQUIRED", "请在执行机重新登录", status_code=401)
++            key = None
++            try:
++                if context.intent == "execute":
++                    headers = session.request_headers(method="POST", path=PERMIT_PATH, scope=None)
++                    key = session._ensure_key()
++                else:
++                    # Reporting an admitted job must survive grant suspension and
++                    # expiry of the old device access token. The original account
++                    # plus its actual key is proved afresh; no business credential
++                    # is issued and the central queue still verifies assignment.
++                    key = session._ensure_key()
++                    token = session._login_token
++                    challenge = session._transport.request(
++                        method="POST", path="/api/workbench/device-auth/challenge",
++                        headers={"Authorization": "Bearer " + token},
++                        payload={"public_jwk": key.public_jwk, "purpose": "request"},
++                    )
++                    headers = {"Authorization": "Bearer " + token, "DPoP": make_proof(
++                        key, session.trust, method="POST", path=PERMIT_PATH, access_token=token,
++                        nonce=challenge["nonce"], now=int(session._wall()),
++                    )}
++            except (DeviceAuthorizationError, DeviceIdentityError):
++                # No central work request has been sent. Only the authority can
++                # allow OFF/OBSERVE; ENFORCE rejects this unbound permit request.
++                key = None
++                headers = {"Authorization": "Bearer " + session._login_token}
++            result = session._transport.request(
++                method="POST", path=PERMIT_PATH, headers=headers,
++                payload={"nonce": nonce, "context_hash": context.digest, "intent": context.intent},
++            )
++            if not isinstance(result, dict) or set(result) != {"agent_permit"}:
++                raise DeviceAuthorizationError("INVALID_AGENT_AUTHORIZATION", "处理机许可响应无效")
++            permit = result["agent_permit"]
++            decision = verify_agent_permit(session.trust, permit, context, now=session._wall(),
++                                           nonce=nonce, user_id=session.user_id)
++            proof = ""
++            if decision.thumbprint is not None:
++                if key is None or key.thumbprint != decision.thumbprint:
++                    raise DeviceAuthorizationError("DEVICE_IDENTITY_MISMATCH", "处理机许可不属于本机原密钥")
++                proof = sign_agent_request(key, permit, context, nonce=nonce, now=int(session._wall()))
++            return {"X-Workbench-Agent-Permit": permit, "X-Workbench-Agent-Proof": proof}
++
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+                 "software-initialization-permit",
++                "agent-permit",
+*** End Patch

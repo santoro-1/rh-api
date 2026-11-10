@@ -1,0 +1,377 @@
+{% extends "base.html" %}
+{% block title %}生成视频{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <h1>生成视频</h1>
+    <p class="muted">选择素材类型和声音来源，再上传一个或多个素材。</p>
+  </div>
+  <a class="button secondary" href="/batches">查看任务记录</a>
+</section>
+
+<section class="panel stack-form">
+  <div class="panel-heading">
+    <h2>1. 选择生成方式</h2>
+    <p class="muted">页面只会显示当前选择真正需要填写的内容。</p>
+  </div>
+  <label>任务名称
+    <input
+      id="batch-name"
+      maxlength="100"
+      placeholder="上传素材后自动填写，也可以手动输入"
+      aria-describedby="batch-name-help"
+      required
+    >
+    <span id="batch-name-help" class="field-help">上传音频时默认使用首个音频文件名；文案生成时默认使用首个任务编号或画面文件名。多条任务会附带数量，手动修改后不再自动覆盖。</span>
+  </label>
+  <div class="two-columns">
+    <label>素材类型
+      <select id="batch-workflow">
+        <option value="digital_human">图片生成数字人视频</option>
+        <option value="ltx_lip_sync">已有视频进行对口型</option>
+      </select>
+    </label>
+    <label>声音来源
+      <select id="batch-audio-mode">
+        <option value="upload">上传已经准备好的音频</option>
+        <option value="minimax">输入文案并选择音色</option>
+      </select>
+    </label>
+  </div>
+  <label id="long-audio-review-row" class="inline-check batch-confirm">
+    <input id="batch-long-audio-review-required" type="checkbox">
+    <span>长音频拆分后先试听确认</span>
+  </label>
+  <input id="batch-video-review-required" type="checkbox" hidden>
+  <label id="batch-seedvr2-row" class="inline-check batch-confirm">
+    <input id="batch-seedvr2-enabled" type="checkbox">
+    <span>数字人完成后使用 SeedVR2 48G 放大（会产生额外 RunningHub 费用）</span>
+  </label>
+  <p class="field-help">文本语音最终只形成一个视频子任务时可自动进入本地包装；数字人口播分段最长 32.8 秒，提交模型时另加 2 秒静音收尾；视频对口型最长 30 秒。多分段任务在画面生成后等待人工处理，拼接仅作为检查预览。</p>
+  <details class="advanced-settings">
+    <summary>高级设置</summary>
+    <div class="advanced-settings-body stack-form">
+      <div id="digital-batch-settings" class="two-columns">
+        <label>最长分辨率
+          <input id="batch-resolution" type="number" min="1" value="1024">
+        </label>
+        <label>人物模式
+          <select id="batch-person-mode">
+            <option value="单人">单人（默认）</option>
+            <option value="双人" disabled>双人（暂未开放）</option>
+          </select>
+        </label>
+      </div>
+      <div id="ltx-batch-settings" class="hidden">
+        <label>运行实例
+          <select id="batch-instance-type">
+            <option value="default">Stand 运行（24G）</option>
+            <option value="plus">Plus 运行（48G）</option>
+          </select>
+        </label>
+        <label>对口型人物与语言
+          <input id="speech-ltx-prompt-prefix" maxlength="500" value="一名人物用中文说">
+          <span class="field-help">系统会自动追加每条口播脚本，生成最终视频正向提示词。</span>
+        </label>
+      </div>
+      <p class="field-help">以上设置应用于整个任务，单次最多 {{ max_batch_items }} 条。</p>
+    </div>
+  </details>
+</section>
+
+<section id="minimax-speech-settings" class="panel stack-form hidden">
+  <div class="panel-heading">
+    <h2>2. 选择声音</h2>
+    <p class="muted">选择一个已保存的官方或自定义音色，每条素材填写自己的口播文案。</p>
+  </div>
+  {% if not minimax_configured %}
+    <div class="error">当前账号尚未配置 MiniMax API Key，请联系管理员配置后再使用。</div>
+  {% endif %}
+  {% if minimax_configured and not minimax_voices %}
+    <div class="error">当前还没有可用音色。请先到<a href="/voices">声音管理</a>完成克隆或融合并保存。</div>
+  {% endif %}
+  <div class="batch-order-warning">
+    <strong>费用提醒</strong>
+    <span>官方系统音色不收取 ¥9.90 克隆音色费，但生成语音仍按文本用量计费。克隆、融合或设计音色首次正式使用时可能另收音色费，最终以 MiniMax 账单为准。</span>
+  </div>
+  <div
+    id="speech-voice-picker"
+    class="voice-picker"
+    data-default-source="{{ 'custom' if minimax_custom_voices else 'system' }}"
+  >
+    <input id="speech-voice" type="hidden" value="">
+    <div class="workflow-switch voice-source-switch" role="tablist" aria-label="音色来源">
+      <button
+        class="workflow-tab{% if minimax_custom_voices %} active{% endif %}"
+        type="button"
+        data-voice-source="custom"
+        aria-selected="{{ 'true' if minimax_custom_voices else 'false' }}"
+        {% if not minimax_custom_voices %}disabled{% endif %}
+      >我的音色 <span>{{ minimax_custom_voices|length }}</span></button>
+      <button
+        class="workflow-tab{% if not minimax_custom_voices %} active{% endif %}"
+        type="button"
+        data-voice-source="system"
+        aria-selected="{{ 'false' if minimax_custom_voices else 'true' }}"
+        {% if not minimax_system_voice_groups %}disabled{% endif %}
+      >官方音色 <span>{{ minimax_system_voice_count }}</span></button>
+    </div>
+
+    <div
+      id="speech-custom-voice-panel"
+      class="voice-picker-panel{% if not minimax_custom_voices %} hidden{% endif %}"
+    >
+      {% if minimax_custom_voices %}
+        <label>我的克隆/融合音色
+          <select id="speech-custom-voice">
+            <option value="">请选择我的音色</option>
+            {% for voice in minimax_custom_voices %}
+              <option
+                value="{{ voice.id }}"
+                data-method="{{ voice.method }}"
+                data-activated="{{ 'true' if voice.status == 'ACTIVE' else 'false' }}"
+              >{{ voice.name }} · {% if voice.method == "mix" %}融合音色{% else %}克隆音色{% endif %}</option>
+            {% endfor %}
+          </select>
+        </label>
+      {% else %}
+        <p class="muted">还没有保存克隆或融合音色，可前往<a href="/voices">声音管理</a>制作。</p>
+      {% endif %}
+    </div>
+
+    <div
+      id="speech-system-voice-panel"
+      class="voice-picker-panel{% if minimax_custom_voices %} hidden{% endif %}"
+    >
+      {% if minimax_system_voice_groups %}
+        <div class="voice-official-controls">
+          <label>语言分类
+            <select id="speech-system-category">
+              {% for group in minimax_system_voice_groups %}
+                <option value="{{ loop.index0 }}">{{ group.label }}（{{ group.voices|length }}）</option>
+              {% endfor %}
+            </select>
+          </label>
+          <div class="voice-picker-field">
+            <span class="voice-picker-label">官方音色</span>
+            {% for group in minimax_system_voice_groups %}
+              <select
+                class="speech-system-voice{% if not loop.first %} hidden{% endif %}"
+                data-category-index="{{ loop.index0 }}"
+                aria-label="{{ group.label }}官方音色"
+              >
+                <option value="">请选择{{ group.label }}音色</option>
+                {% for voice in group.voices %}
+                  <option
+                    value="{{ voice.id }}"
+                    data-method="system"
+                    data-activated="true"
+                  >{{ voice.name }}</option>
+                {% endfor %}
+              </select>
+            {% endfor %}
+          </div>
+        </div>
+      {% else %}
+        <p class="muted">管理员尚未同步官方音色。</p>
+      {% endif %}
+    </div>
+    <span class="field-help">优先显示你保存的克隆/融合音色；官方音色按语言分类查找。没有合适音色可前往<a href="/voices">声音管理</a>制作并试听。</span>
+  </div>
+  <label class="inline-check batch-confirm">
+    <input id="speech-review-required" type="checkbox">
+    <span>
+      语音生成后先审核
+      <small class="field-help">开启后，完整语音会停在审核阶段；确认满意后才切分并进入 RunningHub 视频队列。</small>
+    </span>
+  </label>
+  <details class="advanced-settings">
+    <summary>高级语音设置</summary>
+    <div class="advanced-settings-body stack-form">
+      <div class="three-columns speech-parameter-grid">
+        <label>语音模型
+          <select id="speech-model">
+            <option value="speech-2.8-hd">高清模型</option>
+            <option value="speech-2.8-turbo">快速模型</option>
+          </select>
+        </label>
+        <label>语速<input id="speech-speed" type="number" min="0.5" max="2" step="0.1" value="1"></label>
+        <label>音量<input id="speech-volume" type="number" min="0.1" max="10" step="0.1" value="1"></label>
+        <label>音调<input id="speech-pitch" type="number" min="-12" max="12" step="1" value="0"></label>
+        <label>语言增强<input id="speech-language-boost" maxlength="50" value="auto"></label>
+        <label>输出格式
+          <select id="speech-output-format">
+            <option value="mp3">MP3</option>
+            <option value="wav">WAV</option>
+            <option value="flac">FLAC</option>
+          </select>
+        </label>
+      </div>
+      <label>读音标注（可选）
+        <textarea id="speech-pronunciation-tones" rows="3" maxlength="5000"
+          placeholder='例如：["燕少飞/(yan4)(shao3)(fei1)", "omg/oh my god"]'></textarea>
+        <span class="field-help">使用 MiniMax 官方 pronunciation_dict.tone JSON 数组格式。</span>
+      </label>
+    </div>
+  </details>
+  <label id="speech-cost-confirm-row" class="inline-check batch-confirm">
+    <input id="speech-cost-confirm" type="checkbox">
+    <span id="speech-cost-confirm-text">我已了解语音文本生成会产生费用；非官方音色首次正式使用还可能产生音色费</span>
+  </label>
+</section>
+
+<div class="workflow-switch batch-entry-switch" role="tablist" aria-label="批量创建方式">
+  <button id="quick-entry-button" class="workflow-tab active" type="button">快速创建</button>
+  <button id="manifest-entry-button" class="workflow-tab" type="button">Excel / CSV 表格导入</button>
+</div>
+
+<section id="quick-entry-panel" class="batch-entry-panel">
+  <section class="panel stack-form">
+    <div class="panel-heading">
+      <h2>3. 上传素材</h2>
+      <p id="quick-upload-help" class="muted">先上传图片或视频，再按完全相同的顺序上传对应音频。同一画面需要对应多条音频时，只上传一次并点击“复用”或“补齐”。</p>
+    </div>
+    <div class="batch-order-warning">
+      <strong>请注意上传顺序</strong>
+      <span id="quick-order-guidance">系统按照页面显示的第 1、2、3……项逐一配对。素材以内部 ID 绑定，同一文件可复用；上传后可拖动或使用箭头调整顺序。</span>
+    </div>
+    <div class="batch-upload-grid">
+      <div class="batch-upload-column">
+        <label><span id="primary-upload-title">参考图片</span>
+          <input id="quick-primary-files" type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/*">
+        </label>
+        <ol id="quick-primary-list" class="ordered-upload-list"></ol>
+      </div>
+      <div id="quick-direct-audio-group" class="batch-upload-column">
+        <label><span id="main-audio-upload-title">总参考音频</span>
+          <input id="quick-audio-files" type="file" multiple accept=".mp3,.wav,.m4a,.aac,.flac,audio/*">
+        </label>
+        <ol id="quick-audio-list" class="ordered-upload-list"></ol>
+      </div>
+      <div id="left-audio-group" class="batch-upload-column hidden">
+        <label>左人物音频
+          <input id="quick-left-audio-files" type="file" multiple accept=".mp3,.wav,.m4a,.aac,.flac,audio/*">
+        </label>
+        <ol id="quick-left-audio-list" class="ordered-upload-list"></ol>
+      </div>
+      <div id="right-audio-group" class="batch-upload-column hidden">
+        <label>右人物音频
+          <input id="quick-right-audio-files" type="file" multiple accept=".mp3,.wav,.m4a,.aac,.flac,audio/*">
+        </label>
+        <ol id="quick-right-audio-list" class="ordered-upload-list"></ol>
+      </div>
+    </div>
+    <p id="quick-upload-progress" class="muted">尚未上传素材。</p>
+  </section>
+
+  <section class="panel stack-form">
+    <div class="panel-heading">
+      <h2>4. 核对内容</h2>
+      <p id="quick-prompt-help" class="muted">每条任务只需要单独修改提示词。</p>
+    </div>
+    <div class="table-wrap">
+      <table class="pairing-table">
+        <thead><tr id="quick-pairing-head"></tr></thead>
+        <tbody id="quick-pairing-body"></tbody>
+      </table>
+    </div>
+    <div class="button-row">
+      <button id="quick-copy-preview-button" class="button secondary" type="button">预览全部文案</button>
+    </div>
+    <label class="inline-check batch-confirm">
+      <input id="quick-confirm" type="checkbox">
+      我已确认以上素材、音频和文案对应正确
+    </label>
+    <div id="quick-errors" class="error hidden"></div>
+    <div class="submit-row">
+      <span id="quick-ready-summary" class="muted">请先上传画面素材和对应音频。</span>
+      <button id="quick-create-button" type="button">检查并开始生成</button>
+    </div>
+  </section>
+</section>
+
+<section id="manifest-entry-panel" class="batch-entry-panel hidden">
+  <section class="panel stack-form">
+    <div class="panel-heading">
+      <h2 id="manifest-step-title">1. 导入任务表格</h2>
+      <p id="manifest-step-help" class="muted">表格只填写任务编号和文案；素材按页面序号对应。</p>
+    </div>
+    <div class="button-row">
+      <a id="xlsx-template-link" class="button secondary" href="#">下载 Excel 模板</a>
+      <a id="csv-template-link" href="#">下载 CSV 模板</a>
+    </div>
+    <label>导入任务清单（.xlsx / .csv）
+      <input id="manifest-file" type="file" accept=".xlsx,.csv">
+    </label>
+    <p id="manifest-info" class="muted">尚未导入清单。</p>
+  </section>
+
+  <section class="panel stack-form">
+    <div class="panel-heading">
+      <h2>2. 上传对应素材</h2>
+      <p id="advanced-upload-help" class="muted">每类素材都按第 1、2、3……项与表格行对应。</p>
+    </div>
+    <label><span id="advanced-primary-upload-title">参考图片或源视频</span>
+      <input id="advanced-primary-files" type="file" multiple>
+    </label>
+    <label id="advanced-direct-audio-group"><span id="advanced-audio-upload-title">全部音频文件</span>
+      <input id="advanced-audio-files" type="file" multiple accept=".mp3,.wav,.m4a,.aac,.flac,audio/*">
+    </label>
+    <label id="advanced-left-audio-group" class="hidden">全部左人物音频
+      <input id="advanced-left-audio-files" type="file" multiple accept=".mp3,.wav,.m4a,.aac,.flac,audio/*">
+    </label>
+    <label id="advanced-right-audio-group" class="hidden">全部右人物音频
+      <input id="advanced-right-audio-files" type="file" multiple accept=".mp3,.wav,.m4a,.aac,.flac,audio/*">
+    </label>
+    <p id="advanced-upload-progress" class="muted">尚未上传素材。</p>
+    <div id="advanced-asset-list" class="compact-list"></div>
+  </section>
+
+  <section class="panel stack-form">
+    <div class="panel-heading">
+      <h2>3. 检查并开始生成</h2>
+      <p class="muted">统一参数以页面顶部设置为准；任何一行有误都不会创建任务。</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr id="advanced-preview-head"></tr></thead>
+        <tbody id="advanced-preview-body"></tbody>
+      </table>
+    </div>
+    <div class="button-row">
+      <button id="advanced-copy-preview-button" class="button secondary" type="button">预览全部文案</button>
+    </div>
+    <div id="advanced-errors" class="error hidden"></div>
+    <label id="advanced-confirm-row" class="inline-check batch-confirm">
+      <input id="advanced-confirm" type="checkbox">
+      我已确认每类素材的第 1、2、3……项与表格第 1、2、3……行对应
+    </label>
+    <div class="submit-row">
+      <span id="advanced-ready-summary" class="muted">请先导入清单并上传素材。</span>
+      <button id="advanced-create-button" type="button">检查并开始生成</button>
+    </div>
+  </section>
+</section>
+
+<dialog id="copy-preview-dialog" class="copy-preview-dialog">
+  <div class="copy-preview-heading">
+    <div>
+      <h2>全部文案预览</h2>
+      <p class="muted">提交前集中核对完整脚本和最终视频提示词，不会在这里截断。</p>
+    </div>
+    <button id="copy-preview-close-button" class="button secondary" type="button">关闭</button>
+  </div>
+  <div id="copy-preview-content" class="copy-preview-content"></div>
+</dialog>
+
+<script>
+window.batchGenerateConfig = {
+  initialWorkflow: {{ initial_workflow|tojson }},
+  maxBatchItems: {{ max_batch_items|tojson }},
+  digitalDefaultPrompt: {{ digital_config.default_prompt|tojson }},
+  ltxDefaultInstance: "plus",
+  minimaxConfigured: {{ minimax_configured|tojson }},
+};
+</script>
+<script src="/static/batch_generate.js" defer></script>
+{% endblock %}

@@ -1,0 +1,258 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/semantic_visuals.py
+@@
+     if media_type == "video":
+         source_start_us = int(defaults["source_start_us"])
+         available_us = max(0, int(resource.get("duration_us") or 0) - source_start_us)
+-        overlay["duration_us"] = min(int(overlay["duration_us"]), available_us)
++        source_duration_us = min(int(defaults["duration_us"]), available_us)
++        loop_to_target = bool(defaults.get("loop")) and bool(
++            asset.get("loop_allowed", defaults.get("loop"))
++        )
++        if not loop_to_target:
++            overlay["duration_us"] = min(int(overlay["duration_us"]), source_duration_us)
+         overlay.update(
+             {
+                 "source_start_us": source_start_us,
++                "source_duration_us": source_duration_us,
++                "loop_to_target": loop_to_target,
+                 "mute": defaults["mute"],
+                 "fit": defaults["fit"],
+             }
+@@
+             if current_asset is not None:
+                 defaults = current_asset["defaults"]
+                 resource = current_asset["resource"]
++                media_type = current_asset["media_type"]
+                 overlay.update(
+                     {
+@@
+                         "opacity": defaults["opacity"],
+                     }
+                 )
++                if media_type == "video":
++                    source_start_us = int(defaults["source_start_us"])
++                    available_us = max(
++                        0, int(resource.get("duration_us") or 0) - source_start_us
++                    )
++                    source_duration_us = min(int(defaults["duration_us"]), available_us)
++                    loop_to_target = bool(defaults.get("loop")) and bool(
++                        current_asset.get("loop_allowed", defaults.get("loop"))
++                    )
++                    overlay.update(
++                        {
++                            "source_start_us": source_start_us,
++                            "source_duration_us": source_duration_us,
++                            "loop_to_target": loop_to_target,
++                            "mute": defaults["mute"],
++                            "fit": defaults["fit"],
++                        }
++                    )
++                    if not loop_to_target:
++                        overlay["duration_us"] = min(
++                            int(overlay.get("duration_us") or 0), source_duration_us
++                        )
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/content_replace.py
+@@
+ class VideoOverlayAddition:
+@@
+     duration_us: int
+     source_start_us: int = 0
++    source_duration_us: int = 0
++    loop_to_target: bool = False
+     mute: bool = True
+@@
+                     duration_us=item.duration_us,
+                     source_start_us=item.source_start_us,
++                    source_duration_us=item.source_duration_us,
++                    loop_to_target=item.loop_to_target,
+                     mute=item.mute,
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/video_overlay_apply.py
+@@
+     duration_us: int,
+     source_start_us: int = 0,
++    source_duration_us: int = 0,
++    loop_to_target: bool = False,
+     mute: bool = True,
+@@
+     available_duration = material_duration - source_start_us
+     if available_duration <= 0:
+         raise ValueError("语义视频截取起点超出素材时长")
+-    # Visual footage plays at most once. A short source ends naturally instead
+-    # of repeating or holding its final frame to fill the semantic window.
+-    target_duration = min(requested_duration, available_duration)
++    clip_duration = min(
++        available_duration,
++        source_duration_us if source_duration_us > 0 else available_duration,
++    )
++    if clip_duration <= 0:
++        raise ValueError("语义视频有效源片段时长无效")
++    target_duration = requested_duration if loop_to_target else min(requested_duration, clip_duration)
+@@
+-    segment_instance = draft.VideoSegment(
+-        material_instance,
+-        draft.Timerange(start_us, target_duration),
+-        source_timerange=draft.Timerange(source_start_us, target_duration),
+-        volume=0.0 if mute else 1.0,
+-        clip_settings=draft.ClipSettings(
+-            alpha=float(opacity),
+-            scale_x=resolved_scale,
+-            scale_y=resolved_scale,
+-            transform_x=transform_x,
+-            transform_y=transform_y,
+-        ),
+-    )
+-    segment = segment_instance.export_json()
+-    segment["track_render_index"] = layer
+-    segments = [segment]
++    segments = []
++    segment_instances = []
++    cursor = 0
++    while cursor < target_duration:
++        current_duration = min(clip_duration, target_duration - cursor)
++        segment_instance = draft.VideoSegment(
++            material_instance,
++            draft.Timerange(start_us + cursor, current_duration),
++            source_timerange=draft.Timerange(source_start_us, current_duration),
++            volume=0.0 if mute else 1.0,
++            clip_settings=draft.ClipSettings(
++                alpha=float(opacity),
++                scale_x=resolved_scale,
++                scale_y=resolved_scale,
++                transform_x=transform_x,
++                transform_y=transform_y,
++            ),
++        )
++        segment = segment_instance.export_json()
++        segment["track_render_index"] = layer
++        segments.append(segment)
++        segment_instances.append(segment_instance)
++        cursor += current_duration
++        if not loop_to_target:
++            break
+@@
+-    speeds.append(segment_instance.speed.export_json())
++    speeds.extend(item.speed.export_json() for item in segment_instances)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/render_job.py
+@@
+                 duration_us=int(_value(item, "duration_us", default=1_800_000)),
+                 source_start_us=int(_value(item, "source_start_us", default=0)),
++                source_duration_us=int(
++                    _value(item, "source_duration_us", default=0)
++                ),
++                loop_to_target=_as_bool(
++                    _value(item, "loop_to_target", default=False)
++                ),
+                 mute=_as_bool(_value(item, "mute", default=True)),
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+                         "source_start_us": int(
+                             raw.get("source_start_us", defaults["source_start_us"])
+                         ),
++                        "source_duration_us": int(
++                            raw.get("source_duration_us", defaults["duration_us"])
++                        ),
++                        "loop_to_target": raw.get(
++                            "loop_to_target",
++                            bool(defaults["loop"])
++                            and bool(asset.get("loop_allowed", defaults["loop"])),
++                        )
++                        is not False,
+                         "mute": raw.get("mute", defaults["mute"]) is not False,
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_video_overlay_apply.py
+@@
+ def test_native_video_overlay_ends_at_remaining_source_duration(
+@@
+     assert track["segments"][0]["source_timerange"] == {
+         "start": 500_000,
+         "duration": 1_500_000,
+     }
++
++
++def test_native_video_overlay_loops_only_the_approved_source_window(
++    tmp_path: Path,
++) -> None:
++    video = tmp_path / "short.mp4"
++    video.write_bytes(b"test")
++    data = {
++        "duration": 6_000_000,
++        "canvas_config": {"width": 1080, "height": 1920},
++        "materials": {"videos": [], "speeds": []},
++        "tracks": [{"type": "video", "segments": [{"render_index": 0}]}],
++    }
++
++    changed = add_video_overlay_to_data(
++        _Draft(),
++        data,
++        video,
++        start_us=0,
++        duration_us=5_000_000,
++        source_start_us=500_000,
++        source_duration_us=1_000_000,
++        loop_to_target=True,
++    )
++
++    assert changed == 5
++    track = next(item for item in data["tracks"] if item.get("name") == "语义前景视频")
++    assert [item["target_timerange"]["duration"] for item in track["segments"]] == [
++        1_000_000,
++        1_000_000,
++        1_000_000,
++        1_000_000,
++        1_000_000,
++    ]
++    assert {item["source_timerange"]["start"] for item in track["segments"]} == {
++        500_000
++    }
+@@
+                     "duration_us": 3_000_000,
+-                    "loop": True,
++                    "source_duration_us": 1_500_000,
++                    "loop_to_target": True,
+@@
+-    assert all(not hasattr(item, "loop") for item in additions)
++    assert additions[1].source_duration_us == 1_500_000
++    assert additions[1].loop_to_target is True
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_semantic_visuals.py
+@@
+-    assert recipe["overlays"][0]["duration_us"] == 6_200_000
+-    assert "loop" not in recipe["overlays"][0]
++    overlay = recipe["overlays"][0]
++    assert overlay["duration_us"] == 3_000_000
++    assert overlay["source_duration_us"] == 3_000_000
++    assert overlay["loop_to_target"] is False
++
++
++def test_video_overlay_loops_only_catalog_default_window_when_allowed(tmp_path: Path) -> None:
++    manifest = _write_v2_catalog(tmp_path)
++    payload = _upgrade_test_catalog_to_v3(manifest)
++    payload["assets"][1]["defaults"]["loop"] = True
++    manifest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
++    catalog = load_semantic_visual_catalog(tmp_path)
++    candidate = recall_semantic_visual_candidates("牛肉。", catalog)["candidates"][0]
++
++    recipe = build_visual_recipe(
++        catalog=catalog,
++        mapped_candidates=[{**candidate, "start_us": 0, "duration_us": 8_000_000}],
++        decisions=[
++            {
++                "candidate_id": candidate["candidate_id"],
++                "decision": "SHOW",
++                "concept_id": "food.beef",
++                "confidence": 1.0,
++            }
++        ],
++        media_policy="video_only",
++    )
++
++    overlay = recipe["overlays"][0]
++    assert overlay["duration_us"] == 8_000_000
++    assert overlay["source_duration_us"] == 3_000_000
++    assert overlay["loop_to_target"] is True
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/SEMANTIC_VISUAL_LIBRARY.md
+@@
+ - 视频文件、poster 和可选 metadata 必须都在素材库内；登记的时长、宽高、音轨必须来自实际探测。
+ - 视频默认 `mute=true`，`fit` 只允许 `cover` 或 `contain`；播放区间不能越过源视频结尾。
++- 自动空镜的 `source_start_us + defaults.duration_us` 必须是完整复核过的连续干净窗口；暂停、加载、
++  鼠标点击/回放图标、播放器控件不得进入该窗口。允许循环时只循环这个干净窗口，不循环整条源视频。
+*** End Patch

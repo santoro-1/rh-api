@@ -1,0 +1,29 @@
+{
+  "mode": "clone_preview",
+  "billing_boundary": "clone 模式只调用 /v1/files/upload 和 /v1/voice_clone；未调用正式 T2A 接口",
+  "voice_id": "PaceProbe20260807173158",
+  "model": "speech-2.8-hd",
+  "source_audio_duration_seconds": 19.382813,
+  "text_stats": {
+    "han_characters": 366,
+    "latin_words": 0,
+    "digits": 0,
+    "sentence_gaps": 9,
+    "paragraph_gaps": 2
+  },
+  "analysis": {
+    "target_cpm": 220.0,
+    "tolerance_percent": 5.0,
+    "effective_characters": 366,
+    "audio_duration_seconds": 85.932,
+    "target_duration_seconds": 99.81818181818181,
+    "natural_cpm": 255.55090071219104,
+    "result": "pause_only_is_enough",
+    "extra_pause_budget_seconds": 13.88618181818181,
+    "suggested_extra_sentence_pause_seconds": 1.1020779220779215,
+    "suggested_extra_paragraph_pause_seconds": 1.983740259740259,
+    "estimated_native_speed_if_needed": null,
+    "explanation": "自然语速快于目标，可以保持 speed=1.0，仅通过增加停顿降低整体字速。报告中的数值是需要在现有自然停顿之外增加的平均停顿。"
+  },
+  "created_at": "2026-08-07T17:32:19.118288+08:00"
+}

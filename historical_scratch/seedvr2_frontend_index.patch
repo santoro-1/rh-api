@@ -1,0 +1,34 @@
+diff --git a/jyd_plain_json_probe/apps/processor/frontend/new/index.html b/jyd_plain_json_probe/apps/processor/frontend/new/index.html
+index f10dc78..05686b8 100644
+--- a/jyd_plain_json_probe/apps/processor/frontend/new/index.html
++++ b/jyd_plain_json_probe/apps/processor/frontend/new/index.html
+@@ -1279 +1288 @@
+-                'COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING',
++                'COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING',
+@@ -1978 +1989 @@
+-                const videoStatus = ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING', 'POSTPROCESS_RUNNING'].includes(script.compositionStatus)
++                const videoStatus = ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING', 'POSTPROCESS_RUNNING'].includes(script.compositionStatus)
+@@ -2043 +2063 @@
+-                const itemActive = ['AUDIO_QUEUED', 'AUDIO_RUNNING', 'COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING', 'POSTPROCESS_RUNNING', 'VARIANT_QUEUED', 'VARIANT_RUNNING'].includes(script.compositionStatus);
++                const itemActive = ['AUDIO_QUEUED', 'AUDIO_RUNNING', 'COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING', 'POSTPROCESS_RUNNING', 'VARIANT_QUEUED', 'VARIANT_RUNNING'].includes(script.compositionStatus);
+@@ -3074 +3145 @@
+-            const activeStatuses = new Set(['AUDIO_QUEUED', 'AUDIO_RUNNING', 'COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING', 'POSTPROCESS_RUNNING', 'VARIANT_QUEUED', 'VARIANT_RUNNING']);
++            const activeStatuses = new Set(['AUDIO_QUEUED', 'AUDIO_RUNNING', 'COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING', 'POSTPROCESS_RUNNING', 'VARIANT_QUEUED', 'VARIANT_RUNNING']);
+@@ -5168 +5239 @@
+-                ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING', 'BASE_VIDEO_READY', 'COMPOSITION_FAILED'].includes(item.compositionStatus)
++                ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING', 'BASE_VIDEO_READY', 'COMPOSITION_FAILED'].includes(item.compositionStatus)
+@@ -5170 +5241 @@
+-            const active = items.some((item) => ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING'].includes(item.compositionStatus));
++            const active = items.some((item) => ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING'].includes(item.compositionStatus));
+@@ -5215 +5286 @@
+-                ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING'].includes(item.compositionStatus)
++                ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING'].includes(item.compositionStatus)
+@@ -5236 +5307 @@
+-                        ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING'].includes(item.status)
++                        ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING'].includes(item.status)
+@@ -5242 +5313 @@
+-                        ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING'].includes(item.compositionStatus)
++                        ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING'].includes(item.compositionStatus)
+@@ -5271 +5342 @@
+-                ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_MERGING'].includes(item.compositionStatus)
++                ['COMPOSITION_QUEUED', 'DIGITAL_HUMAN_RUNNING', 'VIDEO_ENHANCING', 'VIDEO_MERGING'].includes(item.compositionStatus)

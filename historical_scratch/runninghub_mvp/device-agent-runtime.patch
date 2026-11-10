@@ -1,0 +1,280 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_runtime.py
++"""Authorized Agent execution with durable pre-start and result receipts."""
++
++from __future__ import annotations
++
++import threading
++from urllib.parse import quote
++
++from .device_agent_protocol import fail
++from .device_auth_protocol import DeviceAuthorizationError
++from .device_local_execution import LocalDeviceAuthorizer, authorized_local_unit, local_authorization_context, render_operation_scopes
++
++
++class AuthorizedAgentRunner:
++    def __init__(self, agent, session, journal, render):
++        self.agent, self.session, self.journal, self.render = agent, session, journal, render
++        self.prefix = "/api/agents/" + quote(agent.agent_id, safe="-_.")
++        self.registered = False
++        self.last_error = None
++
++    def _register(self):
++        if not self.registered:
++            self.agent.register()
++            self.registered = True
++
++    def run(self, *, once, stop_event):
++        with self.journal.single_process():
++            while not stop_event.is_set():
++                try:
++                    pending = self.journal.pending(self.agent.client.server_url, self.agent.agent_id, self.session.user_id)
++                    handled = False
++                    for receipt in pending:
++                        if receipt["phase"] == "executing":
++                            fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "上次渲染是否结束尚未确认；已保留回执，不会重复执行", 409)
++                        if receipt["phase"] == "report_pending":
++                            # Before registration/new-work authorization: an old
++                            # admitted result may still be reported after revoke.
++                            self._report(receipt)
++                        elif receipt["phase"] == "prepared":
++                            self._register()
++                            self._execute(receipt)
++                        else:
++                            fail("DEVICE_AGENT_RECEIPT_CONFLICT", "本地执行回执状态异常", 409)
++                        handled = True
++                    if handled and once:
++                        return 0
++                    if self.journal.has_unresolved_execution():
++                        fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "本机还有未确认结束的渲染，请先核对原执行记录", 409)
++                    self._register()
++                    claimed = self.agent.client.post(self.prefix + "/claim").get("job")
++                    if claimed is not None:
++                        self._validate_claim(claimed)
++                        payload = self.agent._localize_payload(claimed["payload"])
++                        receipt = self.journal.prepare(self.agent.client.server_url, self.agent.agent_id, self.session.user_id, claimed, payload)
++                        if receipt["phase"] == "acknowledged":
++                            fail("DEVICE_AGENT_RESULT_CONFLICT", "中央服务再次返回已完成任务，未重新渲染", 409)
++                        if receipt["phase"] != "prepared":
++                            fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "原任务已有执行记录，未重复启动", 409)
++                        self._execute(receipt)
++                    self.last_error = None
++                    if once:
++                        return 0
++                except Exception as exc:
++                    code = getattr(exc, "code", type(exc).__name__)
++                    if code != self.last_error:
++                        self.agent._log(f"处理机暂未继续（{code}）；原任务和回执已保留，未自动重做")
++                    self.last_error = code
++                    if once:
++                        return 1
++                stop_event.wait(self.agent.poll_seconds)
++        return 0
++
++    def _validate_claim(self, claimed):
++        if not isinstance(claimed, dict) or not isinstance(claimed.get("job_id"), str) or not isinstance(claimed.get("payload"), dict):
++            fail("INVALID_AGENT_REQUEST", "中央服务任务格式无效", 422)
++        status = claimed.get("status")
++        if not isinstance(status, dict):
++            fail("INVALID_AGENT_REQUEST", "中央服务缺少原任务身份", 422)
++        for field in ("device_authorization", "agent_device_authorization"):
++            binding = status.get(field)
++            if not isinstance(binding, dict) or type(binding.get("user_id")) is not int or binding["user_id"] != self.session.user_id:
++                fail("DEVICE_ACCOUNT_MISMATCH", "中央任务不属于执行机登录账号")
++        if claimed.get("assigned_agent_id") != self.agent.agent_id:
++            fail("DEVICE_AGENT_ASSIGNMENT_MISMATCH", "任务未分配给当前处理机")
++
++    def _execute(self, receipt):
++        self._validate_claim(receipt["claim"])
++        job_id, execution_id = receipt["job_id"], receipt["execution_id"]
++        path = self.prefix + "/jobs/" + quote(job_id, safe="-_.")
++        with local_authorization_context(LocalDeviceAuthorizer(self.session)):
++            with authorized_local_unit(render_operation_scopes(receipt["payload"])) as decision:
++                if decision is None or decision.user_id != self.session.user_id:
++                    fail("DEVICE_AGENT_CONTEXT_REQUIRED", "缺少执行机本地授权")
++                assigned = receipt["claim"]["status"]["agent_device_authorization"]
++                if decision.mode == "ENFORCE" and assigned.get("thumbprint") != decision.thumbprint:
++                    fail("DEVICE_IDENTITY_MISMATCH", "原任务属于另一执行机")
++                acknowledgement = self.agent.client.post(path + "/start", {"execution_id": execution_id})
++                if acknowledgement != {"job_id": job_id, "execution_id": execution_id, "started": True}:
++                    fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "未取得一致的启动回执，未启动渲染", 409)
++                self.journal.executing(receipt)  # Durable before invoking renderer.
++                heartbeat_stop = threading.Event()
++                heartbeat = threading.Thread(target=self._heartbeat, args=(path, execution_id, heartbeat_stop), daemon=True)
++                heartbeat.start()
++                self.agent._log(f"开始已授权任务：{job_id}")
++                try:
++                    try:
++                        rendered = self.render(receipt["payload"])
++                    except Exception as exc:
++                        report = {"execution_id": execution_id, "error": f"本地渲染失败（{type(exc).__name__}）"}
++                        self.journal.save_result(receipt, action="fail", payload=report)
++                    else:
++                        result = rendered.as_dict()
++                        if not isinstance(result, dict):
++                            fail("DEVICE_AGENT_RECEIPT_CONFLICT", "渲染已返回，但结果格式异常，请保留文件核对", 409)
++                        self.journal.save_result(receipt, action="complete", payload={"execution_id": execution_id, "result": result})
++                finally:
++                    heartbeat_stop.set()
++                    heartbeat.join(timeout=2)
++        # Reporting failures never enter the renderer's exception block.
++        self._report(receipt)
++
++    def _heartbeat(self, path, execution_id, stop_event):
++        while not stop_event.wait(self.agent.heartbeat_seconds):
++            try:
++                self.agent.client.post(path + "/heartbeat", {"execution_id": execution_id, "stage": "rendering", "message": "执行机正在处理原任务"})
++            except Exception:
++                self.agent._log("原任务心跳暂未送达；当前执行单元继续安全收尾，不重新领取")
++
++    def _report(self, receipt):
++        result = receipt["result"]
++        if not isinstance(result, dict) or result.get("action") not in {"complete", "fail"}:
++            fail("DEVICE_AGENT_RECEIPT_CONFLICT", "本地结果回执无效，请核对原文件", 409)
++        path = self.prefix + "/jobs/" + quote(receipt["job_id"], safe="-_.") + "/" + result["action"]
++        response = self.agent.client.post(path, result["payload"])
++        expected_status = "completed" if result["action"] == "complete" else "failed"
++        execution = response.get("agent_execution")
++        if response.get("job_id") != receipt["job_id"] or response.get("status") != expected_status or not isinstance(execution, dict) or execution.get("execution_id") != receipt["execution_id"]:
++            fail("DEVICE_AGENT_RESULT_CONFLICT", "中央回报回执与原结果不一致，已保留本地结果", 409)
++        self.journal.acknowledge(receipt)
++        self.agent._log(f"原任务结果已确认：{receipt['job_id']}")
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_journal.py
+@@
+-    def _connect(self):
++    @contextmanager
++    def _connect(self):
+         connection = sqlite3.connect(self.path, timeout=10)
+         connection.row_factory = sqlite3.Row
+         connection.execute("PRAGMA synchronous=FULL")
+-        return connection
++        try:
++            with connection:
++                yield connection
++        finally:
++            connection.close()
+@@
+     def pending(self, central, agent_id, user_id):
+@@
+         return [self._record(row) for row in rows]
++
++    def has_unresolved_execution(self):
++        with self._connect() as connection:
++            return connection.execute("SELECT 1 FROM receipts WHERE phase='executing' LIMIT 1").fetchone() is not None
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/render_agent.py
+@@
+ import argparse
++from contextlib import nullcontext
+@@
+-from urllib.error import HTTPError, URLError
+ from urllib.parse import quote
+-from urllib.request import Request, urlopen
++
++from .device_agent_transport import AgentApiClient
++from .device_agent_client import AgentRequestAuthorizer
++from .device_local_execution import requires_device_authorization
++from .device_command_authorization import add_command_authorization_arguments, command_authorization, account_authorization, CommandAccountClient
++from .device_auth_protocol import bundled_trust, DeviceAuthorizationError
+@@
+-AGENT_VERSION = "1.0.0"
++AGENT_VERSION = "1.1.0"
+@@
+-class AgentApiClient:
+-    def __init__(self, server_url: str, token: str, timeout: int = 30):
+-        self.server_url = server_url.strip().rstrip("/")
+-        self.token = token.strip()
+-        self.timeout = max(5, int(timeout))
+-        if not self.server_url.startswith(("http://", "https://")):
+-            raise ValueError("server_url 必须以 http:// 或 https:// 开头")
+-        if not self.token:
+-            raise ValueError("缺少处理机令牌，请设置 --token 或 JYD_AGENT_TOKEN")
+-
+-    def post(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+-        body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+-        request = Request(
+-            f"{self.server_url}{path}",
+-            data=body,
+-            method="POST",
+-            headers={
+-                "Authorization": f"Bearer {self.token}",
+-                "Content-Type": "application/json; charset=utf-8",
+-            },
+-        )
+-        try:
+-            with urlopen(request, timeout=self.timeout) as response:
+-                raw = response.read()
+-        except HTTPError as exc:
+-            detail = exc.read().decode("utf-8", errors="replace")
+-            raise RuntimeError(f"中央服务拒绝请求（HTTP {exc.code}）: {detail}") from exc
+-        except URLError as exc:
+-            raise ConnectionError(f"无法连接中央服务 {self.server_url}: {exc}") from exc
+-        result = json.loads(raw.decode("utf-8")) if raw else {}
+-        if not isinstance(result, dict):
+-            raise RuntimeError("中央服务返回了无法识别的数据")
+-        return result
+-
+-
+ class RenderAgent:
+@@
+         log_callback: Callable[[str], None] | None = None,
++        journal_root: Path | None = None,
+@@
+         self.log_callback = log_callback
++        self.journal_root = journal_root
+@@
+         stop_event = stop_event or threading.Event()
++        if getattr(self.client, "authorizer", None) is not None:
++            from .device_agent_journal import AgentJournal
++            from .device_agent_runtime import AuthorizedAgentRunner
++            with initialize_ui_automation_in_current_thread():
++                runner = AuthorizedAgentRunner(self, self.client.authorizer.session,
++                                               AgentJournal(self.journal_root or _agent_config_root()), run_render_job)
++                return runner.run(once=once, stop_event=stop_event)
++        if requires_device_authorization():
++            raise DeviceAuthorizationError("DEVICE_AGENT_PROTOCOL_REQUIRED", "执行机缺少本机授权会话", status_code=409)
+         with initialize_ui_automation_in_current_thread():
+@@
+     parser.add_argument("--gui", action="store_true", help="打开处理机启动界面")
++    parser.add_argument("--device-auth-server-url", default=os.environ.get("JYD_AUTH_SERVER_URL", ""), help="受信任的网站授权服务地址，不是中央队列地址")
++    add_command_authorization_arguments(parser)
+     return parser
+@@
+-    agent = RenderAgent(
+-        AgentApiClient(args.server_url, args.token),
+-        agent_id=args.agent_id,
+-        name=args.name,
+-        draft_root=args.draft_root,
+-        poll_seconds=args.poll_seconds,
+-        heartbeat_seconds=args.heartbeat_seconds,
+-    )
+-    return agent.run_forever(once=args.once)
++    try:
++        with command_authorization(args, server_url=args.device_auth_server_url) as session:
++            agent_id = _account_agent_id(args.agent_id, session)
++            client = AgentApiClient(args.server_url, args.token, agent_id=agent_id,
++                                    authorizer=AgentRequestAuthorizer(session) if session else None)
++            agent = RenderAgent(client, agent_id=agent_id, name=args.name, draft_root=args.draft_root,
++                                poll_seconds=args.poll_seconds, heartbeat_seconds=args.heartbeat_seconds)
++            return agent.run_forever(once=args.once)
++    except Exception as exc:
++        if sys.stderr is not None:
++            print(f"处理机未启动（{getattr(exc, 'code', type(exc).__name__)}），请核对账号、原设备授权和连接设置", file=sys.stderr)
++        return 1
++
++
++def _account_agent_id(agent_id, session):
++    value = _safe_agent_id(agent_id)
++    return value[:70] + "-u" + str(session.user_id) if session is not None else value
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_command_authorization.py
+@@
+     trust = bundled_trust(server_url or os.environ.get("JYD_AUTH_SERVER_URL", ""))
+     account = _read_account(args, CommandAccountClient(trust))
++    with account_authorization(account, trust) as session:
++        yield session
++
++
++@contextmanager
++def account_authorization(account, trust):
++    """Share verified-account session lifetime with the Agent GUI; no persistence."""
+     session = DeviceAuthorizationSession(
+*** End Patch

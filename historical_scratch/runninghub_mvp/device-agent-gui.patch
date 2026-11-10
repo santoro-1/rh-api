@@ -1,0 +1,85 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/render_agent.py
+@@
+-    root.geometry("640x590")
+-    root.minsize(600, 540)
++    root.geometry("700x750")
++    root.minsize(640, 680)
+@@
+     status_var = tk.StringVar(value="尚未启动")
++    authorization_required = requires_device_authorization()
++    authority_var = tk.StringVar(value=str(config.get("device_auth_server_url") or os.environ.get("JYD_AUTH_SERVER_URL", "")))
++    username_var = tk.StringVar(value=str(config.get("device_user") or ""))
++    password_var = tk.StringVar(value="")
+@@
+     ttk.Button(settings_frame, text="选择…", command=browse_draft_root).grid(row=2, column=2, pady=6)
++    if authorization_required:
++        ttk.Label(settings_frame, text="网站授权地址").grid(row=3, column=0, sticky="w", pady=6)
++        ttk.Entry(settings_frame, textvariable=authority_var).grid(row=3, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=6)
++        ttk.Label(settings_frame, text="网站账号").grid(row=4, column=0, sticky="w", pady=6)
++        ttk.Entry(settings_frame, textvariable=username_var).grid(row=4, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=6)
++        ttk.Label(settings_frame, text="网站密码").grid(row=5, column=0, sticky="w", pady=6)
++        ttk.Entry(settings_frame, textvariable=password_var, show="●").grid(row=5, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=6)
++        ttk.Label(settings_frame, text="网站密码不保存。首次设备审批在本机工作台完成；日常登录不是重新激活。", wraplength=570).grid(row=6, column=0, columnspan=3, sticky="w", pady=6)
+@@
+             "name": selected_machine,
++            "device_auth_server_url": authority_var.get().strip(),
++            "device_user": username_var.get().strip(),
+@@
+-    def run_agent_in_background(values: dict[str, str]) -> None:
++    def run_agent_in_background(values: dict[str, str], password: str) -> None:
+         nonlocal agent_thread
+         try:
+-            agent = RenderAgent(
+-                AgentApiClient(values["server_url"], values["token"]),
+-                agent_id=values["agent_id"],
+-                name=values["name"],
+-                draft_root=values["draft_root"],
+-                log_callback=append_log,
+-            )
+-            agent.run_forever(stop_event=stop_event)
++            context = nullcontext(None)
++            if authorization_required:
++                trust = bundled_trust(values["device_auth_server_url"])
++                account = CommandAccountClient(trust).login(values["device_user"], password)
++                context = account_authorization(account, trust)
++            password = None
++            with context as session:
++                agent_id = _account_agent_id(values["agent_id"], session)
++                agent = RenderAgent(
++                    AgentApiClient(values["server_url"], values["token"], agent_id=agent_id,
++                                   authorizer=AgentRequestAuthorizer(session) if session else None),
++                    agent_id=agent_id, name=values["name"], draft_root=values["draft_root"], log_callback=append_log,
++                )
++                agent.run_forever(stop_event=stop_event)
+         except Exception as exc:
+-            append_log(f"启动失败：{exc}")
+-            root.after(0, lambda: start_button.configure(state="normal"))
++            append_log(f"启动未完成（{getattr(exc, 'code', type(exc).__name__)}），请核对网站账号、原设备授权和连接设置")
+         finally:
++            password = None
+             agent_thread = None
++            root.after(0, lambda: start_button.configure(state="normal"))
+@@
+         if not values["server_url"] or not values["token"] or not values["draft_root"]:
+             messagebox.showerror("配置不完整", "请填写工作台地址、接入密码和剪映草稿目录。")
+             return
++        if authorization_required and (not values["device_user"] or not values["device_auth_server_url"] or not password_var.get()):
++            messagebox.showerror("请登录网站账号", "请填写受信任的网站授权地址、账号与本次密码；密码不会保存。")
++            return
++        password = password_var.get()
++        password_var.set("")
+@@
+-            args=(values,),
++            args=(values, password),
+@@
+     def close_window() -> None:
+         stop_event.set()
+-        root.destroy()
++        password_var.set("")
++        if agent_thread is not None and agent_thread.is_alive():
++            status_var.set("正在完成当前执行单元和原结果回报，结束后关闭；不会领取新任务。")
++            root.after(250, close_window)
++        else:
++            root.destroy()
+*** End Patch

@@ -1,0 +1,192 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_business_transport.py
++from __future__ import annotations
++
++import io
++import json
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++import sys
++import threading
++from types import SimpleNamespace
++from unittest.mock import Mock
++from urllib.error import HTTPError
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from jyd_probe.auth_center import AuthCenterClient, AuthCenterDeviceError
++from jyd_probe.device_auth_protocol import DeviceAuthorizationError
++from jyd_probe.device_business_transport import DeviceBusinessProofs
++
++
++class Response:
++    status = 200
++    def __init__(self, data):
++        self.stream = io.BytesIO(data if isinstance(data, bytes) else json.dumps(data).encode())
++        self.headers = {}
++    def read(self, *args):
++        return self.stream.read(*args)
++    def __enter__(self):
++        return self
++    def __exit__(self, *args):
++        pass
++
++
++@pytest.fixture
++def client():
++    value = AuthCenterClient("https://license.example")
++    value.device_header_provider = Mock(return_value={"Authorization": "DPoP bound-token", "DPoP": "fresh-proof"})
++    value.device_header_provider.origin = value.base_url
++    return value
++
++
++def test_h3_json_uses_headers_not_body_credentials_and_preserves_business_key(client, monkeypatch):
++    sent = []
++    def request(req, **_):
++        sent.append(req)
++        return Response({"batch_id": "batch-1"})
++    monkeypatch.setattr("jyd_probe.auth_center._device_urlopen", request)
++    monkeypatch.setattr("jyd_probe.auth_center.urlopen", lambda *_a, **_k: pytest.fail("no account-token resend"))
++    payload = {"request_key": "original-key", "access_token": "untrusted-body-token"}
++    assert client.prepare_h3_batch("login-token", payload)["batch_id"] == "batch-1"
++    assert payload["access_token"] == "untrusted-body-token"
++    assert json.loads(sent[0].data) == {"request_key": "original-key"}
++    assert sent[0].get_header("Authorization") == "DPoP bound-token"
++    assert sent[0].get_header("Dpop") == "fresh-proof"
++    client.device_header_provider.assert_called_once_with("login-token", method="POST", path="/api/workbench/h3-batches/prepare")
++
++
++def test_bootstrap_and_not_yet_integrated_contracts_never_receive_device_proof(client, monkeypatch):
++    calls = []
++    def request(req, **_):
++        calls.append(req)
++        return Response({"valid": True, "user": {"user_id": "7"}})
++    monkeypatch.setattr("jyd_probe.auth_center.urlopen", request)
++    client.verify("login-token")
++    client.get_workbench_audio_batch("login-token", "audio-1")
++    client.device_header_provider.assert_not_called()
++    assert all(not req.has_header("Dpop") for req in calls)
++
++
++def test_missing_device_uses_one_account_request_cloud_still_decides(client, monkeypatch):
++    client.device_header_provider.return_value = None
++    calls = []
++    def request(req, **_):
++        calls.append(req)
++        raise HTTPError(req.full_url, 401, "Denied", {}, io.BytesIO(b'{"code":"DEVICE_BOUND_TOKEN_REQUIRED","detail":"device needed"}'))
++    monkeypatch.setattr("jyd_probe.auth_center.urlopen", request)
++    with pytest.raises(AuthCenterDeviceError) as caught:
++        client.confirm_h3_batch("login-token", "batch-1")
++    assert caught.value.status_code == 409
++    assert caught.value.upstream_status_code == 401
++    assert caught.value.error_code == "DEVICE_BOUND_TOKEN_REQUIRED"
++    assert caught.value.response_headers == {"X-Workbench-Device-Error": "DEVICE_BOUND_TOKEN_REQUIRED"}
++    assert caught.value.retryable is False and len(calls) == 1
++    assert json.loads(calls[0].data)["access_token"] == "login-token"
++
++
++def test_bound_business_rejection_is_never_replayed_with_legacy_token(client, monkeypatch):
++    calls = []
++    def request(req, **_):
++        calls.append(req)
++        raise HTTPError(req.full_url, 403, "Denied", {}, io.BytesIO(b'{"code":"DEVICE_REVOKED","detail":"revoked"}'))
++    monkeypatch.setattr("jyd_probe.auth_center._device_urlopen", request)
++    monkeypatch.setattr("jyd_probe.auth_center.urlopen", lambda *_a, **_k: pytest.fail("no downgrade on server rejection"))
++    with pytest.raises(AuthCenterDeviceError, match="revoked"):
++        client.confirm_h3_batch("login-token", "batch-1")
++    assert len(calls) == 1
++
++
++@pytest.mark.parametrize("path", ["/api/workbench/h3-batches/../other", "/api/workbench/h3-batches/a?x=1", "/api/workbench/h3-segments/%2e%2e/video", "/api/workbench/h3-unknown"])
++def test_unsafe_or_unknown_h3_target_rejected_before_proof(client, path):
++    with pytest.raises(AuthCenterDeviceError):
++        client._post(path, {"access_token": "login-token"})
++    client.device_header_provider.assert_not_called()
++
++
++def test_cloud_download_carries_proof_but_runninghub_url_never_does(client, monkeypatch, tmp_path):
++    cloud = []
++    def bound(req, **_):
++        cloud.append(req)
++        return Response(b"video")
++    monkeypatch.setattr("jyd_probe.auth_center._device_urlopen", bound)
++    target = tmp_path / "segment.mp4"
++    assert client.download_h3_segment_video("login-token", "segment-1", target, max_bytes=1024) == 5
++    assert cloud[0].has_header("Dpop")
++    client.device_header_provider.reset_mock()
++    def direct(req, **_):
++        assert not req.has_header("Dpop") and not req.has_header("Authorization")
++        return Response(b"raw")
++    monkeypatch.setattr("jyd_probe.auth_center.urlopen", direct)
++    assert client.download_h3_segment_video("login-token", "segment-1", target, max_bytes=1024,
++        delivery={"mode": "runninghub_direct", "download_url": "https://output.example/raw.mp4", "result_signature": "a" * 64}) == 3
++    client.device_header_provider.assert_not_called()
++
++
++@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
++def test_real_http_redirect_never_forwards_proof_or_resubmits(status):
++    seen = []
++    class Handler(BaseHTTPRequestHandler):
++        def do_POST(self):
++            seen.append((self.path, self.headers.get("DPoP")))
++            self.rfile.read(int(self.headers.get("Content-Length", 0)))
++            self.send_response(status)
++            self.send_header("Location", "/redirected-paid-target")
++            self.end_headers()
++        def do_GET(self):
++            seen.append((self.path, self.headers.get("DPoP")))
++            self.send_response(200)
++            self.end_headers()
++        def log_message(self, *args):
++            pass
++    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
++    thread = threading.Thread(target=server.serve_forever, daemon=True)
++    thread.start()
++    try:
++        client = AuthCenterClient(f"http://127.0.0.1:{server.server_port}")
++        client.device_header_provider = lambda *_a, **_k: {"Authorization": "DPoP test-token", "DPoP": "test-proof"}
++        from jyd_probe.auth_center import AuthCenterError
++        with pytest.raises(AuthCenterError):
++            client.confirm_h3_batch("login", "batch-1")
++        assert seen == [("/api/workbench/h3-batches/batch-1/confirm", "test-proof")]
++    finally:
++        server.shutdown()
++        server.server_close()
++        thread.join(timeout=2)
++
++
++def test_registry_resolves_verified_account_and_never_initializes_a_key():
++    session = Mock()
++    session.trust = SimpleNamespace(origin="https://license.example")
++    registry = Mock(base_url="https://license.example")
++    registry.get.return_value = session
++    resolver = Mock(return_value={"user_id": "7"})
++    provider = DeviceBusinessProofs(registry, account_resolver=resolver)
++    provider("login-token", method="POST", path="/api/workbench/h3-batches/batch-1")
++    resolver.assert_called_once_with("login-token")
++    registry.get.assert_called_once_with("7", "login-token")
++    session.request_headers.assert_called_once_with(method="POST", path="/api/workbench/h3-batches/batch-1", scope=None)
++    session.register.assert_not_called()
++    session.request_headers.side_effect = DeviceAuthorizationError("DEVICE_REVOKED", "revoked")
++    assert provider("login-token", method="POST", path="/api/workbench/h3-batches/batch-1") is None
++    session.register.assert_not_called()
++
++
++def test_source_without_trust_does_not_touch_account_or_native_key(monkeypatch):
++    monkeypatch.setattr("jyd_probe.device_trust_roots.TRUSTED_ISSUERS", ())
++    registry = Mock(base_url="https://license.example", _factory=None)
++    resolver = Mock()
++    provider = DeviceBusinessProofs(registry, account_resolver=resolver)
++    assert provider("login-token", method="POST", path="/api/workbench/h3-batches/batch-1") is None
++    registry.get.assert_not_called()
++    resolver.assert_not_called()
++
++
++def test_configured_release_does_not_fallback_on_trust_failure():
++    registry = Mock(base_url="https://wrong.example")
++    registry.get.side_effect = DeviceAuthorizationError("DEVICE_TRUST_NOT_CONFIGURED", "bad origin", status_code=503)
++    provider = DeviceBusinessProofs(registry, account_resolver=lambda _: {"user_id": "7"})
++    with pytest.raises(AuthCenterDeviceError):
++        provider("login-token", method="POST", path="/api/workbench/h3-batches/batch-1")
+*** End Patch

@@ -1,0 +1,149 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+         self._local_policy = None
++        self._background_retry_at = 0.0
++
++    def background_refresh(self) -> bool:
++        """Refresh an existing account session, never register or run queued work.
++
++        Skip busy sessions instead of holding up another account. The foreground
++        refresh and this method share the same lock, clock anchors and deadlines.
++        """
++        if not self._lock.acquire(blocking=False):
++            return False
++        try:
++            if self._closed or self.state in {"UNREGISTERED", "LOGIN_REQUIRED", "CLIENT_UPGRADE_REQUIRED"}:
++                return False
++            now = self._mono()
++            if self._still_valid() and now < self._refresh_at:
++                return False
++            if now < self._background_retry_at:
++                return False
++            # A programming/transport failure must not make a tight retry loop.
++            self._background_retry_at = now + 15
++            try:
++                self.refresh()
++                self._background_retry_at = 0.0
++            except (DeviceAuthorizationError, DeviceIdentityError):
++                # refresh already records the precise state and preserves only a
++                # still-valid lease on transient network errors, never its expiry.
++                delay = 15 if self.state in {"PENDING", "OFFLINE_GRACE", "AUTH_REFRESH_REQUIRED"} else 300
++                self._background_retry_at = self._mono() + delay
++            return True
++        finally:
++            self._lock.release()
+
+     def local_policy_mode(self, *, force: bool = False) -> str:
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_background_refresh.py
++"""Bounded background refresh of existing sessions; no activation or task start."""
++from __future__ import annotations
++
++import logging
++import queue
++import threading
++
++
++class DeviceBackgroundRefresher:
++    def __init__(self, sessions, *, interval=5.0, workers=4):
++        if interval <= 0 or not 1 <= workers <= 8:
++            raise ValueError("invalid background refresh limits")
++        self._sessions, self._interval, self._workers = sessions, interval, workers
++        self._lock = threading.RLock()
++        self._stop = threading.Event()
++        self._queue = queue.Queue(maxsize=128)
++        self._pending = set()
++        self._threads = []
++
++    def start(self):
++        with self._lock:
++            self._threads = [thread for thread in self._threads if thread.is_alive()]
++            if self._threads:
++                return
++            self._stop.clear()
++            self._threads = [threading.Thread(target=self._worker, name="device-auth-refresh", daemon=True)
++                             for _ in range(self._workers)]
++            self._threads.append(threading.Thread(target=self._schedule, name="device-auth-scheduler", daemon=True))
++            for thread in self._threads:
++                thread.start()
++
++    def schedule_once(self):
++        """Bounded and nonblocking: one slow network call cannot duplicate work."""
++        if self._stop.is_set():
++            return
++        for session in self._sessions():
++            with self._lock:
++                if self._stop.is_set() or session in self._pending:
++                    continue
++                try:
++                    self._queue.put_nowait(session)
++                except queue.Full:
++                    return
++                self._pending.add(session)
++
++    def _schedule(self):
++        while not self._stop.wait(self._interval):
++            self.schedule_once()
++
++    def _worker(self):
++        while not self._stop.is_set():
++            try:
++                session = self._queue.get(timeout=0.25)
++            except queue.Empty:
++                continue
++            try:
++                if not self._stop.is_set():
++                    session.background_refresh()
++            except Exception as exc:
++                # Never log exception text/tracebacks: transport errors may embed
++                # headers or tokens. One account failure cannot kill the service.
++                logging.getLogger("jyd_probe.device_auth").warning(
++                    "后台设备校验异常（%s），请在授权页重新校验", type(exc).__name__)
++            finally:
++                with self._lock:
++                    self._pending.discard(session)
++                self._queue.task_done()
++
++    def stop(self):
++        self._stop.set()
++        with self._lock:
++            threads = tuple(self._threads)
++        for thread in threads:
++            thread.join(timeout=0.5)
++        # An already-in-flight auth request uses its existing transport timeout.
++        # Do not start a second worker pool while any old worker is still alive.
++        with self._lock:
++            self._threads = [thread for thread in threads if thread.is_alive()]
++        while True:
++            try:
++                session = self._queue.get_nowait()
++            except queue.Empty:
++                break
++            with self._lock:
++                self._pending.discard(session)
++            self._queue.task_done()
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization_routes.py
+@@
+         self._sessions = OrderedDict()
++        from .device_background_refresh import DeviceBackgroundRefresher
++        self._background = DeviceBackgroundRefresher(self.active_sessions)
++
++    def active_sessions(self):
++        with self._lock:
++            return tuple(self._sessions.values())
++
++    def start_background(self):
++        self._background.start()
+@@
+     def close(self) -> None:
++        self._background.stop()
+         with self._lock:
+@@
+     @app.on_event("shutdown")
+     def close_device_sessions():
+         registry.close()
++
++    @app.on_event("startup")
++    def start_device_refresh():
++        registry.start_background()
+*** End Patch

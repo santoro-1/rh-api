@@ -1,0 +1,36 @@
+.override-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.override-grid .wide {
+  grid-column: 1 / -1;
+}
+
+[data-audio-preview] {
+  margin-top: 8px;
+}
+
+[data-audio-preview] audio {
+  width: 100%;
+}
+
+.segment-review {
+  display: inline-block;
+  padding: 5px 9px;
+  text-decoration: none;
+}
+
+@media (max-width: 900px) {
+  .override-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .override-grid .wide {
+    grid-column: auto;
+  }
+}

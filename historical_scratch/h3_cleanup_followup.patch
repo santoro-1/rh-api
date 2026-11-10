@@ -1,0 +1,32 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/index.html
+@@
+                 return Boolean(item?.settings?.h3?.remote_batch_id)
+                     && h3OutputFileAvailable(item?.outputs?.base_video)
++                    && item?.outputs?.audio?.metadata?.head_cleanup_version === 'jyd.h3-head-silence.v1'
++                    && (item?.settings?.h3?.segments || []).every((segment) => segment?.local_audio_cleanup?.status === 'READY')
+                     && Boolean(actions.start_postprocess);
+@@
+-                    retryCleanup.className = 'mx-3 mb-2 w-[calc(100%_-1.5rem)] rounded-lg border border-cyan-400/35 px-3 py-2 text-[10px] text-cyan-200';
++                    retryCleanup.className = 'mx-3 mb-2 w-[calc(100%_-_1.5rem)] rounded-lg border border-cyan-400/35 px-3 py-2 text-[10px] text-cyan-200';
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_new_frontend.py
+@@
+             const project = {items:[blocked,ready]};
++            ready.outputs.audio.metadata = {head_cleanup_version:'jyd.h3-head-silence.v1'};
++            ready.settings.h3.segments[0].local_audio_cleanup = {status:'READY'};
+@@
+             assert.equal(h3HasPendingPostprocess(project),true);
++            ready.outputs.audio.metadata.head_cleanup_version = 'old';
++            ready.settings.h3.segments[0].local_audio_cleanup.status = 'PROCESSING';
++            assert.equal(h3NeedsLocalMaterialization(project),true);
++            assert.equal(h3HasPendingPostprocess(project),false);
++            ready.settings.h3.segments[0].local_audio_cleanup.status = 'FAILED';
++            assert.equal(h3NeedsLocalMaterialization(project),false);
++            assert.equal(h3HasPendingPostprocess(project),false);
++            ready.outputs.audio.metadata.head_cleanup_version = 'jyd.h3-head-silence.v1';
++            ready.settings.h3.segments[0].local_audio_cleanup.status = 'READY';
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_h3.py
+@@
+-            filename=f"{item.get('row_key')}-H3原生成片.mp4",
++            filename=f"{item.get('row_key')}-H3声音清理母版.mp4" if cleanup_assets else f"{item.get('row_key')}-H3原生成片.mp4",
+*** End Patch

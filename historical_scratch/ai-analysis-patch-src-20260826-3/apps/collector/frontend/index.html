@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>剪映草稿采集器</title>
+    <link rel="stylesheet" href="/collector-static/styles.css?v=20260714-3" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>剪映草稿采集器</h1>
+        <p>读取本机草稿并识别可替换内容</p>
+      </div>
+      <div class="connection-status"><span></span>仅本机运行</div>
+    </header>
+
+    <main class="app-shell">
+      <section class="section root-section">
+        <div class="section-heading">
+          <div>
+            <h2>草稿目录</h2>
+            <p>请选择包含多个剪映草稿文件夹的 JianyingPro Drafts 目录。</p>
+          </div>
+        </div>
+        <form id="rootForm" class="root-form">
+          <label>
+            <span>本机路径</span>
+            <input id="draftRoot" type="text" autocomplete="off" />
+          </label>
+          <label>
+            <span>网站后端地址</span>
+            <input id="renderServerUrl" type="url" autocomplete="off" placeholder="http://127.0.0.1:8010" />
+          </label>
+          <label>
+            <span>内部访问密码</span>
+            <input id="accessToken" type="password" autocomplete="off" placeholder="已经保存时可留空" />
+          </label>
+          <button class="primary" type="submit">保存配置并扫描</button>
+        </form>
+        <div id="rootMessage" class="message hidden"></div>
+      </section>
+
+      <section class="section drafts-section">
+        <div class="section-heading list-heading">
+          <div>
+            <h2>本机草稿</h2>
+            <p id="draftCount">正在读取...</p>
+          </div>
+          <div class="list-actions">
+            <label class="search-field">
+              <span class="sr-only">搜索草稿</span>
+              <input id="draftSearch" type="search" placeholder="搜索草稿名称" />
+            </label>
+            <button id="refreshBtn" type="button">重新扫描</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>草稿名称</th>
+                <th>状态</th>
+                <th>时长</th>
+                <th>修改时间</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="draftRows"></tbody>
+          </table>
+          <div id="draftEmpty" class="empty-state hidden">当前目录没有找到剪映草稿。</div>
+        </div>
+        <div class="pagination" id="draftPagination">
+          <label>
+            <span>每页</span>
+            <select id="draftPageSize">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+            </select>
+          </label>
+          <button id="previousPageBtn" type="button">上一页</button>
+          <span id="pageStatus">第 1 / 1 页</span>
+          <button id="nextPageBtn" type="button">下一页</button>
+        </div>
+      </section>
+
+      <section id="analysisSection" class="section analysis-section hidden">
+        <div class="section-heading analysis-heading">
+          <div>
+            <h2 id="analysisTitle">分析结果</h2>
+            <p id="analysisMeta"></p>
+          </div>
+          <span id="packagingStatus" class="status-badge"></span>
+        </div>
+
+        <div id="analysisWarnings" class="warning-list hidden"></div>
+
+        <div class="metrics" id="analysisMetrics"></div>
+
+        <section class="migration-policy">
+          <div class="block-heading">
+            <div>
+              <h3>上传前保留策略</h3>
+              <p>草稿结构、原视频、字幕内容和时间始终保留；下面只决定旧素材是否还需要迁移。</p>
+            </div>
+          </div>
+          <div class="policy-grid">
+            <label>
+              <span>BGM / 音效</span>
+              <select id="policyAudio">
+                <option value="keep" selected>保留原素材</option>
+                <option value="replace">后续替换，不上传旧素材</option>
+                <option value="remove">从输出中删除</option>
+              </select>
+            </label>
+            <label>
+              <span>视频特效</span>
+              <select id="policyVideoEffects">
+                <option value="keep" selected>保留原特效</option>
+                <option value="replace">后续替换，不上传旧特效</option>
+                <option value="remove">从输出中删除</option>
+              </select>
+            </label>
+            <label>
+              <span>字幕 / 文字样式</span>
+              <select id="policyTextStyle">
+                <option value="keep" selected>保留原样式和字体</option>
+                <option value="replace">保留文字，替换样式</option>
+              </select>
+            </label>
+            <label>
+              <span>花字</span>
+              <select id="policyTextEffects">
+                <option value="keep" selected>保留原花字</option>
+                <option value="replace">后续替换，不上传旧花字</option>
+                <option value="remove">删除花字，保留普通文字</option>
+              </select>
+            </label>
+            <label>
+              <span>复合文字模板</span>
+              <select id="policyTextTemplates" disabled>
+                <option value="keep" selected>始终保留人工设计</option>
+              </select>
+            </label>
+            <div class="fixed-policy">
+              <span>固定保留</span>
+              <strong>原视频、字幕内容、字幕时间线</strong>
+            </div>
+          </div>
+          <div class="plan-actions">
+            <button id="buildUploadPlanBtn" class="primary" type="button">生成上传清单</button>
+            <button id="uploadPlanBtn" type="button" disabled>上传到网站</button>
+            <span>先生成清单；没有阻塞问题后即可上传并登记为母版。</span>
+          </div>
+          <div id="uploadPlanSummary" class="upload-plan-summary hidden"></div>
+          <div id="uploadResult" class="message hidden"></div>
+        </section>
+
+        <div class="analysis-actions">
+          <button id="extractFontsBtn" type="button">提取本草稿字体</button>
+          <span>字体提取用于建设公共字体库；被设为“替换样式”的旧字体无需上传。</span>
+        </div>
+        <div id="analysisActionMessage" class="message hidden"></div>
+
+        <div class="analysis-grid">
+          <section class="result-block">
+            <div class="block-heading">
+              <h3>可替换内容</h3>
+              <span id="slotTotal"></span>
+            </div>
+            <div id="slotGroups" class="slot-groups"></div>
+          </section>
+
+          <section class="result-block">
+            <div class="block-heading">
+              <h3>本地素材依赖</h3>
+              <span id="dependencyTotal"></span>
+            </div>
+            <div id="dependencySummary" class="dependency-summary"></div>
+            <div id="dependencyList" class="dependency-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div id="loadingOverlay" class="loading-overlay hidden" role="status" aria-live="polite">
+      <div class="loading-box">
+        <span class="spinner"></span>
+        <strong>正在读取并分析草稿</strong>
+        <p>加密草稿会先在临时副本中自动解密。</p>
+      </div>
+    </div>
+
+    <script src="/collector-static/app.js?v=20260714-3"></script>
+  </body>
+</html>

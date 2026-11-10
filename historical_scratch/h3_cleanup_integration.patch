@@ -1,0 +1,204 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_h3.py
+@@
+ from .caption_alignment import CaptionAlignmentError, alignment_matches
++from .h3_audio_cleanup import H3_AUDIO_CLEANUP_VERSION, read_cleanup, request_cleanup
+@@
+     expected_segment_id: str | None = None,
++    original: bool = False,
+ ) -> Path:
+@@
+         if cache_path.is_file() and cache_path.stat().st_size > 0:
++            if not original:
++                cleaned = read_cleanup(cache_path, str(current_segment.get("script_text") or ""))
++                if cleaned is not None:
++                    return cleaned.preview_path
++                if current_segment.get("local_audio_cleanup"):
++                    raise FileNotFoundError("H3 片段正在本地清理声音，原始素材仍可下载")
+             return cache_path
+@@
+         media_preparer: Callable[..., H3MediaAssets] = prepare_h3_media,
++        head_cleanup_enabled: bool = False,
+@@
+         self.media_preparer = media_preparer
++        self.head_cleanup_enabled = bool(head_cleanup_enabled)
+@@
+-    @classmethod
+-    def _h3_item_needs_materialization(cls, item: dict[str, Any]) -> bool:
++    def _h3_item_needs_materialization(self, item: dict[str, Any]) -> bool:
+@@
+-            and not cls._local_h3_files_ready(item)
++            and (not self._local_h3_files_ready(item)
++                 or (self.head_cleanup_enabled and item.get("outputs", {}).get("audio", {}).get("metadata", {}).get("head_cleanup_version") != H3_AUDIO_CLEANUP_VERSION))
+@@
+-        if not pending:
+-            return cached_snapshot
++        if not pending:
++            return self._annotate_head_cleanup(owner_user_id, project_id, project, cached_snapshot)
+@@
+-        return cached_snapshot
++        return self._annotate_head_cleanup(owner_user_id, project_id, project, cached_snapshot)
++
++    def _annotate_head_cleanup(
++        self, owner_user_id: str, project_id: str,
++        project: dict[str, Any], snapshot: dict[str, Any],
++    ) -> dict[str, Any]:
++        if not self.head_cleanup_enabled:
++            return snapshot
++        by_row = {str(item.get("row_key")): item for item in project.get("items", [])}
++        for remote in snapshot.get("items", []):
++            item = by_row.get(str(remote.get("row_id")))
++            if item is None:
++                continue
++            remote_item = {"batch_id": snapshot.get("batch_id"), **remote}
++            for segment in remote.get("segments", []):
++                if segment.get("local_preview_is_current") is not True:
++                    continue
++                source = self._cached_segment_path(owner_user_id, project_id, str(item["item_id"]), remote_item, segment, require_current=True)
++                if source is not None:
++                    segment["local_audio_cleanup"] = request_cleanup(source, str(segment.get("script_text") or ""), self.caption_aligner)
++        return snapshot
++
++    def retry_local_head_cleanup(self, owner_user_id: str, project_id: str, segment_id: str) -> dict[str, Any]:
++        """Local-only retry; never calls H3 generation or paid retry endpoints."""
++        if not self.head_cleanup_enabled:
++            raise ValueError("本地片头清理未开启")
++        project = self.store.get_project(owner_user_id, project_id)
++        segment = self._require_project_segment(project, segment_id)
++        for item in project.get("items", []):
++            h3 = item.get("settings", {}).get("h3", {})
++            if segment not in h3.get("segments", []):
++                continue
++            source = self._cached_segment_path(owner_user_id, project_id, str(item["item_id"]),
++                {"batch_id": h3.get("remote_batch_id"), "item_id": h3.get("remote_item_id")}, segment, require_current=True)
++            if source is not None:
++                return request_cleanup(source, str(segment.get("script_text") or ""), self.caption_aligner, force_retry=True)
++        raise ValueError("当前原片尚未下载完成，不能清理旧版本")
+ 
+     def _materialize_ready_items(
+@@
+             segment_paths.append(cached)
++        cleanup_assets = []
++        if self.head_cleanup_enabled:
++            for path, segment in zip(segment_paths, segments, strict=True):
++                cleaned = read_cleanup(path, str(segment.get("script_text") or ""))
++                if cleaned is None:
++                    if segment.get("local_audio_cleanup", {}).get("status") == "FAILED":
++                        raise H3MediaError("H3 片头清理失败，请在片段检查中重试本地清理，不需要重新生成")
++                    return
++                cleanup_assets.append(cleaned)
++            signature = hashlib.sha256((signature + ":" + ":".join(value.key for value in cleanup_assets)).encode("utf-8")).hexdigest()
+         outputs = item.get("outputs") if isinstance(item.get("outputs"), dict) else {}
+@@
+         assets = self.media_preparer(
+             segment_paths=segment_paths,
+             segment_texts=[str(value["script_text"]) for value in segments],
+             script_text=script_text,
+             target_dir=target_dir,
++            **({"segment_audio_paths": [value.audio_path for value in cleanup_assets],
++                "segment_audio_offsets_seconds": [float(value.report["audio_offset_seconds"]) for value in cleanup_assets]} if cleanup_assets else {}),
+@@
+             "visual_transition_preserves_timeline": True,
++            **({"head_cleanup_version": H3_AUDIO_CLEANUP_VERSION,
++                "head_cleanup_keys": [value.key for value in cleanup_assets],
++                "head_cleanup_reports": [value.report for value in cleanup_assets]} if cleanup_assets else {}),
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_h3_media.py
+@@
+ import subprocess
++import wave
+@@
+ def prepare_h3_media(
+@@
+     target_dir: Path,
++    segment_audio_paths: list[Path] | None = None,
++    segment_audio_offsets_seconds: list[float] | None = None,
+ ) -> H3MediaAssets:
+@@
+-    audio = _atomic_media(
+-        [
+-            "ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(master),
+-            "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le",
+-        ],
+-        target_dir / "h3-authoritative-full.wav",
+-        "抽取 H3 权威音频失败",
+-    )
++    if segment_audio_paths is not None:
++        audio = _assemble_clean_audio(segment_audio_paths, durations,
++            segment_audio_offsets_seconds or [0.0] * len(durations),
++            target_dir / "h3-authoritative-full.wav")
++        _atomic_media(
++            ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(master),
++             "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
++             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"],
++            master, "封装 H3 清理版权威音频失败")
++    else:
++        audio = _atomic_media(
++            ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(master),
++             "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le"],
++            target_dir / "h3-authoritative-full.wav", "抽取 H3 权威音频失败")
+@@
+     return H3MediaAssets(
+@@
+         visual_dissolve_seconds=visual_dissolve_seconds,
+     )
++
++
++def _assemble_clean_audio(paths: list[Path], durations: list[float],
++                          offsets: list[float], target: Path) -> Path:
++    """Concatenate decoded PCM at video boundaries, never AAC priming packets."""
++    if not paths or len(paths) != len(durations) or len(offsets) != len(paths):
++        raise H3MediaError("H3 清理音频分段数量不一致")
++    with wave.open(str(paths[0]), "rb") as source:
++        rate, channels = source.getframerate(), source.getnchannels()
++    if channels not in (1, 2):
++        raise H3MediaError("H3 清理音频仅支持单声道或双声道")
++    layout = "mono" if channels == 1 else "stereo"
++    inputs = [arg for path in paths for arg in ("-i", str(path))]
++    filters = []
++    cursor_seconds, cursor_samples = 0.0, 0
++    for index, (duration, offset) in enumerate(zip(durations, offsets, strict=True)):
++        cursor_seconds += duration
++        end_sample = round(cursor_seconds * rate)
++        length = end_sample - cursor_samples
++        cursor_samples = end_sample
++        offset_samples = round(offset * rate)
++        timing = (f"adelay={offset_samples}S:all=1," if offset_samples > 0 else
++                  f"atrim=start_sample={-offset_samples},asetpts=PTS-STARTPTS," if offset_samples < 0 else "")
++        filters.append(f"[{index}:a:0]aresample={rate},aformat=sample_fmts=s16:channel_layouts={layout},"
++            f"{timing}apad=whole_len={length},atrim=end_sample={length},asetpts=PTS-STARTPTS[a{index}]")
++    filters.append("".join(f"[a{i}]" for i in range(len(paths))) + f"concat=n={len(paths)}:v=0:a=1[out]")
++    return _atomic_media(["ffmpeg", "-hide_banner", "-nostdin", "-y", *inputs,
++        "-filter_complex", ";".join(filters), "-map", "[out]", "-ar", str(rate),
++        "-ac", str(channels), "-c:a", "pcm_s16le"], target, "合并 H3 清理音频失败")
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+             require_precise_alignment=settings.asr_required,
++            head_cleanup_enabled=True,
+         )
+ 
+     @app.get("/api/new/h3/accounts")
+@@
+     def list_new_h3_accounts(request: Request) -> dict[str, Any]:
+@@
+         except AuthCenterError as exc:
+             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++
++    @app.post("/api/new/projects/{project_id}/h3/segments/{segment_id}/audio-cleanup/retry")
++    def retry_new_h3_audio_cleanup(project_id: str, segment_id: str, request: Request) -> dict[str, Any]:
++        user = current_project_user(request)
++        try:
++            # Local identity/access checks only. This route cannot submit H3 jobs.
++            return {"cleanup": project_h3_coordinator(auth_center).retry_local_head_cleanup(user["user_id"], project_id, segment_id)}
++        except KeyError as exc:
++            raise HTTPException(status_code=404, detail=str(exc)) from exc
++        except (OSError, ValueError) as exc:
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
+@@
+                 path = current_h3_segment_preview_path(
+                     project,
+                     item_id=item_id,
+                     segment_number=segment_number,
+                     storage_root=settings.storage_root,
++                    original=True,
+                 )
+*** End Patch

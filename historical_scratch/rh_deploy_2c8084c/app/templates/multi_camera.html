@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block title %}多机位图片 + 单音频测试{% endblock %}
+{% block content %}
+<style>
+  .mc-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:20px;align-items:start}.mc-card{background:#fff;border:1px solid #e6e8ec;border-radius:12px;padding:18px;margin-bottom:16px}.mc-card h2,.mc-card h3{margin-top:0}.mc-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.mc-row>*{min-width:0}.mc-muted{color:#667085;font-size:14px}.mc-groups{display:grid;gap:12px}.mc-group{border:1px solid #d9dde5;border-radius:10px;padding:12px}.mc-group-head{display:flex;gap:8px;align-items:center}.mc-group-head input{flex:1}.mc-files{margin:8px 0 0;padding-left:20px}.mc-table{width:100%;border-collapse:collapse}.mc-table th,.mc-table td{border-bottom:1px solid #e8eaee;padding:9px 6px;text-align:left;vertical-align:top}.mc-table select{min-width:130px}.mc-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.mc-status{padding:10px 12px;border-radius:8px;background:#f5f7fa;margin:10px 0;white-space:pre-wrap}.mc-status.error{background:#fff0f0;color:#a41515}.mc-status.ok{background:#edf9f0;color:#156b2c}.mc-segment{display:grid;grid-template-columns:70px 1fr 100px 120px;gap:8px;border-top:1px solid #eef0f3;padding:8px 0;align-items:center}.mc-batch-link{display:block;padding:8px 0;border-bottom:1px solid #eef0f3}.mc-uploading{opacity:.55;pointer-events:none}.mc-inline-input{width:74px}.mc-plan-row{margin:10px 0;padding:10px;border:1px solid #e5e7eb;border-radius:8px}.mc-pill{display:inline-block;padding:2px 7px;border-radius:999px;background:#eef2ff;font-size:12px;margin:2px}.mc-results-row{border:1px solid #e5e7eb;border-radius:8px;padding:10px;margin:10px 0}@media(max-width:900px){.mc-grid{grid-template-columns:1fr}.mc-segment{grid-template-columns:60px 1fr}.mc-table{display:block;overflow-x:auto}}
+</style>
+
+<div class="mc-grid">
+  <section>
+    <div class="mc-card">
+      <h1>多机位图片 + 单音频</h1>
+      <p class="mc-muted">受控测试页。每条音频独立从机位序列开头开始；不超过 20 秒只用第一机位，超过后优先按自然停顿切段。这里只生成有序片段，不自动拼接。</p>
+      <div class="mc-row">
+        <label>批次名称 <input id="batch-name" value="多机位测试批次" maxlength="100"></label>
+        <label>最长分辨率 <input id="resolution" value="1024" inputmode="numeric" class="mc-inline-input"></label>
+        <label><input id="seedvr2" type="checkbox"> SeedVR2 清晰化</label>
+      </div>
+      <label for="prompt">提示词</label>
+      <textarea id="prompt" rows="3" maxlength="5000">{{ default_prompt }}</textarea>
+    </div>
+
+    <div class="mc-card">
+      <div class="mc-row"><h2>1. 建立图片组</h2><button id="add-group" type="button">添加图片组</button></div>
+      <p class="mc-muted">一个图片组就是一套人物机位。图片选择顺序即机位 1、2、3……</p>
+      <div id="groups" class="mc-groups"></div>
+    </div>
+
+    <div class="mc-card">
+      <h2>2. 批量上传音频并对齐</h2>
+      <input id="audio-files" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac" multiple>
+      <div class="mc-actions">
+        <label>统一图片组 <select id="apply-all-group"></select></label>
+        <button id="apply-all" type="button">应用到全部</button>
+        <label>从第 <input id="range-start" type="number" min="1" value="1" class="mc-inline-input"> 条</label>
+        <label>到第 <input id="range-end" type="number" min="1" value="1" class="mc-inline-input"> 条</label>
+        <button id="apply-range" type="button">应用到区间</button>
+      </div>
+      <div class="mc-actions">
+        <label>每组连续 <input id="block-size" type="number" min="1" value="1" class="mc-inline-input"> 条</label>
+        <button id="auto-block" type="button">按图片组顺序自动填充</button>
+      </div>
+      <div id="audio-empty" class="mc-status">尚未上传音频。</div>
+      <table id="audio-table" class="mc-table" hidden>
+        <thead><tr><th>序号</th><th>音频</th><th>图片组</th><th></th></tr></thead><tbody></tbody>
+      </table>
+    </div>
+
+    <div class="mc-card">
+      <h2>3. 预检并创建</h2>
+      <div class="mc-actions">
+        <button id="preflight" type="button">预检切分与机位</button>
+        <button id="create" type="button" disabled>确认并创建任务</button>
+      </div>
+      <div id="message" class="mc-status">请先上传图片和音频。</div>
+      <div id="plan"></div>
+    </div>
+
+    <div id="results-card" class="mc-card" hidden>
+      <div class="mc-row"><h2>生成状态</h2><a id="download-all" href="#" hidden>下载已有有序片段 ZIP</a></div>
+      <div id="summary" class="mc-status"></div>
+      <div id="results"></div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="mc-card">
+      <h3>最近的多机位批次</h3>
+      {% if recent_batches %}
+        {% for summary in recent_batches %}
+          <a class="mc-batch-link" href="#" data-batch-id="{{ summary.batchId }}">{{ summary.name }}<br><span class="mc-muted">{{ summary.createdAt[:19] }} · {{ summary.status }}</span></a>
+        {% endfor %}
+      {% else %}<p class="mc-muted">暂无记录</p>{% endif %}
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const csrf = document.querySelector('meta[name="csrf-token"]').content;
+  const state = {groups: [], audios: [], requestKey: crypto.randomUUID(), preflightSignature: null, batchId: null, timer: null};
+  const el = id => document.getElementById(id);
+  const message = (text, kind='') => {el('message').textContent=text; el('message').className=`mc-status ${kind}`};
+  const api = async (url, options={}) => {
+    options.headers = Object.assign({'X-CSRF-Token': csrf}, options.headers || {});
+    const response = await fetch(url, options);
+    let body = null; try { body = await response.json(); } catch (_) {}
+    if (!response.ok) throw new Error(body?.detail || `请求失败（${response.status}）`);
+    return body;
+  };
+  const newGroup = () => ({key: crypto.randomUUID(), name: `图片组 ${state.groups.length + 1}`, images: [], uploading: false});
+  const invalidate = () => {state.preflightSignature=null; el('create').disabled=true; el('plan').replaceChildren();};
+
+  async function uploadFile(file, kind) {
+    const form = new FormData(); form.append('file', file); form.append('kind', kind);
+    return api('/api/multi-camera/assets', {method:'POST', body:form});
+  }
+  function groupOptions(selected) {
+    return state.groups.map(group => `<option value="${group.key}" ${group.key===selected?'selected':''}>${escapeHtml(group.name)}</option>`).join('');
+  }
+  function escapeHtml(value) { const node=document.createElement('span'); node.textContent=String(value); return node.innerHTML; }
+  function renderGroups() {
+    const root=el('groups'); root.replaceChildren();
+    state.groups.forEach((group,index) => {
+      const card=document.createElement('div'); card.className=`mc-group ${group.uploading?'mc-uploading':''}`;
+      card.innerHTML=`<div class="mc-group-head"><strong>组 ${index+1}</strong><input maxlength="100" value="${escapeHtml(group.name)}"><button type="button" data-remove>删除</button></div><p class="mc-muted">${group.images.length ? group.images.map((image,i)=>`机位 ${i+1}：${escapeHtml(image.originalName)}`).join('<br>') : '尚未选择图片'}</p><input data-images type="file" accept="image/*,.jpg,.jpeg,.png,.webp" multiple>`;
+      card.querySelector('input:not([data-images])').addEventListener('input',event=>{group.name=event.target.value; invalidate(); renderAudios();});
+      card.querySelector('[data-remove]').addEventListener('click',()=>{if(state.groups.length===1)return; state.groups.splice(index,1); const fallback=state.groups[0].key; state.audios.forEach(row=>{if(row.groupKey===group.key)row.groupKey=fallback}); invalidate(); renderGroups(); renderAudios();});
+      card.querySelector('[data-images]').addEventListener('change',async event=>{
+        const files=[...event.target.files]; if(!files.length)return; group.uploading=true; renderGroups(); message(`正在上传 ${files.length} 张图片……`);
+        try { group.images=[]; for(const file of files) group.images.push(await uploadFile(file,'image')); message('图片上传完成。','ok'); invalidate(); }
+        catch(error){message(error.message,'error');}
+        finally{group.uploading=false; renderGroups();}
+      }); root.append(card);
+    });
+    el('apply-all-group').innerHTML=groupOptions(el('apply-all-group').value || state.groups[0]?.key);
+  }
+  function renderAudios() {
+    const table=el('audio-table'), tbody=table.querySelector('tbody'); tbody.replaceChildren();
+    el('audio-empty').hidden=state.audios.length>0; table.hidden=state.audios.length===0;
+    state.audios.forEach((row,index)=>{
+      const tr=document.createElement('tr'); tr.innerHTML=`<td>${index+1}</td><td>${escapeHtml(row.originalName)}</td><td><select>${groupOptions(row.groupKey)}</select></td><td><button type="button">移除</button></td>`;
+      tr.querySelector('select').addEventListener('change',event=>{row.groupKey=event.target.value; invalidate();});
+      tr.querySelector('button').addEventListener('click',()=>{state.audios.splice(index,1); invalidate(); renderAudios();}); tbody.append(tr);
+    });
+    el('range-end').value=Math.max(state.audios.length,1);
+  }
+  function buildPayload() {
+    return {
+      name:el('batch-name').value, requestKey:state.requestKey, prompt:el('prompt').value,
+      resolution:el('resolution').value, seedvr2Enabled:el('seedvr2').checked,
+      groups:state.groups.map(group=>({clientKey:group.key,name:group.name,imageAssetIds:group.images.map(image=>image.assetId)})),
+      rows:state.audios.map((audio,index)=>({rowKey:`audio-${String(index+1).padStart(4,'0')}`,audioAssetId:audio.assetId,groupClientKey:audio.groupKey}))
+    };
+  }
+  function signature(payload) { return JSON.stringify(payload); }
+  function renderPlan(body) {
+    const root=el('plan'); root.replaceChildren();
+    body.rows.forEach(row=>{const div=document.createElement('div'); div.className='mc-plan-row'; div.innerHTML=`<strong>${escapeHtml(row.audioName)}</strong> · ${escapeHtml(row.groupName)} · ${row.durationSeconds}s<br>${row.segments.map(s=>`<span class="mc-pill">${s.index}: ${s.startSeconds}-${s.endSeconds}s / 机位${s.camera}</span>`).join('')}`; root.append(div);});
+  }
+  async function doPreflight() {
+    const payload=buildPayload(); el('preflight').disabled=true; message('正在读取音频停顿并计算全局切分……');
+    try { const body=await api('/api/multi-camera/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); renderPlan(body); state.preflightSignature=signature(payload); el('create').disabled=false; message(`预检通过：${body.totalAudios} 条音频，共 ${body.totalSegments} 个标准数字人任务。`,'ok'); }
+    catch(error){invalidate(); message(error.message,'error');}
+    finally{el('preflight').disabled=false;}
+  }
+  async function doCreate() {
+    const payload=buildPayload(); if(signature(payload)!==state.preflightSignature){message('内容已变化，请重新预检。','error');invalidate();return;}
+    el('create').disabled=true; message('正在切分音频并创建标准数字人任务，请不要重复提交……');
+    try {const body=await api('/api/multi-camera/batches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); state.batchId=body.batchId; message(body.created?'任务已创建。':'检测到重复提交，已返回原批次。','ok'); await loadStatus(body.batchId);}
+    catch(error){el('create').disabled=false;message(error.message,'error');}
+  }
+  function statusTerminal(status){return ['SUCCESS','FAILED','PARTIAL_FAILED'].includes(status)}
+  async function retry(segmentId){await api(`/api/multi-camera/segments/${segmentId}/retry`,{method:'POST'}); await loadStatus(state.batchId);}
+  function renderStatus(body){
+    el('results-card').hidden=false; const summary=body.batch; el('summary').textContent=`${summary.name}：${summary.finished}/${summary.total} 条完成；子任务 成功 ${summary.success} / 失败 ${summary.failed} / 排队 ${summary.queued} / 处理中 ${summary.processing}`;
+    const root=el('results'); root.replaceChildren(); body.rows.forEach(row=>{const card=document.createElement('div');card.className='mc-results-row';const title=document.createElement('strong');title.textContent=`${row.rowNumber}. ${row.audioName} → ${row.groupName}`;card.append(title);row.segments.forEach(segment=>{const line=document.createElement('div');line.className='mc-segment';line.innerHTML=`<span>第 ${segment.index} 段</span><span>${segment.startSeconds}-${segment.endSeconds}s · 机位 ${segment.camera} · ${escapeHtml(segment.imageName||'')}</span><span>${escapeHtml(segment.statusLabel)}</span><span></span>`;const actions=line.lastElementChild;if(segment.videoReady){const link=document.createElement('a');link.href=`/api/multi-camera/segments/${segment.id}/video`;link.textContent='下载';actions.append(link);}if(segment.canRetry){const button=document.createElement('button');button.type='button';button.textContent='重试';button.addEventListener('click',()=>retry(segment.id).catch(error=>message(error.message,'error')));actions.append(button);}card.append(line);});root.append(card);});
+    el('download-all').hidden=!body.downloadReady;el('download-all').href=`/api/multi-camera/batches/${summary.batchId}/download`;
+    clearTimeout(state.timer);if(!statusTerminal(summary.status))state.timer=setTimeout(()=>loadStatus(summary.batchId),5000);
+  }
+  async function loadStatus(batchId){state.batchId=batchId;try{renderStatus(await api(`/api/multi-camera/batches/${batchId}`));}catch(error){message(error.message,'error');}}
+
+  state.groups.push(newGroup()); renderGroups(); renderAudios();
+  el('add-group').addEventListener('click',()=>{state.groups.push(newGroup());invalidate();renderGroups();renderAudios();});
+  el('audio-files').addEventListener('change',async event=>{const files=[...event.target.files];if(!files.length)return;message(`正在上传 ${files.length} 条音频……`);event.target.disabled=true;try{for(const file of files){const uploaded=await uploadFile(file,'audio');state.audios.push({...uploaded,groupKey:state.groups[0].key});renderAudios();}invalidate();message('音频上传完成，请检查图片组绑定。','ok');}catch(error){message(error.message,'error');}finally{event.target.disabled=false;event.target.value='';}});
+  el('apply-all').addEventListener('click',()=>{const key=el('apply-all-group').value;state.audios.forEach(row=>row.groupKey=key);invalidate();renderAudios();});
+  el('apply-range').addEventListener('click',()=>{const start=Math.max(1,+el('range-start').value),end=Math.min(state.audios.length,+el('range-end').value),key=el('apply-all-group').value;state.audios.forEach((row,index)=>{if(index+1>=start&&index+1<=end)row.groupKey=key});invalidate();renderAudios();});
+  el('auto-block').addEventListener('click',()=>{const size=Math.max(1,+el('block-size').value||1);state.audios.forEach((row,index)=>row.groupKey=state.groups[Math.floor(index/size)%state.groups.length].key);invalidate();renderAudios();});
+  ['batch-name','prompt','resolution','seedvr2'].forEach(id=>el(id).addEventListener('input',invalidate));
+  el('preflight').addEventListener('click',doPreflight); el('create').addEventListener('click',doCreate);
+  document.querySelectorAll('[data-batch-id]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();loadStatus(link.dataset.batchId)}));
+})();
+</script>
+{% endblock %}

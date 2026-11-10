@@ -1,0 +1,52 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_initialization_channel.py
+@@
+ import threading
++import time
+@@
+             ("WaitNamedPipeW", [wintypes.LPCWSTR, dword], wintypes.BOOL),
++            ("SetNamedPipeHandleState", [handle, ctypes.POINTER(dword), ctypes.POINTER(dword), ctypes.POINTER(dword)], wintypes.BOOL),
+@@
+-    def _complete(self, ov, *, pending, timeout_ms):
++    def _complete(self, ov, *, pending, timeout_ms, cancel_event=None):
+         try:
+-            if (
+-                pending
+-                and self._ov.WaitForMultipleObjects([ov.event], False, timeout_ms) != 0
+-            ):
+-                raise _failure()
++            deadline = time.monotonic() + timeout_ms / 1000
++            while pending:
++                if cancel_event is not None and cancel_event.is_set():
++                    raise _failure()
++                remaining = max(0, int((deadline - time.monotonic()) * 1000))
++                status = self._ov.WaitForMultipleObjects([ov.event], False, min(1000, remaining))
++                if status == 0:
++                    break
++                if status != 258 or remaining == 0:
++                    raise _failure()
+@@
+-    def connect(self, handle):
++    def connect(self, handle, cancel_event=None):
+         ov = self._ov.ConnectNamedPipe(handle, overlapped=True)
+-        self._complete(ov, pending=True, timeout_ms=120000)
++        self._complete(ov, pending=True, timeout_ms=120000, cancel_event=cancel_event)
+@@
+-            name, 0x80000000, 0, None, 3, 0x40000000, None
++            name, 0x80000100, 0, None, 3, 0x40000000, None
+@@
+             if self.peer_pid(handle, server=True) != expected_pid:
+                 raise _failure()
++            mode = wintypes.DWORD(2)
++            if not self._kernel.SetNamedPipeHandleState(handle, ctypes.byref(mode), None, None):
++                raise _failure()
+@@
+-            self._api.connect(self._handle)
++            self._api.connect(self._handle, self._stop)
+@@
+             self._api.write(self._handle, message)
++            # Do not discard a buffered message by closing the server end before
++            # the helper reads it. The coordinator closes after helper exit; this
++            # independent ceiling also cleans up if the parent abandons the call.
++            self._stop.wait(120)
+*** End Patch

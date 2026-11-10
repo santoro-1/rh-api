@@ -1,0 +1,60 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/index.html
+@@
+                 const needsDissolveUpgrade = includeDissolveUpgrade
+@@
+                     && Number(item?.outputs?.base_video?.metadata?.visual_dissolve_seconds || 0) !== 0.5;
++                const cleanupFailed = (h3.segments || []).some((segment) => segment?.local_audio_cleanup?.status === 'FAILED');
++                const needsHeadCleanup = !cleanupFailed && remoteStatus === 'SUCCESS'
++                    && item?.outputs?.audio?.metadata?.head_cleanup_version !== 'jyd.h3-head-silence.v1';
+                 const needsAssembly = !h3.materialization_error?.requires_input_change
+-                    && (needsDissolveUpgrade || (remoteStatus === 'SUCCESS'
++                    && !cleanupFailed
++                    && (needsHeadCleanup || needsDissolveUpgrade || (remoteStatus === 'SUCCESS'
+@@
+                     segment?.local_preview_error || '',
++                    segment?.local_audio_cleanup?.key || '',
++                    segment?.local_audio_cleanup?.status || '',
++                    segment?.local_audio_cleanup?.error || '',
+@@
+                 const localPreviewReady = segment.local_preview_ready === true;
++                const cleanup = segment.local_audio_cleanup || null;
++                const cleanupReady = !cleanup || cleanup.status === 'READY';
++                const cleanupLabel = !cleanup ? '' : cleanup.status === 'READY' ? '片头声音已清理'
++                    : cleanup.status === 'FAILED' ? '本地清理失败（不会自动重新生成）'
++                    : cleanup.status === 'RETRY_WAIT' ? '等待本地 ASR 重试'
++                    : '正在本地清理片头声音';
+@@
+-                const previewVersion = String(segment.normalized_video_sha256 || segment.completed_at || segmentId);
+-                const previewUrl = localPreviewReady && segmentId
++                const previewVersion = String(cleanup?.key || segment.normalized_video_sha256 || segment.completed_at || segmentId);
++                const previewUrl = localPreviewReady && cleanupReady && segmentId
+@@
+                         <p class="line-clamp-2 min-h-[2.25rem] text-[10px] leading-[1.125rem] text-gray-300" title="${escapeHtml(scriptText)}">${escapeHtml(scriptText || '暂无分段台词')}</p>
++                        ${cleanupLabel ? `<p class="text-[9px] text-cyan-300">${escapeHtml(cleanupLabel)}</p>` : ''}
++                        ${cleanup?.error ? `<p class="line-clamp-2 text-[9px] text-amber-300" title="${escapeHtml(cleanup.error)}">${escapeHtml(cleanup.error)}</p>` : ''}
+@@
+                 if (canRedownload) {
+@@
+                     card.appendChild(redownload);
+                 }
++                if (cleanup?.status === 'FAILED' || cleanup?.status === 'RETRY_WAIT') {
++                    const retryCleanup = document.createElement('button');
++                    retryCleanup.type = 'button';
++                    retryCleanup.className = 'mx-3 mb-2 w-[calc(100%_-1.5rem)] rounded-lg border border-cyan-400/35 px-3 py-2 text-[10px] text-cyan-200';
++                    retryCleanup.textContent = '重试本地声音清理（不收费）';
++                    retryCleanup.addEventListener('click', async () => {
++                        retryCleanup.disabled = true;
++                        try {
++                            await workspaceApi(`/api/new/projects/${encodeURIComponent(activeProject.project_id)}/h3/segments/${encodeURIComponent(segmentId)}/audio-cleanup/retry`, { method: 'POST', body: '{}' });
++                            showToast('已安排本地声音清理', '仅处理已下载的原片，不会重新调用 H3。', 'info');
++                            scheduleH3StatusPoll(1000);
++                        } catch (error) {
++                            showToast('本地清理重试失败', publicGenerationMessage(error.message), 'warning');
++                            retryCleanup.disabled = false;
++                        }
++                    });
++                    card.appendChild(retryCleanup);
++                }
+                 const action = document.createElement('button');
+*** End Patch

@@ -1,0 +1,15 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/caption_alignment.py
+@@
+     def _transcribe_in_chunks(self, path: Path) -> Mapping[str, Any]:
+         with _asr_audio_chunks(path, timeout_seconds=self.timeout_seconds) as chunks:
+             return _merge_chunk_payloads(
+                 (chunk, self._transcribe(chunk.path)) for chunk in chunks
+             )
+ 
++    def recognize_tokens(self, audio_path: str | Path) -> list[RecognizedToken]:
++        """Return observed word timestamps, never subtitle-interpolated ranges."""
++        return _recognized_tokens(self._transcribe(Path(audio_path)))
++
+     def align(
+*** End Patch

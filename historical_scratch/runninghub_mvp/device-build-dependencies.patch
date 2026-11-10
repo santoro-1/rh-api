@@ -1,0 +1,20 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/scripts/build/build_processor.ps1
+@@
+ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
+     throw "Build Python was not found: $Python`nRun scripts\setup_build_environment.ps1 first, or pass -Python explicitly."
+ }
++& $Python -c "import jwt, cryptography; from cryptography.hazmat.primitives.asymmetric import ec; from jwt.algorithms import ECAlgorithm; assert ECAlgorithm; print('Device authorization build dependencies: OK')"
++if ($LASTEXITCODE -ne 0) {
++    throw 'Device authorization dependencies are missing; run scripts\setup_build_environment.ps1 before building. No release was created.'
++}
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_update_package_contract.py
+@@
+ class UpdatePackageContractTest(unittest.TestCase):
++    def test_authorization_dependencies_are_checked_before_compilation(self) -> None:
++        script = (PROJECT_ROOT / "scripts" / "build" / "build_processor.ps1").read_text(encoding="utf-8")
++        self.assertLess(script.index("import jwt, cryptography"), script.index('$PyInstallerArguments ='))
++        self.assertIn("Device authorization dependencies are missing", script)
++
+     def test_update_build_excludes_all_data(self) -> None:
+*** End Patch

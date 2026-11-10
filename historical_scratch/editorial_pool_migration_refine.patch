@@ -1,0 +1,13 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tools/library/apply_editorial_broll_pools.py
+@@
+-    if "l2.scene.home" in l2 and home_actions_ok:
++    if (
++        "l2.scene.home" in l2
++        and "l2.scene.emotion" not in l2
++        and home_actions_ok
++    ):
+@@
+-        "l2.activity.eating_drinking",
+     }:
+*** End Patch

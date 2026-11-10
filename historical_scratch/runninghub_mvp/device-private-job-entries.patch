@@ -1,0 +1,200 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tools/jobs/simple_job.py
+@@
+ from pathlib import Path
++import argparse
+ import sys
+@@
+ sys.path.insert(0, str(PROJECT_ROOT / "src"))
++
++from jyd_probe.device_command_authorization import add_command_authorization_arguments, command_authorization
++from jyd_probe.device_local_execution import protected_local_work
+@@
+-if __name__ == "__main__":
++@protected_local_work({"local:draft"})
++def _run_job():
+     result = run_content_replace_job(build_job())
+     print(f"输出草稿: {result.output_dir}")
++    return 0
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description="按示例配置创建剪映草稿")
++    add_command_authorization_arguments(parser)
++    args = parser.parse_args(argv)
++    try:
++        with command_authorization(args):
++            return _run_job()
++    except Exception as exc:
++        print(f"草稿未完成（{getattr(exc, 'code', type(exc).__name__)}）", file=sys.stderr)
++        return 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tools/jobs/swap_video_subtitle_job.py
+@@
+ from pathlib import Path
++import argparse
+ import sys
+@@
+ sys.path.insert(0, str(PROJECT_ROOT / "src"))
++
++from jyd_probe.device_command_authorization import add_command_authorization_arguments, command_authorization
++from jyd_probe.device_local_execution import protected_local_work
+@@
+-def main() -> None:
++@protected_local_work({"local:draft"})
++def _run_swap() -> None:
+@@
+-if __name__ == "__main__":
+-    main()
++def main(argv=None):
++    parser = argparse.ArgumentParser(description="替换视频字幕并保存新草稿")
++    add_command_authorization_arguments(parser)
++    args = parser.parse_args(argv)
++    try:
++        with command_authorization(args):
++            _run_swap()
++        return 0
++    except Exception as exc:
++        print(f"草稿未完成（{getattr(exc, 'code', type(exc).__name__)}）", file=sys.stderr)
++        return 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tools/jobs/local_mp4_loop.py
+@@
+ from jyd_probe.draft_factory import create_plain_draft_from_video  # noqa: E402
++from jyd_probe.device_command_authorization import add_command_authorization_arguments, command_authorization
++from jyd_probe.device_local_execution import authorized_local_unit, protected_local_work
++from jyd_probe.device_auth_protocol import DeviceAuthorizationError
++from jyd_probe.ui_automation_thread import initialize_ui_automation_in_current_thread
+@@
+     parser.add_argument("--dump-effects", action="store_true", help="打印特效结构")
++    add_command_authorization_arguments(parser)
+     return parser
+@@
+ def apply_job_config(args: argparse.Namespace) -> argparse.Namespace:
++    if getattr(args, "_job_config_loaded", False):
++        return args
+     if not args.job:
+@@
+         args.job_effects = None
++        args._job_config_loaded = True
+         return args
+@@
+     args.job_effects = data.get("effects", data.get("effect"))
++    args._job_config_loaded = True
+     return args
+@@
+-def export_mp4(args: argparse.Namespace, draft_name: str) -> Path:
++@protected_local_work({"local:render"})
++def export_mp4(args: argparse.Namespace, draft_name: str) -> Path:
+@@
+-    controller = controller_type()
+-    controller.export_draft(
+-        draft_name,
+-        str(output_mp4),
+-        resolution=resolution,
+-        framerate=framerate,
+-        timeout=args.export_timeout,
+-    )
++    with initialize_ui_automation_in_current_thread():
++        controller = controller_type()
++        controller.export_draft(
++            draft_name,
++            str(output_mp4),
++            resolution=resolution,
++            framerate=framerate,
++            timeout=args.export_timeout,
++        )
+@@
+     try:
+-        result = run_content_replace_job(build_job(args))
+-        print(f"草稿已生成: {result.output_dir}")
+-
+-        if args.skip_export:
+-            print("已跳过 MP4 导出。")
+-            return 0
+-
+-        output_mp4 = export_mp4(args, result.output_name)
+-        print(f"MP4 已导出: {output_mp4}")
+-        return 0
++        # Read the job once before deciding scopes; never re-read a changed JSON
++        # between authorization and the export step.
++        args = apply_job_config(args)
++        scopes = {"local:draft"} if args.skip_export else {"local:draft", "local:render"}
++        with command_authorization(args):
++            with authorized_local_unit(scopes):
++                result = run_content_replace_job(build_job(args))
++                print(f"草稿已生成: {result.output_dir}")
++                if args.skip_export:
++                    print("已跳过 MP4 导出。")
++                    return 0
++                output_mp4 = export_mp4(args, result.output_name)
++                print(f"MP4 已导出: {output_mp4}")
++                return 0
++    except DeviceAuthorizationError as exc:
++        print(f"本地任务未完成（{exc.code}），请核对原设备授权", file=sys.stderr)
++        return 1
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_command_authorization.py
+@@
+ def test_command_draft_only_grant_does_not_allow_video_export(command_session):
+@@
+         assert error.value.code == "DEVICE_SCOPE_DENIED"
++
++
++@pytest.mark.parametrize("tool", ["simple_job", "swap_video_subtitle_job"])
++@pytest.mark.parametrize("approved", [False, True])
++def test_legacy_draft_tools_have_usable_original_account_context(command_session, monkeypatch, tool, approved):
++    import importlib
++    entry = importlib.import_module("tools.jobs." + tool)
++    calls = []
++    if not approved:
++        command_session.transport.error = DeviceAuthorizationError("DEVICE_PENDING", "pending")
++    def render(job):
++        calls.append(current_local_decision({"local:draft"}).user_id)
++        return SimpleNamespace(output_dir=Path("test-output"), output_name="test-output")
++    monkeypatch.setattr(entry, "run_content_replace_job", render)
++    if tool == "swap_video_subtitle_job":
++        monkeypatch.setattr(entry, "load_plain_draft_json", lambda *a: {})
++        for name in ("swap_video_segments_and_subtitles", "apply_effect_operations_after_swap", "apply_effect_replacements_after_swap", "apply_effect_additions_after_swap"):
++            monkeypatch.setattr(entry, name, lambda *a: 0)
++        for name in ("summarize_draft_json", "log_effect_details", "load_output_script", "log"):
++            monkeypatch.setattr(entry, name, lambda *a: None)
++        monkeypatch.setattr(entry, "import_pyjianyingdraft", lambda: object())
++    assert entry.main([]) == (0 if approved else 1)
++    assert calls == ([7] if approved else [])
++    assert command_session.identity.created == 0 and command_session.session._closed
++
++
++@pytest.mark.parametrize("skip_export", [True, False])
++def test_local_loop_checks_actual_job_scopes_before_any_business_effect(command_session, monkeypatch, skip_export):
++    from tools.jobs import local_mp4_loop as entry
++    command_session.issuer.overrides = {"scopes": ["local:draft"]}
++    loads, effects = [], []
++    def load(path):
++        loads.append(path)
++        return {"skip_export": skip_export}
++    def build(args):
++        assert entry.apply_job_config(args) is args
++        effects.append("draft")
++        return object()
++    monkeypatch.setattr(entry, "_load_job_file", load)
++    monkeypatch.setattr(entry, "build_job", build)
++    monkeypatch.setattr(entry, "run_content_replace_job", lambda job: SimpleNamespace(output_dir="test-draft", output_name="test-draft"))
++    monkeypatch.setattr(entry, "export_mp4", lambda *a: effects.append("export"))
++    assert entry.main(["--job", "test.json"]) == (0 if skip_export else 1)
++    assert loads == ["test.json"] and effects == (["draft"] if skip_export else [])
++
++
++def test_local_loop_direct_export_cannot_bypass_scope(command_session, monkeypatch):
++    from tools.jobs import local_mp4_loop as entry
++    command_session.issuer.overrides = {"scopes": ["local:draft"]}
++    with commands.command_authorization(SimpleNamespace()):
++        with pytest.raises(DeviceAuthorizationError) as error:
++            entry.export_mp4(SimpleNamespace(), "draft")
++    assert error.value.code == "DEVICE_SCOPE_DENIED"
+*** End Patch

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>内部访问登录</title>
+    <link rel="stylesheet" href="/app-static/admin-login.css?v=20260715-1" />
+    <script src="/app-static/workbench-runtime.js" defer></script>
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="login-card">
+        <div class="eyebrow">Jianying Render</div>
+        <h1>内部访问登录</h1>
+        <p>请输入数字人网站的账号和密码。本地测试使用数字人本地账号，正式工作台使用服务器现有账号。</p>
+        <form id="loginForm">
+          <label>
+            <span>账号</span>
+            <input id="username" name="username" autocomplete="username" autofocus required />
+          </label>
+          <label>
+            <span>密码</span>
+            <input id="password" name="password" type="password" autocomplete="current-password" required />
+          </label>
+          <button id="loginButton" type="submit">进入生成网站</button>
+          <div id="message" class="message" aria-live="polite"></div>
+        </form>
+        <p><a href="/admin">打开数字人账号管理</a></p>
+      </section>
+    </main>
+    <script src="/app-static/site-login.js?v=20260715-1"></script>
+  </body>
+</html>

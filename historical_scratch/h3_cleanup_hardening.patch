@@ -1,0 +1,28 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/h3_audio_cleanup.py
+@@
+         value = json.loads(source.with_suffix(".json").read_text(encoding="utf-8"))
+-        digest = str(value.get("local_video_sha256") or "")
++        digest = str(value.get("local_video_sha256") or "") if isinstance(value, dict) else ""
+@@
+         report = json.loads((directory / "report.json").read_text(encoding="utf-8"))
++        if not isinstance(report, dict) or not all(
++            name in report for name in ("audio_offset_seconds", "muted_until_seconds", "restored_at_seconds")
++        ):
++            return None
++        if not all(math.isfinite(float(report[name])) for name in
++                   ("audio_offset_seconds", "muted_until_seconds", "restored_at_seconds")):
++            return None
+         audio, preview = directory / "clean.wav", directory / "preview.mp4"
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_h3.py
+@@
+                 if source is not None:
+-                    segment["local_audio_cleanup"] = request_cleanup(source, str(segment.get("script_text") or ""), self.caption_aligner)
++                    try:
++                        segment["local_audio_cleanup"] = request_cleanup(source, str(segment.get("script_text") or ""), self.caption_aligner)
++                    except (OSError, ValueError, RuntimeError) as exc:
++                        segment["local_audio_cleanup"] = {
++                            "status": "FAILED", "version": H3_AUDIO_CLEANUP_VERSION,
++                            "error": str(exc)[:500],
++                        }
+*** End Patch

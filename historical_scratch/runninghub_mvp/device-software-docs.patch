@@ -1,0 +1,35 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/DEVELOPER_GUIDE.md
+@@
+ # 开发者指南
++
++### 2026-09-01 软件初始化与稳定身份定位（最新，开发中）
++
++- 新增 `device_identity_store.py`：实际交互适配器/辅助入口使用固定机器级定位记录，保存提供程序和公钥摘要，不保存授权或私钥。正常读取、升级不写记录；原钥匙缺失、记录损坏、双提供程序冲突或无法确认状态时不创建第二身份。显式初始化/原钥匙访问修复通过机器级互斥锁串行，写记录失败保留已创建钥匙。
++- 云端新增软件初始化专用签名许可，工作台经显式 `apply-software`、双重确认和 `device_initialization_channel.py` 的受限单向本机管道交给辅助程序。辅助程序核对原进程/用户、编译公钥及许可用途/时间，取得机器锁后再次检查有效期；初始化后仍需登记和管理员批准，不直接获得业务权利。
++- 请求许可前先找原钥匙；已有软件设备不因更新变回 TPM，TPM 故障不自动降级。普通启动、状态查询、登录和后台刷新不会申请软件初始化。
++- 专项/管道 `86 passed`、软件两端实际代码专项 `57 passed`、工作台授权/启动器/前端/H3 相关回归 `291 passed`。包含真实 Windows 临时管道传输测试 JSON 和浏览器模拟交互/桌面截图；没有真实 CNG 密钥、注册表写入、UAC 或生产操作，不是实机激活/跨机升级验收。
++- 真实 TPM/无 TPM、不同 Windows 用户、独立 Agent/CLI、其他私有入口、发布公钥/完整包保护仍待完成。信任根仍为空，不打包分发。完整合同见 [设备授权开发文档第 20 节](../../../数字人/runninghub_mvp/工作台设备授权与免重复激活开发文档.md#20-受控软件初始化与稳定原密钥定位2026-09-01)；下列为历史进度。
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/WEB_API.md
+@@
+ # Web API
++
++## 2026-09-01 软件初始化申请（最新，开发中）
++
++- `POST /api/new/device-authorization/apply-software`：接受 `label`、`client_version` 和 `confirm_initialize:true`、`confirm_software:true`；两个确认都必须为严格布尔值。必须使用现有网站账号、同源及 `X-Device-Authorization-Action: 1`，拒绝 SID、提供程序、批准标志、许可字符串和任意额外字段。
++- 先读取原设备密钥；已有密钥只复用。确实未初始化时向账号中心请求专用软件许可，管理员未允许则不启动 UAC/建钥。签名许可只在后端内存与受限本机管道传递，浏览器只收到安全状态摘要。初始化成功仍进入正常登记/管理员审批，不自动启动业务任务。
++- 原 `repair-key-access` 接口参数不变，现通过固定定位记录修复原 TPM 或软件密钥权限；缺失/冲突/损坏不自动换钥。`KEY_IDENTITY_*` 保持独立设备错误，不误退出账号。
++- 两项 UI 确认缺一不可，软件确认在每次请求后清空；页面读取和更新不自动调用 `apply-software`。相关回归 `291 passed`，浏览器模拟交互与桌面截图通过；实际密钥/UAC、跨机、发布保护仍未验收，暂不发包。
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_LAYOUT.md
+@@
+ `device_identity_setup.py` 协调显式初始化/原密钥访问修复；`device_identity_setup_windows.py` 只启动并验证固定 EXE 辅助入口，`device_identity_acl.py` 合并已验证操作用户的原钥匙权限。普通读取和更新不调用提权。
++`device_identity_store.py` 维护机器级的非授权性定位记录、原密钥冲突诊断与跨进程初始化互斥锁；`device_software_initialization.py` 校验服务器软件初始化许可，`device_initialization_channel.py` 只向指定辅助进程发送一次许可，不提供通用签名或命令接口。
+@@
+-这些模块不属于音视频处理算法。软件兼容初始化、其他私有入口、独立 Agent/CLI、发布公钥、完整包保护和真实 TPM/跨机验收尚未完成；当前不要打包分发。
++这些模块不属于音视频处理算法。软件兼容初始化的源码接线与模拟回归已加入；真实 TPM/无 TPM/不同 Windows 用户验证、其他私有入口、独立 Agent/CLI、发布公钥、完整包保护和跨机验收尚未完成；当前不要打包分发。
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_STATUS.md
+@@
+ # 项目状态与后续顺序
++
++> 2026-09-01 最新设备授权进展：软件兼容申请已接服务器专用签名许可、本机受限管道和辅助程序独立验签，创建后仍需管理员批准。机器级定位记录保持原 TPM/软件密钥，更新不换身份；故障或冲突不自动降级。初始化/管道专项 `86 passed`、软件两端实际代码专项 `57 passed`、工作台相关回归 `291 passed`。实际 TPM/无 TPM/UAC、不同 Windows 用户、独立 Agent/CLI、其余私有入口、发布公钥/整包保护和跨机/连续 EXE 更新仍待完成，信任根为空，暂不打包。没有写真实注册表或密钥，没有付费调用/推送/部署。下列为历史记录。
+*** End Patch

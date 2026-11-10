@@ -1,0 +1,7 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/RENDER_JOB_SCHEMA.md
+@@
+ 历史数字人任务若没有 `generation_tail_seconds`，且原始分段实际总长比 4A 记录的批准音频
++
++<!-- H3 has a separate generated-picture clock; see the section below. -->
+*** End Patch

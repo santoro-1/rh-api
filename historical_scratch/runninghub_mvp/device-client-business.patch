@@ -1,0 +1,215 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/auth_center.py
+@@
+-from urllib.request import Request, urlopen
++from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+@@
+ class AuthCenterError(RuntimeError):
+@@
+     @staticmethod
+     def _default_error_code(status_code: int) -> str:
+@@
+         return "DIGITAL_HUMAN_REQUEST_REJECTED"
++
++    @property
++    def response_headers(self) -> dict[str, str]:
++        return {}
++
++
++class AuthCenterDeviceError(AuthCenterError):
++    """Device permission is not a lost website login; never auto-resubmit."""
++
++    def __init__(self, message: str, *, error_code: str, status_code: int = 403):
++        self.upstream_status_code = status_code
++        super().__init__(message, error_code=error_code,
++                         status_code=409 if status_code == 401 else status_code,
++                         retryable=False)
++
++    @property
++    def response_headers(self) -> dict[str, str]:
++        return {"X-Workbench-Device-Error": self.error_code}
++
++
++class _NoDeviceCredentialRedirect(HTTPRedirectHandler):
++    def redirect_request(self, req, fp, code, msg, headers, newurl):
++        # A proof names exactly one method/URI. Do not forward it, or retry a
++        # paid POST at the redirect target, even if the redirect is same-origin.
++        return None
++
++
++def _device_urlopen(request, *, timeout):
++    return build_opener(_NoDeviceCredentialRedirect()).open(request, timeout=timeout)
+@@
+         self.base_url = normalized
+         self.timeout_seconds = max(1.0, float(timeout_seconds))
++        self.device_header_provider = None
++
++    def _h3_device_headers(self, token: str, *, method: str, path: str) -> dict[str, str]:
++        from .device_business_transport import is_h3_contract_path
++
++        if not is_h3_contract_path(method, path) or self.device_header_provider is None:
++            return {}
++        provider = self.device_header_provider
++        if getattr(provider, "origin", self.base_url) != self.base_url:
++            raise AuthCenterDeviceError("设备授权服务地址与业务服务不一致", error_code="DEVICE_TRUST_MISMATCH")
++        headers = provider(token, method=method, path=path)
++        if headers is None:
++            # No business request has been sent yet. The original account is
++            # used once; ONLY the cloud decides OFF/OBSERVE/ENFORCE permission.
++            return {}
++        if set(headers) != {"Authorization", "DPoP"} or not headers["Authorization"].startswith("DPoP "):
++            raise AuthCenterDeviceError("设备请求凭据格式无效", error_code="INVALID_DEVICE_PROOF")
++        return headers
+@@
+     def prepare_h3_batch(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+         return self._post(
+             "/api/workbench/h3-batches/prepare",
+-            {"access_token": token, **payload},
++            {**payload, "access_token": token},
+@@
+     def _download(
+@@
+-        request = Request(
++        device_headers = self._h3_device_headers(token, method="GET", path=path)
++        request = Request(
+             f"{self.base_url}{path}",
+             method="GET",
+-            headers={"Authorization": f"Bearer {token}", "Accept": "*/*"},
++            headers={"Authorization": f"Bearer {token}", "Accept": "*/*", **device_headers},
+@@
+-            with urlopen(
++            opener = _device_urlopen if request.has_header("Dpop") else urlopen
++            with opener(
+                 request, timeout=max(self.timeout_seconds, timeout_seconds)
+@@
+         except HTTPError as exc:
+             raw = exc.read()
+             target.unlink(missing_ok=True)
+-            raise AuthCenterError(
+-                self._detail(raw) or f"{remote_label}拒绝下载（HTTP {exc.code}）",
+-                status_code=int(exc.code),
+-            ) from exc
++            raise self._response_error(raw, int(exc.code), f"{remote_label}拒绝下载（HTTP {exc.code}）") from exc
+@@
+     def _post(
+@@
+-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
++        device_headers = self._h3_device_headers(str(payload.get("access_token") or ""), method="POST", path=path)
++        if device_headers:
++            payload = {key: value for key, value in payload.items() if key != "access_token"}
++        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+@@
+-            headers={"Content-Type": "application/json", "Accept": "application/json"},
++            headers={"Content-Type": "application/json", "Accept": "application/json", **device_headers},
+@@
+     def _read_json_response(
+@@
+-            with urlopen(request, timeout=timeout_seconds) as response:
++            opener = _device_urlopen if request.has_header("Dpop") else urlopen
++            with opener(request, timeout=timeout_seconds) as response:
+@@
+-            message = self._detail(raw) or f"数字人网站拒绝请求（HTTP {exc.code}）"
+-            raise AuthCenterError(message, status_code=int(exc.code)) from exc
++            raise self._response_error(raw, int(exc.code), f"数字人网站拒绝请求（HTTP {exc.code}）") from exc
+@@
+         if status < 200 or status >= 300:
+-            raise AuthCenterError(self._detail(raw) or f"数字人网站返回 HTTP {status}", status_code=status)
++            raise self._response_error(raw, status, f"数字人网站返回 HTTP {status}")
+@@
+         return data
++
++    @classmethod
++    def _response_error(cls, raw: bytes, status: int, fallback: str) -> AuthCenterError:
++        try:
++            data = json.loads(raw.decode("utf-8"))
++        except (UnicodeDecodeError, json.JSONDecodeError):
++            data = {}
++        code = data.get("code") if isinstance(data, dict) else None
++        if isinstance(code, str) and len(code) <= 64 and code.replace("_", "").isascii() and code.replace("_", "").isalnum() and (
++            code.startswith(("DEVICE_", "INVALID_DEVICE_")) or code in {"AUTH_REFRESH_REQUIRED", "CLIENT_UPGRADE_REQUIRED", "AMBIGUOUS_ACCOUNT_TOKEN"}
++        ):
++            return AuthCenterDeviceError(cls._detail(raw) or "请检查当前处理机的设备授权", error_code=code, status_code=status)
++        return AuthCenterError(cls._detail(raw) or fallback, status_code=status)
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_business_transport.py
++"""Attach this processor's proof to the audited H3 cloud contract only.
++
++This is transport, not a local license gate. Without usable device credentials a
++single account-only request can read/recover old results or receive the cloud's
++DEVICE_BOUND_TOKEN_REQUIRED denial. It does NOT enable new work in ENFORCE.
++Never downgrade/retry a business request after it has been sent.
++"""
++from __future__ import annotations
++
++import re
++
++from .device_auth_protocol import DeviceAuthorizationError
++from .device_identity_windows import DeviceIdentityError
++
++_ID = r"[A-Za-z0-9_-]{1,100}"
++_POST = re.compile(
++    r"/api/workbench/(?:h3-execution-accounts|h3-audio-sources(?:/approve)?|"
++    r"h3-batches/prepare|h3-batches/" + _ID + r"(?:/confirm|/quote/cancel)?|"
++    r"h3-segments/" + _ID + r"/(?:regeneration/(?:prepare|confirm)|retry/(?:prepare|confirm)|cancel))\Z"
++)
++_GET = re.compile(r"/api/workbench/(?:h3-segments/" + _ID + r"/video|h3-items/" + _ID + r"/(?:audio|raw-cues))\Z")
++
++
++def is_h3_contract_path(method: str, path: str) -> bool:
++    if not path.startswith("/api/workbench/h3-"):
++        return False
++    if (method == "POST" and _POST.fullmatch(path)) or (method == "GET" and _GET.fullmatch(path)):
++        return True
++    from .auth_center import AuthCenterDeviceError
++    raise AuthCenterDeviceError("H3 设备请求地址不在已接入的接口范围内", error_code="INVALID_DEVICE_REQUEST_TARGET")
++
++
++class DeviceBusinessProofs:
++    def __init__(self, registry, *, account_resolver):
++        self.registry = registry
++        self.origin = registry.base_url
++        self.account_resolver = account_resolver
++
++    def __call__(self, login_token: str, *, method: str, path: str):
++        if not is_h3_contract_path(method, path):
++            return None
++        # Source builds have no production keys. This is not a configurable
++        # allow switch: server enforcement still rejects unbound new operations.
++        from .device_trust_roots import TRUSTED_ISSUERS
++        if not TRUSTED_ISSUERS and self.registry._factory is None:
++            return None
++        from .auth_center import AuthCenterDeviceError, AuthCenterError
++        user = self.account_resolver(login_token)
++        if not isinstance(user, dict) or not user.get("user_id"):
++            raise AuthCenterError("请重新登录数字人账号", status_code=401)
++        try:
++            session = self.registry.get(str(user["user_id"]), login_token)
++        except DeviceAuthorizationError as exc:
++            # A configured release cannot trust a user-edited origin. Do not
++            # turn a trust failure into an account-token request to that origin.
++            raise AuthCenterDeviceError(str(exc), error_code=exc.code, status_code=exc.status_code) from exc
++        if session.trust.origin != self.origin:
++            raise AuthCenterDeviceError("设备授权服务地址不一致", error_code="DEVICE_TRUST_MISMATCH")
++        try:
++            # Cloud services classify paid vs. idempotent/download-only work.
++            # A client-side scope check must not stop legitimate result recovery.
++            return session.request_headers(method=method, path=path, scope=None)
++        except DeviceAuthorizationError as exc:
++            if exc.code == "LOGIN_REQUIRED":
++                raise AuthCenterError("请重新登录数字人账号", status_code=401) from exc
++            return None  # before the one business request, never after rejection
++        except DeviceIdentityError:
++            return None  # no new key, no private-key export, no business replay
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+     install_device_authorization_routes(
+         app,
+         base_url=settings.auth_server_url,
+         cookie_name=settings.site_cookie_name,
+         current_user=current_project_user,
+     )
++    if auth_center is not None:
++        from .device_business_transport import DeviceBusinessProofs
++        auth_center.device_header_provider = DeviceBusinessProofs(
++            app.state.device_sessions, account_resolver=verify_site_token
++        )
+*** End Patch

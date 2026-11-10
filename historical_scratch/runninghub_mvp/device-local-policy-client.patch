@@ -1,0 +1,241 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_policy.py
++"""Pinned, nonce-bound local rollout policy. An OFF JSON field is not permission."""
++from __future__ import annotations
++
++import hmac
++import re
++import secrets
++
++import jwt
++
++from .device_auth_protocol import DeviceAuthorizationError, PRODUCT, sha256_b64, strict_jwt_parts
++
++POLICY_TYPE = "workbench-local-policy+jwt"
++POLICY_AUDIENCE = PRODUCT + ":local-policy"
++POLICY_SCHEMA = "publicvideo.local-policy.v1"
++POLICY_SECONDS = 300
++
++
++def verify_local_policy(trust, token, *, user_id, account_token, nonce, now):
++    try:
++        header, claims = strict_jwt_parts(token)
++        if (set(header) != {"alg", "typ", "kid"} or header["alg"] != "ES256"
++                or header["typ"] != POLICY_TYPE):
++            raise ValueError()
++        jwt.decode(token, trust.verification_keys[header["kid"]], algorithms=["ES256"],
++                   issuer=trust.issuer, audience=POLICY_AUDIENCE,
++                   options={"verify_iat": False, "verify_exp": False, "verify_nbf": False,
++                            "require": ["iss", "aud", "sub", "iat", "nbf", "exp", "jti"]})
++        expected = {"schema", "iss", "aud", "product", "environment", "sub", "user_id",
++                    "ath", "nonce", "mode", "control_revision", "iat", "nbf", "exp", "jti"}
++        if (set(claims) != expected or claims["schema"] != POLICY_SCHEMA
++                or claims["product"] != PRODUCT or claims["environment"] != trust.environment
++                or claims["aud"] != POLICY_AUDIENCE or claims["mode"] not in {"OFF", "OBSERVE", "ENFORCE"}):
++            raise ValueError()
++        for name in ("user_id", "control_revision", "iat", "nbf", "exp"):
++            if type(claims[name]) is not int or claims[name] < 1:
++                raise ValueError()
++        if (claims["user_id"] != user_id or claims["sub"] != str(user_id)
++                or claims["nbf"] != claims["iat"] or claims["iat"] > now + 5
++                or now >= claims["exp"] or not 0 < claims["exp"] - claims["iat"] <= POLICY_SECONDS):
++            raise ValueError()
++        for field, value in (("ath", sha256_b64(account_token)), ("nonce", nonce)):
++            if not isinstance(claims[field], str) or not hmac.compare_digest(claims[field], value):
++                raise ValueError()
++        if not isinstance(claims["jti"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", claims["jti"]):
++            raise ValueError()
++        return claims
++    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, jwt.PyJWTError) as exc:
++        raise DeviceAuthorizationError("INVALID_DEVICE_LOCAL_POLICY", "本地授权策略校验失败，请联网重新校验", status_code=409) from exc
++
++
++class LocalPolicySession:
++    def __init__(self, *, trust, transport, user_id, account_token, wall_clock, monotonic_clock):
++        self.trust, self.transport, self.user_id = trust, transport, user_id
++        self._token, self._wall, self._mono = account_token, wall_clock, monotonic_clock
++        self._claims = None
++        self._wall_anchor = self._mono_anchor = 0.0
++        self._revision = 0
++
++    def _valid(self):
++        if self._claims is None:
++            return False
++        elapsed = self._mono() - self._mono_anchor
++        return (elapsed >= 0 and abs((self._wall() - self._wall_anchor) - elapsed) <= 5
++                and elapsed < self._claims["exp"] - self._wall_anchor
++                and self._wall() < self._claims["exp"])
++
++    def mode(self, *, force=False):
++        if not force and self._valid():
++            return self._claims["mode"]
++        nonce = secrets.token_urlsafe(32)
++        try:
++            response = self.transport.request(method="POST", path="/api/workbench/device-auth/local-policy",
++                                              headers={"Authorization": "Bearer " + self._token}, payload={"nonce": nonce})
++            claims = verify_local_policy(self.trust, response.get("policy_token"), user_id=self.user_id,
++                                         account_token=self._token, nonce=nonce, now=self._wall())
++            if claims["control_revision"] < self._revision:
++                raise DeviceAuthorizationError("INVALID_DEVICE_LOCAL_POLICY", "授权策略版本倒退，请联系管理员", status_code=409)
++            self._revision = claims["control_revision"]
++            self._claims = claims
++            self._wall_anchor, self._mono_anchor = self._wall(), self._mono()
++            return claims["mode"]
++        except DeviceAuthorizationError as exc:
++            self._claims = None
++            if exc.transient:
++                # Stricter fallback grants nothing. The caller must now validate
++                # an actual device lease/key, within its original offline expiry.
++                return "ENFORCE"
++            raise
++
++    def clear(self):
++        self._claims, self._token = None, ""
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+-            for suffix in ("challenge", "register", "status", "exchange", "refresh")
++            for suffix in ("challenge", "register", "status", "exchange", "refresh", "local-policy")
+@@
+         self.cache_warning = False
++        self._local_policy = None
++
++    def local_policy_mode(self, *, force: bool = False) -> str:
++        from .device_local_policy import LocalPolicySession
++
++        with self._lock:
++            if self._closed:
++                raise DeviceAuthorizationError("LOGIN_REQUIRED", "请重新登录账号", status_code=401)
++            if self._local_policy is None:
++                self._local_policy = LocalPolicySession(
++                    trust=self.trust, transport=self._transport, user_id=self.user_id,
++                    account_token=self._login_token, wall_clock=self._wall, monotonic_clock=self._mono)
++            return self._local_policy.mode(force=force)
+@@
+     def close(self) -> None:
+         with self._lock:
++            if self._local_policy is not None:
++                self._local_policy.clear()
++                self._local_policy = None
+             self._credentials, self._nonce, self._login_token = None, None, ""
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_execution.py
++"""Actual local execution boundary, independent of the Pu launcher or web UI.
++
++Context is internal to the process, never accepted from a job's JSON. Every new
++unit checks the live authorizer; nested steps of an admitted unit can finish.
++"""
++from __future__ import annotations
++
++from contextlib import contextmanager
++from contextvars import ContextVar
++from dataclasses import dataclass
++from functools import wraps
++import sys
++
++from .device_auth_protocol import DeviceAuthorizationError
++from .device_identity_windows import DeviceIdentityError
++
++_SCOPES = frozenset({"local:draft", "local:render"})
++_authorizer = ContextVar("workbench_local_authorizer", default=None)
++_unit = ContextVar("workbench_local_unit", default=None)
++
++
++def requires_device_authorization():
++    from .device_trust_roots import TRUSTED_ISSUERS
++    # No editable JSON/env switch. Empty-trust source trees are development only;
++    # every frozen/private binary fails closed without configured release trust.
++    return bool(getattr(sys, "frozen", False) or TRUSTED_ISSUERS)
++
++
++@dataclass(frozen=True)
++class LocalDecision:
++    user_id: int
++    mode: str
++    scopes: frozenset[str]
++    device_id: str | None = None
++    grant_id: str | None = None
++    thumbprint: str | None = None
++    grant_revision: int | None = None
++    policy_revision: int | None = None
++
++
++class LocalDeviceAuthorizer:
++    def __init__(self, session):
++        self.session = session
++
++    def authorize(self, scopes):
++        scopes = frozenset(scopes)
++        if not scopes or not scopes <= _SCOPES:
++            raise ValueError("invalid local operation scopes")
++        mode = self.session.local_policy_mode()
++        binding = None
++        if mode in {"OBSERVE", "ENFORCE"}:
++            try:
++                for scope in sorted(scopes):
++                    binding = self.session.require_local(scope)
++            except (DeviceAuthorizationError, DeviceIdentityError):
++                if mode == "ENFORCE":
++                    raise
++                binding = None
++        elif mode != "OFF":
++            raise DeviceAuthorizationError("INVALID_DEVICE_LOCAL_POLICY", "本地授权模式无效")
++        binding = binding or {}
++        summary = self.session.summary() if binding else {}
++        return LocalDecision(self.session.user_id, mode, scopes,
++                             device_id=binding.get("device_id"), grant_id=binding.get("grant_id"),
++                             thumbprint=summary.get("thumbprint"), grant_revision=binding.get("grant_revision"),
++                             policy_revision=binding.get("policy_revision"))
++
++
++@contextmanager
++def local_authorization_context(authorizer):
++    token = _authorizer.set(authorizer)
++    old_unit = _unit.set(None)
++    try:
++        yield
++    finally:
++        _unit.reset(old_unit)
++        _authorizer.reset(token)
++
++
++def current_local_decision(scopes):
++    scopes = frozenset(scopes)
++    if not scopes or not scopes <= _SCOPES:
++        raise ValueError("invalid local operation scopes")
++    if not requires_device_authorization():
++        return None
++    authorizer = _authorizer.get()
++    if authorizer is None:
++        raise DeviceAuthorizationError("DEVICE_LOCAL_CONTEXT_REQUIRED", "请从已登录并获准的工作台启动本地任务", status_code=409)
++    decision = authorizer.authorize(scopes)
++    if not isinstance(decision, LocalDecision) or decision.scopes != scopes or decision.user_id < 1:
++        raise DeviceAuthorizationError("DEVICE_LOCAL_CONTEXT_INVALID", "本地执行授权上下文无效", status_code=409)
++    return decision
++
++
++@contextmanager
++def authorized_local_unit(scopes):
++    scopes = frozenset(scopes)
++    existing = _unit.get()
++    if existing is not None:
++        if not scopes <= existing.scopes:
++            raise DeviceAuthorizationError("DEVICE_SCOPE_DENIED", "此执行单元未获得该本地功能权限")
++        yield existing
++        return
++    decision = current_local_decision(scopes)
++    token = _unit.set(decision)
++    try:
++        yield decision
++    finally:
++        _unit.reset(token)
++
++
++def protected_local_work(scopes):
++    def decorate(function):
++        @wraps(function)
++        def execute(*args, **kwargs):
++            required = scopes(*args, **kwargs) if callable(scopes) else scopes
++            with authorized_local_unit(required):
++                return function(*args, **kwargs)
++        return execute
++    return decorate
+*** End Patch

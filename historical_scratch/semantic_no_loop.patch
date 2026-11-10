@@ -1,0 +1,161 @@
+*** Begin Patch
+*** Update File: src/jyd_probe/semantic_visuals.py
+@@
+ VISUAL_SEAM_BROLL_MAX_DURATION_US = 5_000_000
++# Semantic foreground videos and full-screen B-roll always play once.  Keep
++# this independent from legacy catalog loop metadata and generic render APIs.
++VISUAL_VIDEO_LOOP_TO_TARGET = False
+ # Edit this one value to tune how often ordinary B-roll is attempted. It is a
+@@
+     if media_type == "video":
+         source_start_us = int(defaults["source_start_us"])
+         available_us = max(0, int(resource.get("duration_us") or 0) - source_start_us)
+         source_duration_us = min(int(defaults["duration_us"]), available_us)
+-        loop_to_target = bool(defaults.get("loop")) and bool(
+-            asset.get("loop_allowed", defaults.get("loop"))
+-        )
+-        if not loop_to_target:
+-            overlay["duration_us"] = min(int(overlay["duration_us"]), source_duration_us)
++        overlay["duration_us"] = min(int(overlay["duration_us"]), source_duration_us)
+         overlay.update(
+             {
+                 "source_start_us": source_start_us,
+                 "source_duration_us": source_duration_us,
+-                "loop_to_target": loop_to_target,
++                "loop_to_target": VISUAL_VIDEO_LOOP_TO_TARGET,
+@@
+                 if media_type == "video":
+                     source_start_us = int(defaults["source_start_us"])
+                     available_us = max(
+                         0, int(resource.get("duration_us") or 0) - source_start_us
+                     )
+                     source_duration_us = min(int(defaults["duration_us"]), available_us)
+-                    loop_to_target = bool(defaults.get("loop")) and bool(
+-                        current_asset.get("loop_allowed", defaults.get("loop"))
+-                    )
+                     overlay.update(
+                         {
+                             "source_start_us": source_start_us,
+                             "source_duration_us": source_duration_us,
+-                            "loop_to_target": loop_to_target,
++                            "loop_to_target": VISUAL_VIDEO_LOOP_TO_TARGET,
+                             "mute": defaults["mute"],
+                             "fit": defaults["fit"],
+                         }
+                     )
+-                    if not loop_to_target:
+-                        overlay["duration_us"] = min(
+-                            int(overlay.get("duration_us") or 0), source_duration_us
+-                        )
++                    overlay["duration_us"] = min(
++                        int(overlay.get("duration_us") or 0), source_duration_us
++                    )
+@@
+             else:
+                 continue
++        if overlay.get("media_type") == "video":
++            # Old manual/locked recipes may still contain loop_to_target=true.
++            # Enforce the current one-shot policy at consumption time too.
++            overlay["loop_to_target"] = VISUAL_VIDEO_LOOP_TO_TARGET
++            source_duration_us = int(overlay.get("source_duration_us") or 0)
++            if source_duration_us > 0:
++                overlay["duration_us"] = min(
++                    int(overlay.get("duration_us") or 0), source_duration_us
++                )
+         result.append(overlay)
+*** Update File: src/jyd_probe/web_api.py
+@@
+             if media_type == "video":
++                source_start_us = int(
++                    raw.get("source_start_us", defaults["source_start_us"])
++                )
++                available_us = max(
++                    0,
++                    int(asset["resource"].get("duration_us") or 0)
++                    - source_start_us,
++                )
++                source_duration_us = min(
++                    int(raw.get("source_duration_us", defaults["duration_us"])),
++                    available_us,
++                )
++                overlay["duration_us"] = min(
++                    int(overlay.get("duration_us") or 0), source_duration_us
++                )
+                 overlay.update(
+                     {
+-                        "source_start_us": int(
+-                            raw.get("source_start_us", defaults["source_start_us"])
+-                        ),
+-                        "source_duration_us": int(
+-                            raw.get("source_duration_us", defaults["duration_us"])
+-                        ),
+-                        "loop_to_target": raw.get(
+-                            "loop_to_target",
+-                            bool(defaults["loop"])
+-                            and bool(asset.get("loop_allowed", defaults["loop"])),
+-                        )
+-                        is not False,
++                        "source_start_us": source_start_us,
++                        "source_duration_us": source_duration_us,
++                        "loop_to_target": False,
+*** Update File: src/jyd_probe/render_job.py
+@@
+-                loop_to_target=_as_bool(
+-                    _value(item, "loop_to_target", default=False)
+-                ),
++                # Semantic videos and B-roll are one-shot even when an old
++                # frozen recipe still carries loop_to_target=true.
++                loop_to_target=False,
+*** Update File: apps/processor/frontend/new/index.html
+@@
+         function normalizeAutomaticSemanticOverlay(overlay) {
+             const normalized = { ...overlay };
+-            if (normalized.media_type === 'video') delete normalized.loop;
++            if (normalized.media_type === 'video') {
++                delete normalized.loop;
++                normalized.loop_to_target = false;
++            }
+@@
+             if (normalized.media_type === 'video') {
+                 normalized.source_start_us = Number(asset.defaults?.source_start_us ?? normalized.source_start_us ?? 0);
++                normalized.source_duration_us = Number(asset.defaults?.duration_us ?? normalized.source_duration_us ?? 0);
++                normalized.loop_to_target = false;
+                 normalized.mute = asset.defaults?.mute !== false;
+@@
+                     if (asset.media_type === 'video') {
+                         semanticVisualDraft[index].source_start_us = Number(asset.defaults?.source_start_us || 0);
++                        semanticVisualDraft[index].source_duration_us = Number(asset.defaults?.duration_us || 0);
++                        semanticVisualDraft[index].loop_to_target = false;
+@@
+                 ...(asset.media_type === 'video' ? {
+                     source_start_us: Number(asset.defaults?.source_start_us || 0),
++                    source_duration_us: Number(asset.defaults?.duration_us || 0),
++                    loop_to_target: false,
+@@
+-                const sourceDurationUs = Math.max(0, Number(currentAsset?.resource?.duration_us || 0) - sourceStartUs);
++                const availableDurationUs = Math.max(0, Number(currentAsset?.resource?.duration_us || 0) - sourceStartUs);
++                const configuredDurationUs = Number(effective.source_duration_us || currentAsset?.defaults?.duration_us || 0);
++                const sourceDurationUs = configuredDurationUs > 0
++                    ? Math.min(configuredDurationUs, availableDurationUs)
++                    : availableDurationUs;
+*** Update File: tests/test_semantic_visuals.py
+@@
+-def test_video_overlay_loops_only_catalog_default_window_when_allowed(tmp_path: Path) -> None:
++def test_video_overlay_never_loops_even_when_legacy_catalog_allows_it(tmp_path: Path) -> None:
+@@
+-    assert overlay["duration_us"] == 8_000_000
++    assert overlay["duration_us"] == 3_000_000
+     assert overlay["source_duration_us"] == 3_000_000
+-    assert overlay["loop_to_target"] is True
++    assert overlay["loop_to_target"] is False
+*** Update File: tests/test_video_overlay_apply.py
+@@
+     assert additions[1].source_duration_us == 1_500_000
+-    assert additions[1].loop_to_target is True
++    assert additions[1].loop_to_target is False
+*** Update File: tests/test_project_visual_analysis_api.py
+@@
+             assert frozen_video["media_type"] == "video"
+             assert "loop" not in frozen_video
++            assert frozen_video["loop_to_target"] is False
+*** End Patch

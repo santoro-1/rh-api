@@ -1,0 +1,29 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@     def list_new_h3_accounts(request: Request) -> dict[str, Any]:
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization_routes.py
+@@
+                     self.assertEqual(
+                         response.json()["code"], "DEVICE_TRUST_NOT_CONFIGURED"
+                     )
++                    page = client.get("/app/new/device-authorization")
++                    self.assertEqual(page.status_code, 200)
++                    self.assertIn('id="confirm"', page.text)
++                    self.assertIn('正常更新无需重复激活', page.text)
++                    from jyd_probe.auth_center import AuthCenterDeviceError
++                    with patch("jyd_probe.auth_center.AuthCenterClient.list_h3_execution_accounts",
++                               side_effect=AuthCenterDeviceError("请检查设备授权", error_code="DEVICE_BOUND_TOKEN_REQUIRED", status_code=401)):
++                        denied = client.get("/api/new/h3/accounts")
++                    self.assertEqual(denied.status_code, 409)
++                    self.assertEqual(denied.json()["code"], "DEVICE_BOUND_TOKEN_REQUIRED")
++                    self.assertTrue(denied.json()["device_authorization_required"])
++                    self.assertEqual(denied.headers["x-workbench-device-error"], "DEVICE_BOUND_TOKEN_REQUIRED")
+                     self.assertEqual(client.post("/api/auth/logout").status_code, 200)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.js
+@@
+-    if (data.user_id) el('account').textContent = '账号 ID：' + data.user_id;
++    el('account').textContent = data.user_id ? '账号 ID：' + data.user_id : '尚未读取账号';
+*** End Patch

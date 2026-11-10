@@ -1,0 +1,223 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_windows.py
+@@
+ def _b64(value: bytes) -> str:
+     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+ 
+ 
++def validate_operator_sid(value: str) -> str:
++    # Local/domain users and Microsoft Entra users, never Everyone/groups/services.
++    if not isinstance(value, str) or not re.fullmatch(
++        r"S-1-(?:5-21|12-1)(?:-\d{1,10}){4}", value
++    ) or any(int(part) > 0xFFFFFFFF for part in value.split("-")[4:]):
++        raise DeviceIdentityError(
++            "KEY_OPERATOR_INVALID", "设备初始化必须指定实际 Windows 操作用户"
++        )
++    return value
++
++
+ def public_jwk_from_blob(blob: bytes) -> dict[str, str]:
+@@
+     def current_user_sid(self) -> str:
++        return self.user_sid_for_process(wintypes.HANDLE(-1))
++
++    def user_sid_for_process(self, process_handle) -> str:
+         token, needed = wintypes.HANDLE(), wintypes.DWORD()
+         if not self._advapi.OpenProcessToken(
+-            wintypes.HANDLE(-1), 8, ctypes.byref(token)
++            process_handle, 8, ctypes.byref(token)
+@@
+     def _set_initial_acl(self, key: int, operator_sid: str) -> None:
+-        if not re.fullmatch(r"S-1-5-21-\d+-\d+-\d+-\d+", operator_sid):
+-            raise DeviceIdentityError(
+-                "KEY_OPERATOR_INVALID", "设备初始化必须指定实际 Windows 操作用户"
+-            )
++        validate_operator_sid(operator_sid)
+@@
+-                    key, "Security Descr", descriptor, size.value, 4
++                    key, "Security Descr", descriptor, size.value, 0x80000004
+@@
+     def create_key(self, provider: int, operator_sid: str | None) -> int:
+-        sid = operator_sid or self.current_user_sid()
+-        if not re.fullmatch(r"S-1-5-21-\d+-\d+-\d+-\d+", sid):
+-            raise DeviceIdentityError(
+-                "KEY_OPERATOR_INVALID", "设备初始化必须指定实际 Windows 操作用户"
+-            )
++        sid = validate_operator_sid(operator_sid or self.current_user_sid())
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_setup.py
++"""Explicit, narrowly scoped TPM initialization/access repair via a UAC helper.
++
++No elevation during status/refresh/startup. No account tokens, SIDs, file paths,
++key names or arbitrary commands are accepted from the browser or helper arguments.
++The parent retains a live helper handle on timeout; it never deletes/replaces keys.
++"""
++
++from __future__ import annotations
++
++import sys
++import threading
++
++from .device_identity_windows import DeviceIdentityError, WindowsDeviceIdentity
++
++HELPER_FLAG = "--device-identity-setup"
++MODES = frozenset({"initialize", "repair-access"})
++EXIT_CODES = {
++    20: ("KEY_SETUP_CONTEXT_INVALID", "初始化来源无效，请从当前处理机页面重新发起"),
++    21: ("KEY_NOT_FOUND", "没有找到原设备密钥，访问权限修复不会创建新身份"),
++    22: ("KEY_ACCESS_DENIED", "Windows 未允许访问设备密钥，请联系此电脑管理员"),
++    23: ("KEY_UNAVAILABLE", "设备密钥初始化或读取失败，请检查 TPM；未替换原密钥"),
++    24: ("KEY_POLICY_INVALID", "现有设备密钥策略异常，已保留原密钥，请联系管理员"),
++}
++
++
++def _in_progress():
++    return DeviceIdentityError(
++        "KEY_SETUP_IN_PROGRESS", "正在当前处理机上初始化，请处理 Windows 权限提示；不要重复申请"
++    )
++
++
++class DeviceSetupCoordinator:
++    """Single in-flight helper for this server, shared by all website accounts."""
++
++    def __init__(self, *, api_factory=None):
++        self._api_factory = api_factory
++        self._api = None
++        self._handle = None
++        self._lock = threading.Lock()
++
++    def _process_api(self):
++        if self._api is None:
++            if self._api_factory is None:
++                from .device_identity_setup_windows import NativeSetupApi
++
++                self._api = NativeSetupApi()
++            else:
++                self._api = self._api_factory()
++        return self._api
++
++    def _finish(self, timeout_ms=0):
++        if self._handle is None:
++            return
++        result = self._api.wait(self._handle, timeout_ms)
++        if result is None:
++            raise _in_progress()
++        handle, self._handle = self._handle, None
++        self._api.close(handle)
++        if result != 0:
++            code, detail = EXIT_CODES.get(result, EXIT_CODES[23])
++            raise DeviceIdentityError(code, detail)
++
++    def check_pending(self):
++        if not self._lock.acquire(blocking=False):
++            raise _in_progress()
++        try:
++            self._finish()
++        finally:
++            self._lock.release()
++
++    def run(self, mode):
++        if mode not in MODES:
++            raise DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "设备初始化操作无效")
++        if not self._lock.acquire(blocking=False):
++            raise _in_progress()
++        try:
++            if self._handle is not None:
++                self._finish()
++                # A completed old attempt is not authorization to launch a new one.
++                return
++            api = self._process_api()
++            self._handle = api.launch(mode)
++            self._finish(45000)
++        finally:
++            self._lock.release()
++
++
++_coordinator = DeviceSetupCoordinator()
++
++
++class InteractiveWindowsDeviceIdentity:
++    """Production activation adapter; normal reads use the unchanged CNG key.
++
++    Software-mode creation still needs a separate server-authorized bootstrap.
++    There is deliberately no provider choice or approval boolean in this adapter.
++    """
++
++    def __init__(self, *, identity=None, coordinator=None):
++        self._identity = identity if identity is not None else WindowsDeviceIdentity()
++        self._coordinator = coordinator if coordinator is not None else _coordinator
++
++    def open_existing(self):
++        self._coordinator.check_pending()
++        return self._identity.open_existing()
++
++    def initialize_for_activation(self, *, operator_sid=None, software_approved=False):
++        if operator_sid is not None or software_approved is not False:
++            raise DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "设备初始化参数无效")
++        existing = self.open_existing()
++        if existing is not None:
++            return existing
++        self._coordinator.run("initialize")
++        return self._reopen_after_setup()
++
++    def repair_operator_access(self):
++        self._coordinator.run("repair-access")
++        with self._reopen_after_setup():
++            pass
++
++    def _reopen_after_setup(self):
++        key = self._identity.open_existing()
++        if key is None:
++            raise DeviceIdentityError("KEY_NOT_FOUND", "初始化后仍未读取到设备密钥，请重新校验")
++        try:
++            # Check the original (non-elevated) operator can actually use the key.
++            key.sign(b"publicvideo.device-setup.local-check.v1")
++        except BaseException:
++            key.close()
++            raise
++        return key
++
++
++def dispatch_setup_helper(argv, *, api_factory=None, identity_factory=None):
++    """Early EXE branch: no server, models, config, tasks or browser is started."""
++    if HELPER_FLAG not in argv:
++        return None
++    if (
++        len(argv) != 3
++        or argv[0] != HELPER_FLAG
++        or argv[1] not in MODES
++        or not isinstance(argv[2], str)
++    ):
++        return 20
++    from .device_identity_setup_windows import parse_operator_process
++
++    try:
++        pid, creation_time = parse_operator_process(argv[2])
++        if api_factory is None:
++            from .device_identity_setup_windows import NativeSetupApi
++
++            api = NativeSetupApi()
++        else:
++            api = api_factory()
++        # SID is read from the original process token, NOT the elevated admin's
++        # token, a query parameter, editable config, or a command-line SID.
++        with api.verified_operator(pid, creation_time) as operator_sid:
++            identity = (identity_factory or WindowsDeviceIdentity)()
++            if argv[1] == "initialize":
++                with identity.initialize_for_activation(operator_sid=operator_sid):
++                    pass
++            else:
++                key = identity.open_existing()
++                if key is None:
++                    return 21
++                with key:
++                    api.grant_operator_read(key, operator_sid)
++        return 0
++    except DeviceIdentityError as exc:
++        for result, (code, _) in EXIT_CODES.items():
++            if code == exc.code:
++                return result
++        return 23
++    except Exception:
++        # No raw native exceptions / tokens / user paths in elevated output.
++        return 23
+*** End Patch

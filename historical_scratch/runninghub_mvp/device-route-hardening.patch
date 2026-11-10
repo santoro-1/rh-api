@@ -1,0 +1,36 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+         """Explicit activation action only, never invoked by refresh/cache recovery."""
+         with self._lock:
+             try:
++                if self._closed:
++                    raise DeviceAuthorizationError("LOGIN_REQUIRED", "请重新登录账号", status_code=401)
+                 if self._key is None:
+@@
+-        if state not in {
++        if not isinstance(state, str) or state not in {
+@@
+-        if result.get("thumbprint") not in {None, self._key.thumbprint}:
++        if result.get("thumbprint") is not None and result.get("thumbprint") != self._key.thumbprint:
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization_routes.py
+@@
+-from pydantic import BaseModel, ConfigDict, Field
++from pydantic import BaseModel, ConfigDict, Field, StrictBool
+@@
+-    confirm_initialize: bool = False
++    confirm_initialize: StrictBool = False
+@@
+-    supplied = urlsplit(origin)
+-    expected = urlsplit(str(request.base_url))
++    try:
++        supplied = urlsplit(origin)
++        expected = urlsplit(str(request.base_url))
++    except ValueError as exc:
++        raise HTTPException(status_code=403, detail="设备授权请求来源无效") from exc
+@@
+-        state = "KEY_UNAVAILABLE" if isinstance(error, DeviceIdentityError) else "AUTH_REFRESH_REQUIRED"
++        states = {"DEVICE_UNREGISTERED": "UNREGISTERED", "DEVICE_PENDING": "PENDING", "DEVICE_REJECTED": "REJECTED",
++                  "DEVICE_REVOKED": "REVOKED", "DEVICE_SUSPENDED": "SUSPENDED", "LOGIN_REQUIRED": "LOGIN_REQUIRED"}
++        state = "KEY_UNAVAILABLE" if isinstance(error, DeviceIdentityError) else states.get(error.code, "AUTH_REFRESH_REQUIRED")
+*** End Patch

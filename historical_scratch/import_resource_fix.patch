@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tools/library/import_broll_20260814.py
+@@
+-            "resource": {"video": f"{resource_base}/video.mp4", "preview": f"{resource_base}/poster.png", "metadata": f"{resource_base}/metadata.json", **media, "has_audio": True},
++            "resource": {"video": f"{resource_base}/video.mp4", "preview": f"{resource_base}/poster.png", "metadata": f"{resource_base}/metadata.json", "duration_us": media["duration_us"], "width": media["width"], "height": media["height"], "has_audio": True},
+*** End Patch

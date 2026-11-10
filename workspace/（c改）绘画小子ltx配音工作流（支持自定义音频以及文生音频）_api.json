@@ -1,0 +1,489 @@
+{
+  "200": {
+    "inputs": {
+      "positive": [
+        "254",
+        0
+      ],
+      "negative": [
+        "254",
+        1
+      ],
+      "latent": [
+        "221",
+        0
+      ]
+    },
+    "class_type": "LTXVCropGuides",
+    "_meta": {
+      "title": "LTXVCropGuides"
+    }
+  },
+  "210": {
+    "inputs": {
+      "video_latent": [
+        "254",
+        2
+      ],
+      "audio_latent": [
+        "247",
+        0
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "LTXVConcatAVLatent"
+    }
+  },
+  "217": {
+    "inputs": {
+      "text": "subtitles,text,watermark,overlay effects,字幕,文字,汉字,subtitles,text,Chinese characters,音乐,背景音乐,background music,music,background music,BGM,soundtrack,music,instrumental music,melody,audio track,singing,music overlay",
+      "clip": [
+        "225",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码器"
+    }
+  },
+  "219": {
+    "inputs": {
+      "tile_size": 1024,
+      "overlap": 64,
+      "temporal_size": 4096,
+      "temporal_overlap": 64,
+      "samples": [
+        "200",
+        2
+      ],
+      "vae": [
+        "223",
+        2
+      ]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE分块解码"
+    }
+  },
+  "220": {
+    "inputs": {
+      "samples": [
+        "221",
+        1
+      ],
+      "audio_vae": [
+        "224",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV Audio VAE Decode"
+    }
+  },
+  "221": {
+    "inputs": {
+      "av_latent": [
+        "227",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "LTXVSeparateAVLatent"
+    }
+  },
+  "222": {
+    "inputs": {
+      "text": "女人用中文说：所有赚到大钱的人，其实都是借的啊，这怎么可能不是借钱，是借资源，借鸡生蛋，借船出海。今年中国首富张一鸣难道不是借吗？他借用了普通人的时间来做了他的短视频平台。",
+      "clip": [
+        "225",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码器"
+    }
+  },
+  "223": {
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1-42.9G.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Checkpoint加载器(简易)"
+    }
+  },
+  "224": {
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1-42.9G.safetensors"
+    },
+    "class_type": "LTXVAudioVAELoader",
+    "_meta": {
+      "title": "Load LTXV Audio VAE"
+    }
+  },
+  "225": {
+    "inputs": {
+      "text_encoder": "gemma_3_12B_it.safetensors",
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1-42.9G.safetensors",
+      "device": "default"
+    },
+    "class_type": "LTXAVTextEncoderLoader",
+    "_meta": {
+      "title": "Load LTXV Audio Text Encoder"
+    }
+  },
+  "227": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": [
+        "231",
+        0
+      ],
+      "steps": 9,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "linear_quadratic",
+      "start_at_step": 6,
+      "end_at_step": 1000,
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "261",
+        0
+      ],
+      "positive": [
+        "254",
+        0
+      ],
+      "negative": [
+        "254",
+        1
+      ],
+      "latent_image": [
+        "210",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器(高级)"
+    }
+  },
+  "229": {
+    "inputs": {
+      "nag_scale": 11,
+      "nag_alpha": 0.25,
+      "nag_tau": 2.5,
+      "inplace": false,
+      "model": [
+        "232",
+        0
+      ],
+      "nag_cond_video": [
+        "217",
+        0
+      ],
+      "nag_cond_audio": [
+        "217",
+        0
+      ]
+    },
+    "class_type": "LTX2_NAG",
+    "_meta": {
+      "title": "LTX2 NAG"
+    }
+  },
+  "231": {
+    "inputs": {
+      "seed": 1016263581133271
+    },
+    "class_type": "easy seed",
+    "_meta": {
+      "title": "随机种"
+    }
+  },
+  "232": {
+    "inputs": {
+      "sage_attention": "auto",
+      "allow_compile": false,
+      "model": [
+        "223",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "SAGE注意力补丁KJ"
+    }
+  },
+  "237": {
+    "inputs": {
+      "video": "e10b705c81e7b3b9f9db4073c5fdccfd85c0c1f575436524f993383c58a8f9cf.mp4",
+      "force_rate": 24,
+      "force_size": "Disabled",
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": [
+        "265",
+        1
+      ],
+      "start_time": 0,
+      "format": "LTXV"
+    },
+    "class_type": "VHS_LoadVideoFFmpeg",
+    "_meta": {
+      "title": "加载视频FFmpeg(上传)🎥🅥🅗🅢"
+    }
+  },
+  "243": {
+    "inputs": {
+      "value": 0,
+      "width": [
+        "257",
+        3
+      ],
+      "height": [
+        "257",
+        4
+      ]
+    },
+    "class_type": "SolidMask",
+    "_meta": {
+      "title": "纯块遮罩"
+    }
+  },
+  "244": {
+    "inputs": {
+      "audio": [
+        "245",
+        0
+      ],
+      "audio_vae": [
+        "224",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEEncode",
+    "_meta": {
+      "title": "LTXV Audio VAE Encode"
+    }
+  },
+  "245": {
+    "inputs": {
+      "frame_rate": 24,
+      "head_silence_frames": 0,
+      "start_frame": 0,
+      "end_frame": [
+        "265",
+        1
+      ],
+      "tail_silence_frames": 0,
+      "audio": [
+        "246",
+        0
+      ]
+    },
+    "class_type": "PainterAudioCut",
+    "_meta": {
+      "title": "Painter Audio Cut"
+    }
+  },
+  "246": {
+    "inputs": {
+      "audio": "d0ffd5f270325ea1bcdf7728accd353bdfa6c6caddede9b7e5cbe0c643c219d9.mp3",
+      "audioUI": ""
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频"
+    }
+  },
+  "247": {
+    "inputs": {
+      "samples": [
+        "244",
+        0
+      ],
+      "mask": [
+        "243",
+        0
+      ]
+    },
+    "class_type": "SetLatentNoiseMask",
+    "_meta": {
+      "title": "设置Latent噪波遮罩"
+    }
+  },
+  "254": {
+    "inputs": {
+      "width": [
+        "257",
+        3
+      ],
+      "height": [
+        "257",
+        4
+      ],
+      "length": [
+        "257",
+        1
+      ],
+      "frame_rate": 24,
+      "strength": 0.7,
+      "reference1_frame_idx": 0,
+      "reference2_frame_idx": 0,
+      "positive": [
+        "222",
+        0
+      ],
+      "negative": [
+        "217",
+        0
+      ],
+      "video_vae": [
+        "223",
+        2
+      ],
+      "audio_vae": [
+        "224",
+        0
+      ],
+      "start_image": [
+        "255",
+        0
+      ],
+      "end_image": [
+        "255",
+        1
+      ],
+      "source_video": [
+        "237",
+        0
+      ]
+    },
+    "class_type": "PainterLTX2Vomni",
+    "_meta": {
+      "title": "Painter LTX2V Omni"
+    }
+  },
+  "255": {
+    "inputs": {
+      "image1_idx": 5,
+      "image2_idx": 170,
+      "image": [
+        "237",
+        0
+      ]
+    },
+    "class_type": "PainterFrameExtractor",
+    "_meta": {
+      "title": "Painter Frame Extractor"
+    }
+  },
+  "257": {
+    "inputs": {
+      "video_info": [
+        "237",
+        3
+      ]
+    },
+    "class_type": "VHS_VideoInfoLoaded",
+    "_meta": {
+      "title": "视频信息（已选中）"
+    }
+  },
+  "258": {
+    "inputs": {
+      "anything": [
+        "255",
+        0
+      ]
+    },
+    "class_type": "easy cleanGpuUsed",
+    "_meta": {
+      "title": "清理GPU占用"
+    }
+  },
+  "260": {
+    "inputs": {
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "bernini+ltx audio",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 12,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "no_preview": false,
+      "images": [
+        "219",
+        0
+      ],
+      "audio": [
+        "220",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "合并为视频"
+    }
+  },
+  "261": {
+    "inputs": {
+      "preview_rate": 8,
+      "model": [
+        "229",
+        0
+      ]
+    },
+    "class_type": "LTX2SamplingPreviewOverride",
+    "_meta": {
+      "title": "LTX2 Sampling Preview Override"
+    }
+  },
+  "264": {
+    "inputs": {
+      "image": "pasted/3fe46cebdc9bb2f0459cd39b926007721afa6cb925390da377aa82870168f86a.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "265": {
+    "inputs": {
+      "帧率": 24,
+      "因数": 8,
+      "加1帧": true,
+      "音频": [
+        "246",
+        0
+      ]
+    },
+    "class_type": "AudioToFPS",
+    "_meta": {
+      "title": "音频到FPS转换"
+    }
+  },
+  "266": {
+    "inputs": {
+      "text": "361",
+      "anything": [
+        "265",
+        1
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "展示任何"
+    }
+  }
+}

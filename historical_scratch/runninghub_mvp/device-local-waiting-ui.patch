@@ -1,0 +1,79 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/task_store.py
+@@
+-    def get_job_payload(self, job_id: str) -> dict[str, Any]:
++    def device_waiting_jobs(self, user_id: int) -> list[dict[str, Any]]:
++        with self._connect() as connection:
++            rows = connection.execute(
++                "SELECT job_id, created_at, status_json FROM jobs WHERE status='pending' AND cancel_requested=0 "
++                "AND json_extract(status_json, '$.device_authorization.waiting')=1 "
++                "AND json_extract(status_json, '$.device_authorization.user_id')=? ORDER BY created_at, rowid LIMIT 100", (user_id,)
++            ).fetchall()
++        return [{"job_id": row["job_id"], "created_at": row["created_at"],
++                 "code": (_object(row["status_json"], {}).get("device_authorization") or {}).get("code", "AUTH_REFRESH_REQUIRED")}
++                for row in rows]
++
++    def get_job_payload(self, job_id: str) -> dict[str, Any]:
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+-    @app.post("/api/jobs/{job_id}/resume-authorization")
++    @app.get("/api/new/device-authorization/waiting-jobs")
++    def list_device_waiting_jobs(request: Request):
++        user = current_project_user(request)
++        return JSONResponse({"jobs": render_queue.store.device_waiting_jobs(int(user["user_id"]))},
++                            headers={"Cache-Control": "no-store"})
++
++    @app.post("/api/jobs/{job_id}/resume-authorization")
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.html
+@@
+-    <section class="help"><h2>什么时候不需要重新申请？</h2><p>覆盖更新程序、移动安装目录、重启电脑、清除浏览器缓存或重新登录，都应沿用原设备授权。</p><p>如果重装系统或更换硬件导致密钥丢失，请联系管理员办理恢复或换机。不要反复申请，也不要复制别人的授权文件。</p></section>
++    <section id="waiting-jobs" class="card" hidden>
++      <h2>等待授权的本地任务</h2><p>仅显示当前账号的任务。继续前会重新校验本机授权，保留原任务，不重新生成云端视频。</p>
++      <div id="waiting-list"></div><p id="waiting-error" class="error" role="alert" hidden></p>
++    </section>
++    <section class="help"><h2>什么时候不需要重新申请？</h2><p>覆盖更新程序、移动安装目录、重启电脑、清除浏览器缓存或重新登录，都应沿用原设备授权。</p><p>如果重装系统或更换硬件导致密钥丢失，请联系管理员办理恢复或换机。不要反复申请，也不要复制别人的授权文件。</p></section>
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.js
+@@
+   let timer = null;
++  const resuming = new Set();
+@@
+-  function schedule() {
++  async function loadWaitingJobs() {
++    const panel = el('waiting-jobs');
++    if (state === 'LOGIN_REQUIRED') {panel.hidden = true; el('waiting-list').replaceChildren(); return;}
++    try {
++      const response = await fetch('/api/new/device-authorization/waiting-jobs', {credentials:'same-origin',cache:'no-store'});
++      if (!response.ok) {panel.hidden = true; el('waiting-list').replaceChildren(); return;}
++      const result = await response.json();
++      const jobs = Array.isArray(result.jobs) ? result.jobs : [];
++      panel.hidden = jobs.length === 0;
++      el('waiting-list').replaceChildren();
++      for (const job of jobs) {
++        if (typeof job.job_id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(job.job_id)) continue;
++        const row = document.createElement('div'); row.className = 'actions';
++        const label = document.createElement('p');
++        label.textContent = '任务 ' + job.job_id.slice(0,12) + ' · ' + (job.created_at || '等待继续');
++        const button = document.createElement('button'); button.type = 'button'; button.textContent = '继续此任务';
++        button.disabled = resuming.has(job.job_id);
++        button.addEventListener('click', async () => {
++          if (resuming.has(job.job_id)) return;
++          resuming.add(job.job_id); button.disabled = true; el('waiting-error').hidden = true;
++          try {
++            const reply = await fetch('/api/jobs/' + encodeURIComponent(job.job_id) + '/resume-authorization', {
++              method:'POST', credentials:'same-origin', headers:{'X-Device-Authorization-Action':'1'}
++            });
++            const value = await reply.json().catch(() => ({}));
++            if (!reply.ok) throw new Error(typeof value.detail === 'string' ? value.detail : '暂时无法继续，请先校验设备授权。');
++            await loadWaitingJobs();
++          } catch (error) {el('waiting-error').textContent = error.message; el('waiting-error').hidden = false;}
++          finally {resuming.delete(job.job_id); button.disabled = false;}
++        });
++        row.append(label, button); el('waiting-list').append(row);
++      }
++    } catch (_) {panel.hidden = true; el('waiting-list').replaceChildren();}
++  }
++  function schedule() {
+@@
+       render(data);
++      await loadWaitingJobs();
+*** End Patch

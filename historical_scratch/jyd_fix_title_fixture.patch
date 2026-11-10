@@ -1,0 +1,18 @@
+*** Begin Patch
+*** Update File: tests/test_unified_content_visual_plan.py
+@@
+             "music_analysis_status": "SUCCESS",
+             "subtitle_analysis_status": "SUCCESS",
++            "title_analysis_status": "SUCCESS",
+             "visual_analysis_status": "SUCCESS",
+             "music_intent": {"primary_scene": "health_education"},
++            "title": {"line_1": "长期坚持", "line_2": "习惯决定结果"},
+@@
+-            "errors": {"music": None, "subtitle": None, "visual": None},
++            "errors": {
++                "music": None,
++                "subtitle": None,
++                "title": None,
++                "visual": None,
++            },
+*** End Patch

@@ -1,0 +1,10 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+-                    if status.get("batch_id"):
++                    if status.get("batch_id") and recovery is None:
+                         self._cleanup_batch_once_templates(str(status["batch_id"]))
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_runtime.py
+@@
+-from .device_auth_protocol import DeviceAuthorizationError
+*** End Patch

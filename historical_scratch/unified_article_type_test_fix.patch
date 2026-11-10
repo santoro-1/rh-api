@@ -1,0 +1,12 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_unified_content_visual_plan.py
+@@
+-        concept["concept_id"]
++        concept_id
+         for anchor in visual_input.visual_context["anchors"]
+         if anchor["usage"] == "enrichment"
+-        for concept in anchor["allowed_concepts"]
+-        if concept["concept_id"].startswith("editorial.")
++        for concept_id in anchor["allowed_concepts"]
++        if concept_id.startswith("editorial.")
+*** End Patch

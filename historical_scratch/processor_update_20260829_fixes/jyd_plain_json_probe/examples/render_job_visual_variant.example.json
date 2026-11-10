@@ -1,0 +1,50 @@
+{
+  "schema": "jyd.render_job.v1",
+  "source": {
+    "type": "video",
+    "media_path": "D:/素材/input.mp4",
+    "work_root": "D:/工作目录/generated_video_drafts"
+  },
+  "output": {
+    "draft_root": "D:/剪映草稿/JianyingPro Drafts",
+    "draft_name": "visual_variant_demo",
+    "mp4_path": "D:/输出/visual_variant_demo.mp4",
+    "skip_export": false
+  },
+  "visual_variant": {
+    "enabled": true,
+    "mirror_interval_seconds": 10,
+    "crop_ratio": "1:1",
+    "background_color": "#000000",
+    "face_centered": true,
+    "face_sample_count": 3,
+    "video_track_index": 0
+  },
+  "stickers": [
+    {
+      "sticker_json_path": "D:/项目/sticker_library/a/sticker.json",
+      "corner": "top_left",
+      "visible_ratio": 0.05
+    },
+    {
+      "sticker_json_path": "D:/项目/sticker_library/b/sticker.json",
+      "corner": "top_right",
+      "visible_ratio": 0.05
+    },
+    {
+      "sticker_json_path": "D:/项目/sticker_library/c/sticker.json",
+      "corner": "bottom_left",
+      "visible_ratio": 0.05
+    },
+    {
+      "sticker_json_path": "D:/项目/sticker_library/d/sticker.json",
+      "corner": "bottom_right",
+      "visible_ratio": 0.05
+    }
+  ],
+  "export": {
+    "resolution": "1080P",
+    "framerate": "30fps",
+    "timeout": 1200
+  }
+}

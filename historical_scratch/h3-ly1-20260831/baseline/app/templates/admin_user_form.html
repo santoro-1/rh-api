@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block title %}{{ "编辑用户" if editing else "创建用户" }}{% endblock %}
+{% block content %}
+<section class="page-heading"><div><h1>{{ "编辑用户" if editing else "创建用户" }}</h1><p class="muted">留空 API Key 即保留原配置；新用户可稍后补充。</p></div><a class="button secondary" href="/admin/users">返回</a></section>
+<form method="post" action="{{ '/admin/users/' ~ user.id if editing else '/admin/users' }}" class="panel stack-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="two-columns">
+    <label>用户名<input name="username" value="{{ user.username if user else '' }}" required maxlength="80"></label>
+    <label>{{ "新密码（留空不改）" if editing else "密码" }}<input name="password" type="password" {% if not editing %}required{% endif %} minlength="8"></label>
+  </div>
+  <div class="check-row"><label><input type="checkbox" name="is_admin" {% if user and user.is_admin %}checked{% endif %}> 管理员</label><label><input type="checkbox" name="is_active" {% if not user or user.is_active %}checked{% endif %}> 启用账号</label><label><input type="checkbox" name="h3_access_enabled" {% if user and user.h3_access_enabled %}checked{% endif %}> 开通 MiniMax H3 多参考</label></div>
+  <p class="field-help">H3 是独立的用户权限，不受数字人双池运行模式开关影响。实际 RunningHub Key、Workflow ID 和并发仍由资源池管理员统一配置。</p>
+  <details class="admin-config-section" open>
+  <summary>可使用的 RunningHub 账号</summary>
+  <div class="admin-config-body stack-form">
+    <p class="field-help">这里只分配该登录用户可以调用哪些执行账号。Key、并发和工作流配置分别在资源池与工作流配置页面维护。</p>
+    <div class="pool-member-list">
+      {% for account in runninghub_execution_accounts %}
+        <label><input type="checkbox" name="runninghub_execution_account_ids" value="{{ account.id }}" {% if account.id in runninghub_execution_account_ids %}checked{% endif %}> {{ account.label }}{% if not account.is_enabled %}（已停用）{% endif %}</label>
+      {% else %}<span class="muted">尚未配置 RunningHub 执行账号。</span>{% endfor %}
+    </div>
+  </div>
+  </details>
+  <input name="api_key" type="hidden" value="">
+  <input name="base_url" type="hidden" value="{{ config.base_url }}">
+  <input name="ai_app_id" type="hidden" value="{{ config.ai_app_id }}">
+  <input name="instance_type" type="hidden" value="{{ config.instance_type }}">
+  <input name="default_prompt" type="hidden" value="{{ config.default_prompt }}">
+  <input name="max_concurrent_tasks" type="hidden" value="{{ config.max_concurrent_tasks }}">
+  <input name="ltx_workflow_id" type="hidden" value="{{ ltx_config.ai_app_id }}">
+  <input name="ltx_instance_type" type="hidden" value="{{ ltx_config.instance_type }}">
+  <input name="ltx_default_prompt" type="hidden" value="{{ ltx_config.default_prompt }}">
+  {% if ltx_config.is_enabled %}<input name="ltx_enabled" type="hidden" value="true">{% endif %}
+  <details class="admin-config-section" open>
+  <summary>MiniMax 语音账号</summary>
+  <div class="admin-config-body stack-form">
+  <p class="field-help">这里绑定实际承担调用费用的 MiniMax 账号。声音克隆、融合和语音任务会同时记录本地用户、账号绑定与当时使用的 API 凭证。</p>
+  {% if request.query_params.get("system_voice_count") %}
+    <p class="success-notice">已同步 {{ request.query_params.get("system_voice_count") }} 个当前 MiniMax 账号可用的官方音色。</p>
+  {% endif %}
+  {% if request.query_params.get("system_voice_deleted") %}
+    <p class="success-notice">已从该站内账号删除官方音色；后续同步不会自动恢复。</p>
+  {% endif %}
+  {% if request.query_params.get("system_voice_restored") %}
+    <p class="success-notice">已恢复官方音色。</p>
+  {% endif %}
+  <label>账号备注名称
+    <input name="minimax_account_label" maxlength="100" value="{{ minimax_config.account_label or 'MiniMax 账号' }}" placeholder="例如：公司主账号">
+  </label>
+  <label>MiniMax API Key
+    <input name="minimax_api_key" type="password" autocomplete="new-password" placeholder="{{ '已加密保存，留空不修改' if editing and minimax_config.api_key_encrypted else '可稍后配置' }}">
+  </label>
+  {% if editing and minimax_config.api_key_encrypted %}
+    <label class="check-row"><span><input type="checkbox" name="minimax_new_account"> 新填写的 API Key 属于另一个 MiniMax 官网账号</span></label>
+    <p class="field-help">仅轮换同一官网账号的 Key 时不要勾选；切换到其他官网账号时必须勾选，旧账号下保存的音色将不再出现在当前选择列表中。</p>
+  {% endif %}
+  <label>Base URL
+    <input name="minimax_base_url" value="{{ minimax_config.base_url }}" required>
+  </label>
+  <label>每分钟语音请求上限
+    <input name="minimax_requests_per_minute" type="number" min="1" max="60" value="{{ minimax_config.requests_per_minute }}" required>
+    <span class="field-help">用于本地语音 Worker 节流，请按该 MiniMax 账号的实际额度填写。</span>
+  </label>
+  {% if editing %}
+    <div class="system-voice-sync">
+      <div>
+        <strong>官方系统音色</strong>
+        <p class="field-help">先保存上面的 MiniMax Key，再从 MiniMax 实时同步。系统音色不收克隆音色费，文本合成仍按用量计费。</p>
+      </div>
+      <button
+        class="button secondary"
+        type="submit"
+        formmethod="post"
+        formaction="/admin/users/{{ user.id }}/system-voices/sync"
+      >同步官方音色</button>
+    </div>
+  {% endif %}
+  {% if custom_minimax_voices %}
+    <h3>我的自定义音色（{{ custom_minimax_voices|length }}）</h3>
+    <div class="compact-list">
+      {% for voice in custom_minimax_voices %}
+        <span class="asset-chip">{{ voice.name }} · {% if voice.method == "mix" %}融合{% else %}克隆{% endif %}</span>
+      {% endfor %}
+    </div>
+  {% endif %}
+  {% if system_voice_groups %}
+    <details class="voice-category-group system-voice-library">
+      <summary>
+        <strong>官方系统音色</strong>
+        <span>{{ system_voice_count }} 个，展开后管理</span>
+      </summary>
+      <div class="voice-management-help">
+        <p class="field-help">官方音色与克隆/融合音色分开显示。删除只影响该站内账号，不会删除 MiniMax 官方目录；后续同步也不会自动加回。</p>
+      </div>
+      <div class="voice-category-list">
+        {% for group in system_voice_groups %}
+          <details class="voice-category-group">
+            <summary><strong>{{ group.label }}</strong><span>{{ group.voices|length }} 个</span></summary>
+            <div class="managed-voice-grid">
+              {% for voice in group.voices %}
+                <article class="managed-voice-item">
+                  <span>
+                    <strong>{{ voice.name }}</strong>
+                    <small>{{ voice.voice_id }}</small>
+                  </span>
+                  <button
+                    class="button danger compact-button"
+                    type="submit"
+                    formmethod="post"
+                    formaction="/admin/users/{{ user.id }}/system-voices/{{ voice.id }}/delete"
+                    onclick="return confirm('只从该站内账号删除官方音色“{{ voice.name|e }}”？MiniMax 官方目录不会受影响。')"
+                  >删除</button>
+                </article>
+              {% endfor %}
+            </div>
+          </details>
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+  {% if hidden_system_voice_groups %}
+    <details class="voice-category-group removed-voice-group">
+      <summary><strong>已删除的官方音色</strong><span>{{ hidden_system_voice_count }} 个，可恢复</span></summary>
+      <div class="managed-voice-grid">
+        {% for group in hidden_system_voice_groups %}
+          {% for voice in group.voices %}
+            <article class="managed-voice-item">
+              <span>
+                <strong>{{ voice.name }}</strong>
+                <small>{{ group.label }} · {{ voice.voice_id }}</small>
+              </span>
+              <button
+                class="button secondary compact-button"
+                type="submit"
+                formmethod="post"
+                formaction="/admin/users/{{ user.id }}/system-voices/{{ voice.id }}/restore"
+              >恢复</button>
+            </article>
+          {% endfor %}
+        {% endfor %}
+      </div>
+    </details>
+  {% endif %}
+  </div>
+  </details>
+  <details class="admin-config-section" open>
+  <summary>豆包内容分析</summary>
+  <div class="admin-config-body stack-form">
+    <p class="field-help">配置只保存在数字人服务端。工作台和浏览器不会获得 Ark API Key；本模块只保存连接参数，不会自动调用或产生费用。</p>
+    <label class="check-row"><span><input type="checkbox" name="ark_enabled" {% if ark_config.enabled %}checked{% endif %}> 为该账号启用豆包内容分析</span></label>
+    <label>Ark API Key
+      <input name="ark_api_key" type="password" autocomplete="new-password" maxlength="4096" placeholder="{{ '已加密保存，留空不修改' if editing and ark_config.api_key_encrypted else '可稍后配置' }}">
+    </label>
+    <label>Base URL
+      <input name="ark_base_url" value="{{ ark_config.base_url }}" maxlength="500" required>
+    </label>
+    <label>模型或推理接入点 ID
+      <input name="ark_model" value="{{ ark_config.model }}" maxlength="200" placeholder="启用前必须填写">
+    </label>
+    <div class="two-columns">
+      <label>请求超时（秒）
+        <input name="ark_timeout_seconds" type="number" min="1" max="120" value="{{ ark_config.timeout_seconds }}" required>
+      </label>
+      <label>额外重试次数
+        <input name="ark_max_retries" type="number" min="0" max="5" value="{{ ark_config.max_retries }}" required>
+      </label>
+    </div>
+    <p class="field-help">仅对超时、HTTP 429 和明确的 5xx 进行有限重试。内容分析 Prompt、缓存和工作台调用将在后续模块实现。</p>
+  </div>
+  </details>
+  <button type="submit">保存</button>
+</form>
+{% endblock %}

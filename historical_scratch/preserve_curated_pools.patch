@@ -1,0 +1,13 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tools/library/apply_editorial_broll_pools.py
+@@
+ def _pool_ids_for_asset(asset: dict[str, Any]) -> list[str]:
+     taxonomy = asset.get("video_taxonomy") or {}
++    if taxonomy.get("review_status") == "CODEX_REVIEWED_EDITORIAL_V1":
++        return [
++            pool_id
++            for pool_id in POOL_IDS
++            if pool_id in set(taxonomy.get("fallback_concept_ids") or ())
++        ]
+     l2 = set(taxonomy.get("l2_category_ids") or ())
+*** End Patch

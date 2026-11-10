@@ -1,0 +1,249 @@
+*** Begin Patch
+*** Update File: apps/processor/frontend/new/index.html
+@@
+-            uploadedScripts = Array.isArray(project?.items) ? project.items.map((item) => {
++            uploadedScripts = Array.isArray(project?.items) ? project.items.map((item, itemIndex) => {
+@@
+                 id: item.item_id,
+                 rowKey: item.row_key,
++                displayIndex: itemIndex + 1,
+@@
+-                            <span class="font-bold font-mono text-gray-500 group-hover:text-brand-accent transition-colors">${escapeHtml(script.rowKey)}</span>
++                            <span class="font-bold font-mono text-gray-500 group-hover:text-brand-accent transition-colors" title="内部任务编号 ${escapeHtml(script.rowKey)}">${escapeHtml(script.displayIndex)}</span>
+@@
+-                            <button type="button" ${canAnalyzeVisuals ? '' : 'disabled'} onclick="retryRowVisualAnalysis(this)" class="row-visual-analysis-action w-full rounded-lg border px-2 py-1 text-[9px] font-semibold transition-colors ${canAnalyzeVisuals ? 'border-cyan-400/20 bg-cyan-400/5 text-brand-accent hover:border-brand-accent/60 hover:text-white' : 'border-slate-800 text-gray-600 cursor-wait'}">
+-                                <i class="fa-solid ${visualStatus === 'PENDING' ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${visualStatus === 'NOT_REQUESTED' ? '统一分析' : (visualStatus === 'PENDING' ? '正在分析' : '重新统一分析')}
++                            <button type="button" ${canAnalyzeVisuals ? '' : 'disabled'} onclick="retryRowVisualAnalysis(this)" class="row-visual-analysis-action w-full rounded-lg border px-2 py-1 text-[9px] font-semibold transition-colors ${canAnalyzeVisuals ? 'border-cyan-400/20 bg-cyan-400/5 text-brand-accent hover:border-brand-accent/60 hover:text-white' : 'border-slate-800 text-gray-600 cursor-wait'}">
++                                <i class="fa-solid ${visualStatus === 'PENDING' ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${visualStatus === 'NOT_REQUESTED' ? '统一分析' : (visualStatus === 'PENDING' ? '正在分析' : (visualStatus === 'SUCCESS' && visualMappingStatus !== 'SUCCESS' ? '重新映射' : '重新统一分析'))}
+@@
+         function contentAnalysisTargetsForRows(rows) {
+             return rows.map(row => row.getAttribute('data-id')).filter((itemId) => {
+                 const script = uploadedScripts.find(candidate => candidate.id === itemId);
+-                return (script?.contentAnalysis?.overall_status || 'NOT_REQUESTED') === 'NOT_REQUESTED';
++                if (!script || !(script.allowedActions?.analyze_content || script.allowedActions?.analyze_visuals)) return false;
++                const contentStatus = script.contentAnalysis?.overall_status || 'NOT_REQUESTED';
++                const visualStatus = script.visualAnalysis?.analysis_status || 'NOT_REQUESTED';
++                return contentStatus === 'NOT_REQUESTED' || visualStatus === 'NOT_REQUESTED';
+             });
+         }
+@@
+                 script.contentAnalysis = {
+                     ...(script.contentAnalysis || {}),
+                     overall_status: 'PENDING'
+                 };
++                script.visualAnalysis = {
++                    ...(script.visualAnalysis || {}),
++                    analysis_status: 'PENDING'
++                };
+             });
+             document.querySelectorAll('.table-data-row').forEach((row) => {
+                 if (!targets.has(row.getAttribute('data-id'))) return;
+-                const button = row.querySelector('.row-content-analysis-action');
+-                if (!button) return;
+-                button.disabled = true;
+-                button.className = 'row-content-analysis-action mt-1.5 text-[9px] text-brand-primary cursor-wait transition-colors';
+-                button.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i>AI 分析中...';
++                const contentButton = row.querySelector('.row-content-analysis-action');
++                if (contentButton) {
++                    contentButton.disabled = true;
++                    contentButton.className = 'row-content-analysis-action mt-1.5 text-[9px] text-brand-primary cursor-wait transition-colors';
++                    contentButton.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i>AI 分析中...';
++                }
++                const visualButton = row.querySelector('.row-visual-analysis-action');
++                if (visualButton) {
++                    visualButton.disabled = true;
++                    visualButton.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i>正在分析';
++                }
+             });
+         }
+@@
+         async function retryRowVisualAnalysis(button) {
+             const rowId = button.closest('tr')?.getAttribute('data-id') || '';
+             if (!activeProject || !rowId || button.disabled) return;
+-            button.disabled = true;
+-            button.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i>分析中...';
++            const script = uploadedScripts.find((candidate) => candidate.id === rowId);
++            const visualStatus = script?.visualAnalysis?.analysis_status || 'NOT_REQUESTED';
++            const mappingStatus = script?.visualAnalysis?.mapping_status || 'NOT_REQUESTED';
++            const canReuseSavedResult = visualStatus === 'NOT_REQUESTED'
++                || (visualStatus === 'SUCCESS' && mappingStatus !== 'SUCCESS');
++            markContentAnalysisPending([rowId]);
+             try {
+-                const project = await workspaceApi(
+-                    `/api/new/projects/${activeProject.project_id}/items/${rowId}/content-analysis/retry`,
+-                    { method: 'POST' }
+-                );
++                const project = canReuseSavedResult
++                    ? await analyzeProjectContent(activeProject.project_id, [rowId], false)
++                    : await workspaceApi(
++                        `/api/new/projects/${activeProject.project_id}/items/${rowId}/content-analysis/retry`,
++                        { method: 'POST' }
++                    );
+@@
+         function setVoicePreviewButtonState(enabled, isLoading = false) {
+@@
+                 button.className = "w-full md:w-auto px-6 py-3 rounded-xl bg-brand-primary/10 hover:bg-brand-primary/20 border border-brand-primary/40 hover:border-brand-primary/70 text-brand-accent hover:text-white font-bold text-xs tracking-wider uppercase flex items-center justify-center gap-2 transition-all whitespace-nowrap cursor-pointer active:scale-[0.98]";
+-                const allReady = Array.from(document.querySelectorAll('.table-data-row')).every(row => row.getAttribute('data-voice-status') === 'ready');
+-                button.innerHTML = `<i class="fa-solid fa-wave-square"></i><span>${allReady ? '重新生成声音预览和脚本分析' : '生成声音预览和脚本分析'}</span>`;
++                const rows = Array.from(document.querySelectorAll('.table-data-row'));
++                const allReady = rows.every(row => row.getAttribute('data-voice-status') === 'ready');
++                const hasPendingAnalysis = contentAnalysisTargetsForRows(rows).length > 0;
++                const label = allReady && hasPendingAnalysis
++                    ? '补齐脚本分析'
++                    : (allReady ? '重新生成声音预览和脚本分析' : '生成声音预览和脚本分析');
++                button.innerHTML = `<i class="fa-solid fa-wave-square"></i><span>${label}</span>`;
+@@
+             const actionText = pendingRows.length ? '生成缺失的声音' : '重新生成新的声音版本';
+-            const analysisCount = contentAnalysisTargetsForRows(targetRows).length;
++            const analysisCount = contentAnalysisTargetsForRows(rows).length;
++            if (pendingRows.length === 0 && analysisCount > 0) {
++                if (!window.confirm(`将补齐 ${analysisCount} 条尚未完成的统一分析；不会重新生成声音。已有可复用结果会优先在本地处理，确实缺少视觉计划时才会调用大模型。是否继续？`)) return;
++                isGeneratingAllVoicePreviews = true;
++                setVoicePreviewButtonState(false, true);
++                try {
++                    await startContentAnalysisForChangedScripts(activeProject.project_id, rows);
++                } finally {
++                    isGeneratingAllVoicePreviews = false;
++                    refreshAudioStageActions();
++                }
++                return;
++            }
+             if (!window.confirm(`将为 ${targetRows.length} 条脚本调用 MiniMax ${actionText}并产生费用，同时分析 ${analysisCount} 条新增或已修改脚本；已有分析结果会继续复用。旧版本会保留，是否继续？`)) return;
+@@
+-            startContentAnalysisForChangedScripts(activeProject.project_id, targetRows);
++            startContentAnalysisForChangedScripts(activeProject.project_id, rows);
+@@
+         let currentlyPlayingRowAudioBtn = null;
+         let currentRowAudio = null;
++        function resetRowAudioPlayback(btnEl, waveformSpan) {
++            btnEl.innerHTML = '<i class="fa-solid fa-play text-[9px]"></i>';
++            if (currentlyPlayingRowAudioBtn === btnEl) currentlyPlayingRowAudioBtn = null;
++            currentRowAudio = null;
++            waveformSpan.forEach(span => {
++                span.className = "w-[2px] bg-slate-800 h-1";
++                span.style.animation = "none";
++            });
++        }
++
++        async function describeAudioPlaybackError(audio, audioUrl) {
++            const mediaErrors = {
++                1: '播放被浏览器中止',
++                2: '浏览器读取音频时发生网络错误',
++                3: '浏览器无法解码音频',
++                4: '浏览器不支持该音频格式或地址不可用'
++            };
++            const mediaMessage = mediaErrors[audio.error?.code] || '浏览器未返回具体媒体错误';
++            try {
++                const response = await fetch(audioUrl, {
++                    headers: { Range: 'bytes=0-0' },
++                    cache: 'no-store',
++                    credentials: 'same-origin'
++                });
++                if (response.ok || response.status === 206) {
++                    return `${mediaMessage}；服务器文件可以读取，可能是一次性的网络或解码异常，请重试。`;
++                }
++                const body = await response.text();
++                let detail = body;
++                try { detail = JSON.parse(body)?.detail || body; } catch (_) {}
++                return `${mediaMessage}；服务器返回 ${response.status}${detail ? `：${detail}` : ''}`;
++            } catch (error) {
++                return `${mediaMessage}；诊断请求也失败：${error.message}`;
++            }
++        }
++
+         function togglePlayRowAudio(btnEl) {
+@@
+-            const itemId = row.getAttribute('data-id');
+-            const audio = new Audio(`/api/new/projects/${activeProject.project_id}/items/${itemId}/audio?t=${Date.now()}`);
++            const itemId = row.getAttribute('data-id');
++            const audioUrl = `/api/new/projects/${activeProject.project_id}/items/${itemId}/audio?t=${Date.now()}`;
++            const audio = new Audio(audioUrl);
+@@
+-            audio.onerror = () => {
+-                btnEl.innerHTML = '<i class="fa-solid fa-play text-[9px]"></i>';
+-                currentlyPlayingRowAudioBtn = null;
+-                currentRowAudio = null;
+-                showToast('播放失败', '当前音频文件无法读取。', 'warning');
++            audio.onerror = async () => {
++                resetRowAudioPlayback(btnEl, waveformSpan);
++                const detail = await describeAudioPlaybackError(audio, audioUrl);
++                console.error('Audio playback failed', { projectId: activeProject?.project_id, itemId, mediaError: audio.error, audioUrl });
++                showToast('播放失败', detail, 'warning');
+             };
+-            audio.play();
++            void audio.play().catch((error) => {
++                if (audio.error) return;
++                resetRowAudioPlayback(btnEl, waveformSpan);
++                showToast('播放失败', `浏览器拒绝播放：${error.message}`, 'warning');
++            });
+         }
+*** Update File: src/jyd_probe/project_audio.py
+@@
+ def _current_audio_links(
+     links: list[dict[str, Any]],
++    *,
++    active_item_ids: set[str] | None = None,
+ ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+-    """Select only the newest remote audio item link for each project item."""
++    """Select newest remote links, optionally limited to locally active items."""
+@@
+             link.get("system") == "runninghub"
+             and link.get("relation") == "digital_human_audio_item"
+             and link.get("item_id")
++            and (
++                active_item_ids is None
++                or str(link["item_id"]) in active_item_ids
++            )
+         ):
+@@
+         project = self.store.get_project(owner_user_id, project_id)
+-        batch_links, item_links = _current_audio_links(project["links"])
++        active_item_ids = {
++            str(item["item_id"])
++            for item in project["items"]
++            if item.get("status") in {"AUDIO_QUEUED", "AUDIO_RUNNING"}
++        }
++        batch_links, item_links = _current_audio_links(
++            project["links"], active_item_ids=active_item_ids
++        )
+*** Update File: tests/test_new_frontend.py
+@@
+         self.assertIn(
+-            "startContentAnalysisForChangedScripts(activeProject.project_id, targetRows)",
++            "startContentAnalysisForChangedScripts(activeProject.project_id, rows)",
+             html,
+         )
++        self.assertIn("displayIndex: itemIndex + 1", html)
++        self.assertIn("补齐脚本分析", html)
++        self.assertIn("重新映射", html)
++        self.assertIn("canReuseSavedResult", html)
++        self.assertIn("describeAudioPlaybackError", html)
++        self.assertIn("服务器文件可以读取", html)
+*** Update File: tests/test_project_audio.py
+@@
+     def test_only_latest_remote_audio_link_can_update_each_item(self) -> None:
+@@
+         self.assertEqual([link["external_id"] for link in batches], ["new-batch"])
+         self.assertEqual(list(items), ["new-item"])
++
++    def test_terminal_audio_items_are_not_polled_again(self) -> None:
++        links = [
++            {
++                "system": "runninghub",
++                "relation": "digital_human_audio_batch",
++                "external_id": "failed-batch",
++            },
++            {
++                "system": "runninghub",
++                "relation": "digital_human_audio_item",
++                "external_id": "failed-item",
++                "item_id": "local-failed",
++                "metadata": {"batch_id": "failed-batch"},
++            },
++        ]
++
++        batches, items = _current_audio_links(links, active_item_ids=set())
++
++        self.assertEqual(batches, [])
++        self.assertEqual(items, {})
+*** End Patch

@@ -1,0 +1,13 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_audio_submission_recovery.py
+@@
+-    result = subprocess.run([sys.executable, '-c', script, str(database), stage],
+-                            capture_output=True, timeout=30)
++    child_environment = os.environ.copy()
++    source_root = str(Path(__file__).resolve().parents[1] / 'src')
++    child_environment['PYTHONPATH'] = os.pathsep.join(
++        value for value in (source_root, child_environment.get('PYTHONPATH', '')) if value
++    )
++    result = subprocess.run([sys.executable, '-c', script, str(database), stage],
++                            capture_output=True, timeout=30, env=child_environment)
+*** End Patch

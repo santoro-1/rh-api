@@ -1,0 +1,174 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_agent_runtime.py
++from contextlib import contextmanager
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from io import BytesIO
++from pathlib import Path
++import sys
++import threading
++from types import SimpleNamespace
++from urllib.error import HTTPError, URLError
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from jyd_probe import device_agent_transport as transport, render_agent
++from jyd_probe.device_agent_journal import AgentJournal
++from jyd_probe.device_auth_protocol import DeviceAuthorizationError
++
++
++@pytest.fixture
++def client(monkeypatch):
++    monkeypatch.setattr(transport, "requires_device_authorization", lambda: False)
++    return transport.AgentApiClient("http://127.0.0.1:8010", "central-test-password")
++
++
++@pytest.mark.parametrize("body", [b"not json secret", b'{"x":1,"x":2}', b'{"x":NaN}', b'[]'])
++def test_invalid_response_never_echoes_its_body(client, body):
++    client._opener = SimpleNamespace(open=lambda *a, **kw: BytesIO(body))
++    with pytest.raises(transport.AgentRequestError) as error:
++        client.post("/api/agents/processor-01/claim")
++    assert error.value.code == "INVALID_RESPONSE" and "secret" not in str(error.value)
++
++
++def test_bounded_response(client, monkeypatch):
++    monkeypatch.setattr(transport, "MAX_RESPONSE", 64)
++    client._opener = SimpleNamespace(open=lambda *a, **kw: BytesIO(b"x" * 65))
++    with pytest.raises(transport.AgentRequestError) as error:
++        client.post("/api/agents/processor-01/claim")
++    assert error.value.code == "RESPONSE_TOO_LARGE"
++
++
++@pytest.mark.parametrize("failure,code", [
++    (HTTPError("http://127.0.0.1", 403, "secret", {}, BytesIO(b'{"code":"DEVICE_PENDING","detail":"secret-token"}')), "DEVICE_PENDING"),
++    (URLError("secret-token"), "CONNECTION_UNCERTAIN"),
++])
++def test_transport_error_does_not_replay_or_disclose_body(client, failure, code):
++    calls = []
++    def opened(*a, **kw):
++        calls.append(1)
++        raise failure
++    client._opener = SimpleNamespace(open=opened)
++    with pytest.raises(transport.AgentRequestError) as error:
++        client.post("/api/agents/processor-01/claim")
++    assert error.value.code == code and "secret" not in str(error.value) and calls == [1]
++
++
++def test_real_loopback_redirect_is_never_followed(client):
++    paths = []
++    class Redirect(BaseHTTPRequestHandler):
++        def do_POST(self):
++            paths.append(self.path)
++            self.send_response(302)
++            self.send_header("Location", "/unexpected")
++            self.end_headers()
++        def do_GET(self):
++            paths.append(self.path)
++            self.send_response(200)
++            self.end_headers()
++        def log_message(self, *args):
++            pass
++    server = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
++    worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
++    worker.start()
++    try:
++        client.server_url = f"http://127.0.0.1:{server.server_port}"
++        with pytest.raises(transport.AgentRequestError) as error:
++            client.post("/api/agents/register", {"agent_id": "processor-01"})
++        assert error.value.code == "HTTP_302"
++        assert paths == ["/api/agents/register"]
++    finally:
++        server.shutdown()
++        server.server_close()
++        worker.join(timeout=2)
++
++
++def test_protected_client_cannot_be_constructed_without_authorizer(monkeypatch):
++    monkeypatch.setattr(transport, "requires_device_authorization", lambda: True)
++    with pytest.raises(DeviceAuthorizationError) as error:
++        transport.AgentApiClient("http://127.0.0.1:8010", "common-password")
++    assert error.value.code == "DEVICE_AGENT_PROTOCOL_REQUIRED"
++
++
++@pytest.mark.parametrize("challenge", [
++    {}, {"schema": "publicvideo.agent-challenge.v1", "nonce": "x" * 43, "expires_in": True},
++    {"schema": "publicvideo.agent-challenge.v1", "nonce": "x" * 43, "expires_in": 121},
++    {"schema": "publicvideo.agent-challenge.v1", "nonce": "short", "expires_in": 120},
++    {"schema": "wrong", "nonce": "x" * 43, "expires_in": 120},
++])
++def test_invalid_challenge_never_reaches_signer(client, challenge):
++    calls = []
++    client.agent_id = "processor-01"
++    client.authorizer = SimpleNamespace(headers=lambda *a: pytest.fail("untrusted challenge reached signer"))
++    def send(path, payload, extra_headers=None):
++        calls.append(path)
++        return challenge
++    client._send = send
++    with pytest.raises(transport.AgentRequestError) as error:
++        client.post("/api/agents/processor-01/claim")
++    assert error.value.code == "INVALID_CHALLENGE" and calls == [transport.CHALLENGE_PATH]
++
++
++def test_journal_retains_id_and_refuses_changed_input_or_second_execution(tmp_path):
++    journal = AgentJournal(tmp_path)
++    claim = {"job_id": "job-1", "payload": {"output": {"skip_export": True}}}
++    first = journal.prepare("http://central", "agent-1", 1, claim, claim["payload"])
++    again = AgentJournal(tmp_path).prepare("http://central", "agent-1", 1, claim, claim["payload"])
++    assert first["execution_id"] == again["execution_id"]
++    with pytest.raises(DeviceAuthorizationError):
++        journal.prepare("http://central", "agent-1", 1, claim, {"different": True})
++    journal.executing(first)
++    assert journal.has_unresolved_execution()
++    assert journal.pending("http://central", "agent-1", 2) == []
++    with pytest.raises(DeviceAuthorizationError):
++        journal.executing(first)
++    journal.save_result(first, action="complete", payload={"execution_id": first["execution_id"], "result": {"exported": True}})
++    assert not journal.has_unresolved_execution()
++    assert AgentJournal(tmp_path).pending("http://central", "agent-1", 1)[0]["result"] == first["result"]
++    journal.acknowledge(first)
++    assert journal.pending("http://central", "agent-1", 1) == []
++
++
++def test_agent_command_uses_separate_authority_and_verified_account(monkeypatch, tmp_path):
++    calls, session = [], SimpleNamespace(user_id=7)
++    @contextmanager
++    def command(args, *, server_url):
++        assert args.device_user == "test-user" and server_url == "https://authority.example"
++        calls.append("entered")
++        try:
++            yield session
++        finally:
++            calls.append("closed")
++    def api(server_url, token, **kwargs):
++        assert server_url == "http://127.0.0.1:8010" and token == "central-test"
++        assert kwargs["authorizer"].session is session and kwargs["agent_id"] == "processor-01-u7"
++        return object()
++    class Agent:
++        def __init__(self, client, **kwargs):
++            assert kwargs["agent_id"] == "processor-01-u7"
++        def run_forever(self, *, once):
++            assert once is True
++            calls.append("ran")
++            return 0
++    monkeypatch.setattr(render_agent, "command_authorization", command)
++    monkeypatch.setattr(render_agent, "AgentApiClient", api)
++    monkeypatch.setattr(render_agent, "RenderAgent", Agent)
++    monkeypatch.setattr(render_agent, "configure_file_logging", lambda *a: None)
++    monkeypatch.setattr(render_agent, "_agent_config_root", lambda: tmp_path)
++    result = render_agent.main(["--server-url", "http://127.0.0.1:8010", "--token", "central-test",
++                                "--agent-id", "processor-01", "--device-user", "test-user",
++                                "--device-auth-server-url", "https://authority.example", "--once"])
++    assert result == 0 and calls == ["entered", "ran", "closed"]
++
++
++def test_agent_command_failure_does_not_print_credentials(monkeypatch, tmp_path, capsys):
++    @contextmanager
++    def command(*a, **kw):
++        raise RuntimeError("secret website password")
++        yield
++    monkeypatch.setattr(render_agent, "command_authorization", command)
++    monkeypatch.setattr(render_agent, "configure_file_logging", lambda *a: None)
++    monkeypatch.setattr(render_agent, "_agent_config_root", lambda: tmp_path)
++    assert render_agent.main(["--once"]) == 1
++    assert "secret" not in capsys.readouterr().err
+*** End Patch

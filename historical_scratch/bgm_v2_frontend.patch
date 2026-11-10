@@ -1,0 +1,139 @@
+*** Begin Patch
+*** Update File: D:\工作内容\轻盈健\公寓\jyd_plain_json_probe\apps\processor\frontend\new\index.html
+@@
+         const previewBgmAudios = [new Audio(), new Audio()];
+         const previewBgmAudio = previewBgmAudios[0];
+         const PREVIEW_BGM_CROSSFADE_SECONDS = 0.2;
+-        let previewBgmBaseVolume = 0.18;
++        let previewBgmBaseVolume = 0.3162;
+         let previewBgmAnimationFrame = null;
++        let previewBgmAudioContext = null;
++        let previewBgmAudioSources = [];
++        let previewBgmGainNodes = [];
++        let previewBgmMasterCompressor = null;
+         previewBgmAudios.forEach((audio) => {
+             audio.preload = 'metadata';
+             audio.loop = false;
+             audio.volume = previewBgmBaseVolume;
+         });
+@@
+-        function stopPreviewBgm() {
++        async function ensurePreviewBgmAudioGraph() {
++            if (!previewBgmAudioContext) {
++                const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
++                if (!AudioContextConstructor) return false;
++                try {
++                    previewBgmAudioContext = new AudioContextConstructor();
++                    previewBgmMasterCompressor = previewBgmAudioContext.createDynamicsCompressor();
++                    previewBgmMasterCompressor.threshold.value = -3;
++                    previewBgmMasterCompressor.knee.value = 0;
++                    previewBgmMasterCompressor.ratio.value = 20;
++                    previewBgmMasterCompressor.attack.value = 0.003;
++                    previewBgmMasterCompressor.release.value = 0.1;
++                    previewBgmMasterCompressor.connect(previewBgmAudioContext.destination);
++                    previewBgmAudioSources = previewBgmAudios.map((audio, index) => {
++                        const source = previewBgmAudioContext.createMediaElementSource(audio);
++                        const gainNode = previewBgmAudioContext.createGain();
++                        gainNode.gain.value = 0;
++                        source.connect(gainNode);
++                        gainNode.connect(previewBgmMasterCompressor);
++                        previewBgmGainNodes[index] = gainNode;
++                        audio.volume = 1;
++                        return source;
++                    });
++                } catch (_) {
++                    previewBgmAudioContext = null;
++                    previewBgmAudioSources = [];
++                    previewBgmGainNodes = [];
++                    previewBgmMasterCompressor = null;
++                    return false;
++                }
++            }
++            if (previewBgmAudioContext.state === 'suspended') {
++                try { await previewBgmAudioContext.resume(); } catch (_) {}
++            }
++            return previewBgmGainNodes.length === previewBgmAudios.length;
++        }
++
++        function setPreviewBgmSlotGain(slot, value) {
++            const gain = Math.max(0, Math.min(2, Number(value) || 0));
++            const node = previewBgmGainNodes[slot];
++            if (node) {
++                node.gain.value = gain;
++                previewBgmAudios[slot].volume = 1;
++            } else {
++                previewBgmAudios[slot].volume = Math.min(1, gain);
++            }
++        }
++
++        function previewBgmFadeInSeconds(videoDuration) {
++            const savedFadeInUs = Number(
++                activePreviewScript()?.postprocessSettings?.bgm_loudness?.fade_in_us
++            );
++            if (Number.isFinite(savedFadeInUs) && savedFadeInUs >= 0) {
++                return Math.min(1.5, savedFadeInUs / 1_000_000);
++            }
++            return Math.min(1.5, Math.max(0, Number(videoDuration) || 0) * 0.1);
++        }
++
++        function stopPreviewBgm() {
+             if (previewBgmAnimationFrame !== null) {
+                 cancelAnimationFrame(previewBgmAnimationFrame);
+                 previewBgmAnimationFrame = null;
+             }
+-            previewBgmAudios.forEach((audio) => audio.pause());
++            previewBgmAudios.forEach((audio, slot) => {
++                audio.pause();
++                setPreviewBgmSlotGain(slot, 0);
++            });
+         }
+ 
+-        function buildBacktimedPreviewBgmPlan(videoDuration, audioDuration) {
++        function buildBacktimedPreviewBgmPlan(videoDuration, audioDuration, initialFadeIn = 0) {
+@@
+-                fadeIn: index > 0 ? Math.min(crossfade, entry.duration / 2) : 0,
++                fadeIn: index > 0
++                    ? Math.min(crossfade, entry.duration / 2)
++                    : Math.min(Math.max(0, initialFadeIn), entry.duration),
+@@
+-            const plan = buildBacktimedPreviewBgmPlan(video.duration, previewBgmAudio.duration);
++            const plan = buildBacktimedPreviewBgmPlan(
++                video.duration,
++                previewBgmAudio.duration,
++                previewBgmFadeInSeconds(video.duration)
++            );
+@@
+                 if (!entry) {
++                    setPreviewBgmSlotGain(slot, 0);
+                     audio.pause();
+                     return;
+@@
+-                audio.volume = Math.max(0, Math.min(1, previewBgmBaseVolume * gain));
++                setPreviewBgmSlotGain(slot, previewBgmBaseVolume * gain);
+@@
+         async function playPreviewBgm() {
+             if (!isBrowserCompositionPreview() || !previewBgmAudio.src) return;
++            await ensurePreviewBgmAudioGraph();
+             syncPreviewBgm(true);
+@@
+             const savedBgmVolume = Number(script?.postprocessSettings?.bgm_volume);
+             previewBgmBaseVolume = Number.isFinite(savedBgmVolume)
+-                ? Math.max(0, Math.min(1, savedBgmVolume))
+-                : 0.18;
+-            previewBgmAudios.forEach((audio) => {
+-                audio.volume = previewBgmBaseVolume;
++                ? Math.max(0, Math.min(2, savedBgmVolume))
++                : 0.3162;
++            previewBgmAudios.forEach((audio, slot) => {
++                setPreviewBgmSlotGain(slot, previewBgmBaseVolume);
+             });
+*** Update File: D:\工作内容\轻盈健\公寓\jyd_plain_json_probe\tests\test_new_frontend.py
+@@
+-        self.assertIn("previewBgmBaseVolume = 0.18", workspace)
++        self.assertIn("previewBgmBaseVolume = 0.3162", workspace)
+         self.assertIn("script?.postprocessSettings?.bgm_volume", workspace)
++        self.assertIn("script?.postprocessSettings?.bgm_loudness?.fade_in_us", workspace)
++        self.assertIn("createMediaElementSource", workspace)
++        self.assertIn("createDynamicsCompressor", workspace)
++        self.assertIn("Math.min(2, savedBgmVolume)", workspace)
+*** End Patch

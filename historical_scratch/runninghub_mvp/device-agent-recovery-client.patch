@@ -1,0 +1,246 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_recovery.py
++"""Explicit, original-account recovery. Never runs or reconstructs a render job."""
++from __future__ import annotations
++
++from copy import deepcopy
++import hashlib
++import os
++from pathlib import Path
++import stat
++import time
++from urllib.parse import quote
++import uuid
++
++from .device_agent_protocol import fail
++from .device_agent_transport import AgentRequestError
++from .device_auth_protocol import canonical_json, sha256_b64
++
++CLOSED_ERROR = "用户核实原执行已停止，结束原任务；保留现有输出，未自动重做"
++
++
++def _path(receipt, suffix):
++    return "/api/agents/" + quote(receipt["agent_id"], safe="-_.") + "/jobs/" + quote(receipt["job_id"], safe="-_.") + "/" + suffix
++
++
++def deliver_recovery(client, journal, receipt):
++    if receipt["phase"] != "recovery_pending" or receipt["result"].get("action") != "recovery/resolve":
++        fail("DEVICE_AGENT_RECEIPT_CONFLICT", "原核实回执格式无效", 409)
++    payload = receipt["result"]["payload"]
++    try:
++        response = client.post(_path(receipt, "recovery/resolve"), payload)
++    except AgentRequestError as exc:
++        if exc.code in {"DEVICE_AGENT_REVIEW_CHANGED", "DEVICE_AGENT_EXECUTION_ACTIVE"}:
++            # These definite central rejections occur before mutation. Lost replies
++            # are NOT in this list: keep and retry the same durable request instead.
++            journal.reject_recovery(receipt)
++        raise
++    if (response.get("job_id") != receipt["job_id"] or response.get("status") != payload["resolution"] or
++        not isinstance(response.get("agent_execution"), dict) or
++        response["agent_execution"].get("execution_id") != receipt["execution_id"] or
++        (payload["resolution"] == "completed" and response.get("result") != payload["result"]) or
++        (payload["resolution"] == "failed" and response.get("error") != payload["error"])):
++        fail("DEVICE_AGENT_RESULT_CONFLICT", "中央核实回执不一致，保留原确认等待处理", 409)
++    journal.acknowledge_recovery(receipt)
++    return {"job_id": receipt["job_id"], "status": payload["resolution"], "acknowledged": True}
++
++
++def _file_evidence(path):
++    # Do not follow links/reparse points out of the original output location.
++    for part in (path, *path.parents):
++        info = part.lstat()
++        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
++            fail("DEVICE_AGENT_OUTPUT_UNVERIFIED", "输出路径包含链接或重解析点，请人工核对", 409)
++    start = time.monotonic()
++    with path.open("rb") as stream:
++        before = os.fstat(stream.fileno())
++        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 16 * 1024**3:
++            fail("DEVICE_AGENT_OUTPUT_UNVERIFIED", "输出为空、非普通文件或过大，不能直接采用", 409)
++        digest = hashlib.sha256()
++        while chunk := stream.read(4 * 1024**2):
++            digest.update(chunk)
++            if time.monotonic() - start > 45:
++                fail("DEVICE_AGENT_OUTPUT_UNVERIFIED", "输出核对超时，未修改原任务", 409)
++        after = os.fstat(stream.fileno())
++    final = path.stat()
++    def identity(info):
++        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
++    if identity(before) != identity(after) or identity(after) != identity(final):
++        fail("DEVICE_AGENT_OUTPUT_CHANGED", "输出仍在变化，请确认剪映已停止后重新核对", 409)
++    return {"path": str(path), "bytes": after.st_size, "sha256": digest.hexdigest(), "mtime_ns": after.st_mtime_ns}
++
++
++def inspect_original_output(payload):
++    from .render_job import _value, _as_bool
++    def mapping(name):
++        value = payload.get(name, {})
++        return value if isinstance(value, dict) else {}
++    source, output, export = mapping("source"), mapping("output"), mapping("export")
++    kind = str(_value(source, "type", "kind", default=_value(payload, "source_kind", default="auto"))).replace("_", "-").lower()
++    if kind == "existing-draft":
++        directory = _value(source, "draft_dir", "template_dir", default="")
++        name = str(_value(source, "draft_name", default=Path(str(directory)).name)).strip()
++        skip_export = False
++    else:
++        root = _value(output, "draft_root", "output_root", default=_value(payload, "draft_root", "output_root", default=""))
++        name = str(_value(output, "draft_name", "output_name", default=_value(payload, "draft_name", "output_name", default=""))).strip()
++        if not root or not name or name in {".", ".."} or any(c in name for c in '/\\:'):
++            fail("DEVICE_AGENT_OUTPUT_UNVERIFIED", "原任务没有固定草稿路径，不能猜测采用其他输出", 409)
++        directory = str(Path(str(root)).expanduser() / name)
++        skip_export = _as_bool(_value(output, "skip_export", default=_value(payload, "skip_export", default=_value(export, "skip_export", default=False))))
++    if not directory or not Path(str(directory)).expanduser().is_absolute():
++        fail("DEVICE_AGENT_OUTPUT_UNVERIFIED", "原草稿路径不是固定绝对路径，不能按新工作目录猜测", 409)
++    draft = Path(os.path.abspath(Path(str(directory)).expanduser()))
++    draft_evidence = _file_evidence(draft / "draft_content.json")
++    mp4 = ""
++    evidence = [draft_evidence]
++    if not skip_export:
++        raw_mp4 = _value(output, "mp4_path", "output_mp4", "output_path", default=_value(payload, "output_mp4", "output_path", default=""))
++        if not raw_mp4 or not Path(str(raw_mp4)).expanduser().is_absolute():
++            fail("DEVICE_AGENT_OUTPUT_UNVERIFIED", "原任务没有固定成片路径，不能采用其他文件", 409)
++        video = Path(os.path.abspath(Path(str(raw_mp4)).expanduser()))
++        video_evidence = _file_evidence(video)
++        with video.open("rb") as stream:
++            header = stream.read(12)
++        if video.suffix.lower() != ".mp4" or len(header) < 12 or header[4:8] != b"ftyp":
++            fail("DEVICE_AGENT_OUTPUT_UNVERIFIED", "原成片不是可识别的 MP4 文件，请人工核对", 409)
++        evidence.append(video_evidence)
++        mp4 = str(video)
++    return {"result": {"output_draft_dir": str(draft), "output_draft_name": name,
++                        "output_mp4": mp4, "exported": not skip_export,
++                        "manual_recovery": {"schema": "publicvideo.agent-output-review.v1", "files": evidence}},
++            "evidence": evidence}
++
++
++class AgentRecoveryController:
++    def __init__(self, agent, session, journal):
++        self.agent, self.session, self.journal = agent, session, journal
++        self._reviews = {}
++
++    def _pending(self):
++        return self.journal.pending(self.agent.client.server_url, self.agent.agent_id, self.session.user_id)
++
++    def records(self):
++        with self.journal.single_process():
++            return [{key: row[key] for key in ("job_id", "execution_id", "phase", "updated_at")} for row in self._pending()]
++
++    def prepare(self, job_id):
++        with self.journal.single_process():
++            rows = [row for row in self._pending() if row["job_id"] == job_id]
++            if len(rows) != 1 or rows[0]["phase"] != "executing":
++                fail("DEVICE_AGENT_REVIEW_CHANGED", "原任务不是待核实执行状态，请刷新列表", 409)
++            receipt = rows[0]
++            view = self.agent.client.post(_path(receipt, "recovery/prepare"), {
++                "execution_id": receipt["execution_id"],
++                "payload_hash": sha256_b64(canonical_json(receipt["claim"]["payload"])),
++            })
++            if (view.get("schema") != "publicvideo.agent-recovery.v1" or view.get("job_id") != job_id or
++                view.get("execution_id") != receipt["execution_id"] or
++                view.get("payload_hash") != sha256_b64(canonical_json(receipt["claim"]["payload"]))):
++                fail("DEVICE_AGENT_RECEIPT_CONFLICT", "中央核实记录与原任务不一致", 409)
++            candidate, output_error = None, ""
++            if view.get("can_resolve") is True:
++                try:
++                    candidate = inspect_original_output(receipt["payload"])
++                except (OSError, ValueError) as exc:
++                    output_error = type(exc).__name__
++                except Exception as exc:
++                    output_error = getattr(exc, "code", type(exc).__name__)
++            review_id = uuid.uuid4().hex
++            self._reviews.clear()  # Only the currently displayed review is confirmable.
++            self._reviews[review_id] = (deepcopy(receipt), deepcopy(view), deepcopy(candidate))
++            return {"review_id": review_id, "job_id": job_id, "execution_id": receipt["execution_id"],
++                    "status": view["status"], "can_resolve": view.get("can_resolve") is True,
++                    "candidate": deepcopy(candidate), "output_error": output_error,
++                    "notice": "仅核对原指定路径和文件摘要，不保证画面/音频完整；采用前必须人工查看。不会重新渲染。"}
++
++    def resolve(self, review_id, choice, *, confirm_stopped, confirm_reviewed):
++        if confirm_stopped is not True or confirm_reviewed is not True:
++            fail("INVALID_AGENT_RECOVERY", "必须确认原执行已停止并已核实本次结论", 422)
++        if review_id not in self._reviews:
++            fail("DEVICE_AGENT_REVIEW_CHANGED", "请重新查看待核实任务", 409)
++        receipt, view, candidate = self._reviews[review_id]
++        with self.journal.single_process():
++            if choice == "sync" and view["status"] in {"completed", "failed"}:
++                resolution, result, error = view["status"], view.get("result"), view.get("error", "")
++            elif view["status"] == "running" and view.get("can_resolve") is True:
++                if choice == "accept-output" and candidate is not None:
++                    if inspect_original_output(receipt["payload"]) != candidate:
++                        fail("DEVICE_AGENT_OUTPUT_CHANGED", "查看后输出发生变化，请重新核对", 409)
++                    resolution, result, error = "completed", candidate["result"], ""
++                elif choice == "close":
++                    resolution, result, error = "failed", None, CLOSED_ERROR
++                else:
++                    fail("INVALID_AGENT_RECOVERY", "此任务没有可采用的原输出，请核对后选择结论", 422)
++            else:
++                fail("DEVICE_AGENT_EXECUTION_ACTIVE", "任务仍有有效租约或状态不允许核实，请稍后重新查看", 409)
++            request = {"execution_id": receipt["execution_id"], "review_hash": view["review_hash"],
++                       "request_id": uuid.uuid4().hex, "resolution": resolution, "result": result,
++                       "error": error, "confirm_stopped": True, "confirm_reviewed": True}
++            self.journal.begin_recovery(receipt, request)
++            self._reviews.clear()
++            return deliver_recovery(self.agent.client, self.journal, receipt)
++
++    def retry_reports(self):
++        from .device_agent_runtime import AuthorizedAgentRunner
++        with self.journal.single_process():
++            runner = AuthorizedAgentRunner(self.agent, self.session, self.journal, None)
++            count = 0
++            for receipt in self._pending():
++                if receipt["phase"] == "recovery_pending":
++                    deliver_recovery(self.agent.client, self.journal, receipt)
++                elif receipt["phase"] == "report_pending":
++                    runner._report(receipt)
++                else:
++                    continue
++                count += 1
++            return count
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_journal.py
+@@
+     def acknowledge_recovery(self, receipt):
+@@
+         receipt["phase"] = "acknowledged"
++
++    def reject_recovery(self, receipt):
++        with self._connect() as connection:
++            cursor = connection.execute("UPDATE receipts SET phase='executing',result_json=NULL,updated_at=? WHERE receipt_id=? AND phase='recovery_pending' AND result_json=?",
++                (int(time.time()), receipt["receipt_id"], canonical_json(receipt["result"])))
++            if cursor.rowcount != 1:
++                fail("DEVICE_AGENT_RECEIPT_CONFLICT", "原核实回执状态已改变", 409)
++        receipt.update(phase="executing", result=None)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+         authorization=None,
+         execution_id=None,
++        recovery=None,
+     ) -> dict[str, Any]:
+@@
+                            "metadata_expires_at": _expiry_after(self.settings.metadata_retention_days * 24)},
++                recovery=recovery,
+             )
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_routes.py
+@@
+-    @app.post("/api/agents/{agent_id}/jobs/{job_id}/heartbeat")
+-    def job_heartbeat(
+-        agent_id: str, job_id: str, request: Request, payload: dict[str, Any] = Body(default={})
+-    ):
+-        return job_heartbeat_impl(agent_id, job_id, request, payload)
+-
+@@
+-        result, changed = operations.report_job(queue.store, agent_id, job_id, payload["execution_id"],
+-            authorized, action="complete" if payload["resolution"] == "completed" else "fail",
+-            payload=payload, recovery=payload)
+-        sync_authorization_status(settings.storage_root / "jobs" / job_id / "status.json",
+-                                  queue.store.get_status(job_id))
++        result = queue.finish_agent_job(agent_id, job_id, result=payload["result"], error=payload["error"],
++                                        authorization=authorized, execution_id=payload["execution_id"], recovery=payload)
+         return response(result)
+ 
+-    def job_heartbeat_impl(
++    @app.post("/api/agents/{agent_id}/jobs/{job_id}/heartbeat")
++    def job_heartbeat(
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_operations.py
+@@
+-        recovery["resolution"] not in {"completed", "failed"} or
++        not isinstance(recovery["resolution"], str) or recovery["resolution"] not in {"completed", "failed"} or
+*** End Patch

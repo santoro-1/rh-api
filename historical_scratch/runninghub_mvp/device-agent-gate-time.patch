@@ -1,0 +1,39 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_gate.py
+@@
+-from .device_agent_protocol import (
+-    AgentDecision, agent_id_value, fail, verify_agent_permit, verify_agent_request_proof,
+-)
++from .device_agent_protocol import fail, verify_agent_permit, verify_agent_request_proof
+@@
+-    def __init__(self, store, authority_url, *, trust_resolver=bundled_trust, clock=time.time):
++    def __init__(self, store, authority_url, *, trust_resolver=bundled_trust, clock=time.time,
++                 monotonic_clock=time.monotonic):
+@@
+         self.trust_resolver, self.clock = trust_resolver, clock
++        self.monotonic_clock = monotonic_clock
++        self._anchor_wall, self._anchor_mono = clock(), monotonic_clock()
+@@
+             db.execute("CREATE INDEX IF NOT EXISTS idx_device_agent_challenge_expiry ON device_agent_challenges(expires_at)")
++            # Challenges belong to one central process lifetime. After restart,
++            # require a new nonce/online permit instead of trusting old wall time.
++            db.execute("UPDATE device_agent_challenges SET consumed=1 WHERE consumed=0")
++
++    def _now(self):
++        wall, elapsed = self.clock(), self.monotonic_clock() - self._anchor_mono
++        if elapsed < 0 or abs(wall - self._anchor_wall - elapsed) > 5:
++            fail("DEVICE_AGENT_CLOCK_ERROR", "中央服务时间发生异常，请校准后重启服务", 409)
++        return int(wall)
+@@
+-        now = int(self.clock())
++        now = self._now()
+@@
+-        now = int(self.clock())
++        now = self._now()
+@@
+         verify_agent_request_proof(permit, proof, context, decision, now=now)
+         with self.store._transaction() as db:
++            now = self._now()
++            if decision.expires_at <= now:
++                fail("AGENT_PERMIT_EXPIRED", "处理机许可已过期，请重新验证", 409)
+*** End Patch

@@ -1,0 +1,191 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_identity_windows.py
++from __future__ import annotations
++
++import ctypes
++import hashlib
++from pathlib import Path
++import struct
++import sys
++import unittest
++from unittest.mock import Mock
++
++from cryptography.hazmat.primitives import hashes
++from cryptography.hazmat.primitives.asymmetric import ec, utils
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(PROJECT_ROOT / "src"))
++
++from jyd_probe.device_identity_windows import (
++    ALLOW_SIGNING, ECDSA_P256_PUBLIC_MAGIC, KEY_NAME, MACHINE_KEY,
++    NTE_BAD_KEYSET, NTE_EXISTS, SILENT, DeviceIdentityError,
++    NativeCngApi, WindowsDeviceIdentity, _KeyAlreadyExists, public_jwk_from_blob,
++)
++
++
++class FakeApi:
++    """Ephemeral test keys only; never calls Windows or stores a private key."""
++
++    def __init__(self):
++        self.key = None
++        self.created = 0
++        self.freed = []
++        self.open_error = None
++        self.race = False
++        self.properties = {"Key Type": MACHINE_KEY, "Export Policy": 0,
++                           "Key Usage": ALLOW_SIGNING, "Impl Type": 1}
++        self.providers = []
++
++    def open_provider(self, protection):
++        self.providers.append(protection)
++        return 1
++
++    def open_key(self, provider):
++        if self.open_error:
++            raise self.open_error
++        return 2 if self.key else None
++
++    def create_key(self, provider, operator_sid):
++        self.created += 1
++        assert self.key is None, "existing key must never be replaced"
++        self.key = ec.generate_private_key(ec.SECP256R1())
++        if self.race:
++            raise _KeyAlreadyExists()
++        return 2
++
++    def property_dword(self, handle, name):
++        return self.properties[name]
++
++    def public_blob(self, key):
++        numbers = self.key.public_key().public_numbers()
++        return struct.pack("<II", ECDSA_P256_PUBLIC_MAGIC, 32) + numbers.x.to_bytes(32, "big") + numbers.y.to_bytes(32, "big")
++
++    def sign_hash(self, key, digest):
++        signature = self.key.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
++        r, s = utils.decode_dss_signature(signature)
++        return r.to_bytes(32, "big") + s.to_bytes(32, "big")
++
++    def free(self, handle):
++        self.freed.append(handle)
++
++
++class DeviceIdentityTest(unittest.TestCase):
++    def test_normal_start_does_not_create_any_key(self):
++        api = FakeApi()
++        self.assertIsNone(WindowsDeviceIdentity(api=api).open_existing())
++        self.assertEqual(api.created, 0)
++        self.assertEqual(api.freed, [1])
++
++    def test_fixed_identity_survives_new_instances_and_cache_absence(self):
++        api = FakeApi()
++        with WindowsDeviceIdentity(api=api).initialize_for_activation() as key:
++            original = key.thumbprint
++        for _ in range(4):
++            # No path, build version or cache file participates in identity.
++            with WindowsDeviceIdentity(api=api).open_existing() as key:
++                self.assertEqual(key.thumbprint, original)
++        self.assertEqual(api.created, 1)
++        self.assertEqual(KEY_NAME, "PublicVideoWorkbench.DeviceIdentity")
++
++    def test_repeat_activation_opens_existing_key(self):
++        api = FakeApi()
++        with WindowsDeviceIdentity(api=api).initialize_for_activation() as key:
++            original = key.thumbprint
++        with WindowsDeviceIdentity(api=api).initialize_for_activation() as key:
++            self.assertEqual(key.thumbprint, original)
++        self.assertEqual(api.created, 1)
++
++    def test_concurrent_create_exists_reopens_without_overwrite(self):
++        api = FakeApi()
++        api.race = True
++        with WindowsDeviceIdentity(api=api).initialize_for_activation() as key:
++            self.assertEqual(len(key.thumbprint), 43)
++        self.assertEqual(api.created, 1)
++
++    def test_access_denied_and_tpm_errors_never_create_or_fallback(self):
++        for code in ("KEY_ACCESS_DENIED", "KEY_UNAVAILABLE"):
++            api = FakeApi()
++            api.open_error = DeviceIdentityError(code, "test failure")
++            with self.assertRaises(DeviceIdentityError) as error:
++                WindowsDeviceIdentity(api=api).initialize_for_activation()
++            self.assertEqual(error.exception.code, code)
++            self.assertEqual(api.created, 0)
++            self.assertEqual(api.providers, ["tpm"])
++
++    def test_software_initialization_requires_explicit_permission(self):
++        api = FakeApi()
++        identity = WindowsDeviceIdentity(api=api, protection="software")
++        with self.assertRaises(DeviceIdentityError) as error:
++            identity.initialize_for_activation()
++        self.assertEqual(error.exception.code, "SOFTWARE_APPROVAL_REQUIRED")
++        self.assertEqual(api.created, 0)
++        with identity.initialize_for_activation(software_approved=True) as key:
++            self.assertEqual(key.protection, "software")
++
++    def test_unsafe_key_policies_are_rejected_without_replacing_key(self):
++        for property_name, bad_value in (("Key Type", 0), ("Export Policy", 1),
++                                         ("Key Usage", 0xFFFFFF), ("Impl Type", 2)):
++            api = FakeApi()
++            api.key = ec.generate_private_key(ec.SECP256R1())
++            api.properties[property_name] = bad_value
++            with self.assertRaises(DeviceIdentityError):
++                WindowsDeviceIdentity(api=api).initialize_for_activation()
++            self.assertEqual(api.created, 0)
++            self.assertEqual(api.freed, [2, 1])
++
++    def test_jose_signature_is_verified_by_independent_crypto_library(self):
++        api = FakeApi()
++        with WindowsDeviceIdentity(api=api).initialize_for_activation() as key:
++            message = b"encoded-header.encoded-payload"
++            signature = key.sign(message)
++            encoded = utils.encode_dss_signature(int.from_bytes(signature[:32], "big"), int.from_bytes(signature[32:], "big"))
++            api.key.public_key().verify(encoded, message, ec.ECDSA(hashes.SHA256()))
++        with self.assertRaises(DeviceIdentityError):
++            key.sign(message)
++
++    def test_public_blob_has_fixed_width_and_rejects_private_or_wrong_curve(self):
++        blob = struct.pack("<II", ECDSA_P256_PUBLIC_MAGIC, 32) + b"\x00" * 64
++        public = public_jwk_from_blob(blob)
++        self.assertEqual(len(public["x"]), 43)
++        self.assertEqual(len(public["y"]), 43)
++        for bad in (blob + b"private-data", b"", struct.pack("<II", 0, 32) + blob[8:]):
++            with self.assertRaises(DeviceIdentityError):
++                public_jwk_from_blob(bad)
++
++    def test_native_open_uses_machine_scope_and_checks_ambiguous_absence(self):
++        api = NativeCngApi.__new__(NativeCngApi)
++        api._ncrypt = Mock()
++        api._ncrypt.NCryptOpenKey.return_value = NTE_BAD_KEYSET
++        api._name_exists = Mock(return_value=False)
++        self.assertIsNone(api.open_key(12))
++        arguments = api._ncrypt.NCryptOpenKey.call_args.args
++        self.assertEqual(arguments[2], KEY_NAME)
++        self.assertEqual(arguments[4], MACHINE_KEY | SILENT)
++        api._name_exists.return_value = True
++        with self.assertRaises(DeviceIdentityError) as error:
++            api.open_key(12)
++        self.assertEqual(error.exception.code, "KEY_UNAVAILABLE")
++
++    def test_native_create_never_overwrites_and_rejects_broad_acl(self):
++        api = NativeCngApi.__new__(NativeCngApi)
++        api._ncrypt = Mock()
++        api._ncrypt.NCryptCreatePersistedKey.return_value = NTE_EXISTS
++        with self.assertRaises(_KeyAlreadyExists):
++            api.create_key(12, "S-1-5-21-1-2-3-1001")
++        args = api._ncrypt.NCryptCreatePersistedKey.call_args.args
++        self.assertEqual(args[3], KEY_NAME)
++        self.assertEqual(args[5], MACHINE_KEY)
++        for sid in ("S-1-1-0", "S-1-5-11", "S-1-5-32-545", "malformed"):
++            with self.assertRaises(DeviceIdentityError):
++                api._set_initial_acl(12, sid)
++
++    def test_native_status_unsigned_mapping_does_not_treat_permission_as_missing(self):
++        with self.assertRaises(DeviceIdentityError) as error:
++            NativeCngApi._check(ctypes.c_int32(0x80090010).value)
++        self.assertEqual(error.exception.code, "KEY_ACCESS_DENIED")
++        self.assertEqual(error.exception.native_status, 0x80090010)
++
++
++if __name__ == "__main__":
++    unittest.main()
+*** End Patch

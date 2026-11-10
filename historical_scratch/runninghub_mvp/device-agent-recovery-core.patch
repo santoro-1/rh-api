@@ -1,0 +1,170 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_protocol.py
+@@
+-            + r"/jobs/[A-Za-z0-9_.-]{1,128}/(?:heartbeat|complete|fail)",
++            + r"/jobs/[A-Za-z0-9_.-]{1,128}/(?:heartbeat|complete|fail|recovery/prepare|recovery/resolve)",
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_operations.py
+@@
+ def report_job(
+@@
+     retention=None,
++    recovery=None,
+ ):
+@@
+         elif (
+             not isinstance(execution, dict)
+             or execution.get("execution_id") != execution_id
+         ):
+             fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "报告与原执行回执不一致", 409)
++        recovery_record = None
++        if recovery is not None:
++            recovery_record = _validate_recovery(row, status, execution_id, recovery)
++            old_recovery = status.get("agent_manual_recovery")
++            if isinstance(old_recovery, dict) and old_recovery.get("request_id") == recovery_record["request_id"]:
++                if old_recovery.get("request_hash") != recovery_record["request_hash"]:
++                    fail("DEVICE_AGENT_RESULT_CONFLICT", "同一核实请求不能改为另一结论", 409)
++                return status, False
++            current = _recovery_view(row, status, execution_id)
++            if current["review_hash"] != recovery["review_hash"]:
++                fail("DEVICE_AGENT_REVIEW_CHANGED", "原任务状态已经改变，请重新核实", 409)
++            if row["status"] == "running" and not current["can_resolve"]:
++                fail("DEVICE_AGENT_EXECUTION_ACTIVE", "原任务仍有有效执行租约，请确认停止后等待租约结束", 409)
+         if row["status"] in {"completed", "failed"}:
+@@
+         status.pop("recovery_reason", None)
++        if recovery_record is not None:
++            status["agent_manual_recovery"] = {**recovery_record, "resolved_at": now}
+         if result is not None:
+@@
+     return status, True
++
++
++def _recovery_view(row, status, execution_id):
++    execution = status.get("agent_execution")
++    if not isinstance(execution, dict) or execution.get("execution_id") != execution_id:
++        fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "中央记录与本机原执行编号不一致", 409)
++    view = {
++        "schema": "publicvideo.agent-recovery.v1",
++        "job_id": row["job_id"], "execution_id": execution_id,
++        "status": row["status"], "payload_hash": sha256_b64(canonical_json(_object(row["payload_json"], {}))),
++        "lease_expires_at": row["lease_expires_at"], "heartbeat_at": row["heartbeat_at"],
++        "cancel_requested": bool(row["cancel_requested"]),
++        "result": _object(row["result_json"], None), "error": row["error"] or "",
++        "report_hash": status.get("agent_report_hash"),
++    }
++    digest = sha256_b64(canonical_json(view))
++    view.update(review_hash=digest, can_resolve=(row["status"] == "running" and
++                (not row["lease_expires_at"] or row["lease_expires_at"] <= _now())))
++    return view
++
++
++def prepare_recovery(store, agent_id, job_id, execution_id, payload_hash, decision):
++    execution_id_value(execution_id)
++    with store._transaction() as connection:
++        require_decision(decision, "report")
++        row, status = _assigned(connection, agent_id, job_id, decision)
++        view = _recovery_view(row, status, execution_id)
++        if view["payload_hash"] != payload_hash:
++            fail("DEVICE_AGENT_RECEIPT_CONFLICT", "本机原任务输入与中央记录不一致", 409)
++        return view
++
++
++def _validate_recovery(row, status, execution_id, recovery):
++    if not isinstance(recovery, dict) or set(recovery) != {
++        "execution_id", "review_hash", "request_id", "resolution", "result", "error",
++        "confirm_stopped", "confirm_reviewed",
++    }:
++        fail("INVALID_AGENT_RECOVERY", "核实参数无效", 422)
++    execution_id_value(recovery["request_id"])
++    if (recovery["execution_id"] != execution_id or
++        recovery["confirm_stopped"] is not True or recovery["confirm_reviewed"] is not True or
++        not isinstance(recovery["review_hash"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", recovery["review_hash"]) or
++        recovery["resolution"] not in {"completed", "failed"} or
++        not isinstance(recovery["error"], str) or len(recovery["error"]) > 1000 or
++        (recovery["resolution"] == "completed" and (not isinstance(recovery["result"], dict) or recovery["error"])) or
++        (recovery["resolution"] == "failed" and (recovery["result"] is not None or not recovery["error"]))):
++        fail("INVALID_AGENT_RECOVERY", "请明确确认原执行已经停止并核实原结果", 422)
++    return {"schema": "publicvideo.agent-recovery.v1", "request_id": recovery["request_id"],
++            "request_hash": sha256_b64(canonical_json(recovery)), "resolution": recovery["resolution"],
++            "review_hash": recovery["review_hash"], "confirmed_stopped": True,
++            "confirmed_reviewed": True}
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_routes.py
+@@
+     @app.post("/api/agents/{agent_id}/jobs/{job_id}/heartbeat")
++    def job_heartbeat(
++        agent_id: str, job_id: str, request: Request, payload: dict[str, Any] = Body(default={})
++    ):
++        return job_heartbeat_impl(agent_id, job_id, request, payload)
++
++    @app.post("/api/agents/{agent_id}/jobs/{job_id}/recovery/prepare")
++    def recovery_prepare(agent_id: str, job_id: str, request: Request, payload: dict[str, Any] = Body(...)):
++        authorized = decision(request, agent_id, payload)
++        if authorized is None or set(payload) != {"execution_id", "payload_hash"}:
++            fail("INVALID_AGENT_RECOVERY", "核实需要原账号与原执行机的完整证明", 409)
++        return response(operations.prepare_recovery(queue.store, agent_id, job_id,
++                         payload["execution_id"], payload["payload_hash"], authorized))
++
++    @app.post("/api/agents/{agent_id}/jobs/{job_id}/recovery/resolve")
++    def recovery_resolve(agent_id: str, job_id: str, request: Request, payload: dict[str, Any] = Body(...)):
++        authorized = decision(request, agent_id, payload)
++        if authorized is None:
++            fail("DEVICE_AGENT_PROTOCOL_REQUIRED", "核实需要原执行机授权", 409)
++        # Validate before any report mutation, including before interpreting result/error.
++        operations._validate_recovery(None, None, payload.get("execution_id"), payload)
++        result, changed = operations.report_job(queue.store, agent_id, job_id, payload["execution_id"],
++            authorized, action="complete" if payload["resolution"] == "completed" else "fail",
++            payload=payload, recovery=payload)
++        sync_authorization_status(settings.storage_root / "jobs" / job_id / "status.json",
++                                  queue.store.get_status(job_id))
++        return response(result)
++
+-    def job_heartbeat(
++    def job_heartbeat_impl(
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_journal.py
+@@
+             connection.execute(
+                 "CREATE TABLE IF NOT EXISTS receipts(receipt_id TEXT PRIMARY KEY,central TEXT NOT NULL,"
+@@
+                 "phase TEXT NOT NULL,claim_json TEXT NOT NULL,payload_json TEXT NOT NULL,result_json TEXT,updated_at INTEGER NOT NULL)"
+             )
++            connection.execute("CREATE TABLE IF NOT EXISTS recovery_audit(request_id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL,request_json TEXT NOT NULL,created_at INTEGER NOT NULL,acknowledged_at INTEGER)")
+@@
+-                    "SELECT 1 FROM receipts WHERE phase='executing' LIMIT 1"
++                    "SELECT 1 FROM receipts WHERE phase IN ('executing','recovery_pending') LIMIT 1"
+@@
+     def acknowledge(self, receipt):
+@@
+         receipt["phase"] = "acknowledged"
++
++    def begin_recovery(self, receipt, payload):
++        encoded = canonical_json({"action": "recovery/resolve", "payload": payload})
++        with self._connect() as connection:
++            connection.execute("BEGIN IMMEDIATE")
++            row = connection.execute("SELECT * FROM receipts WHERE receipt_id=?", (receipt["receipt_id"],)).fetchone()
++            if (row is None or row["phase"] != "executing" or row["execution_id"] != payload["execution_id"] or
++                self._record(row) != receipt):
++                fail("DEVICE_AGENT_REVIEW_CHANGED", "本机原回执已改变，请重新核实", 409)
++            connection.execute("INSERT INTO recovery_audit VALUES(?,?,?,?,NULL)",
++                               (payload["request_id"], receipt["receipt_id"], canonical_json(payload), int(time.time())))
++            connection.execute("UPDATE receipts SET phase='recovery_pending',result_json=?,updated_at=? WHERE receipt_id=?",
++                               (encoded, int(time.time()), receipt["receipt_id"]))
++        receipt.update(phase="recovery_pending", result=strict_json(encoded))
++
++    def acknowledge_recovery(self, receipt):
++        with self._connect() as connection:
++            connection.execute("BEGIN IMMEDIATE")
++            cursor = connection.execute("UPDATE receipts SET phase='acknowledged',updated_at=? WHERE receipt_id=? AND phase='recovery_pending' AND execution_id=? AND result_json=?",
++                (int(time.time()), receipt["receipt_id"], receipt["execution_id"], canonical_json(receipt["result"])))
++            if cursor.rowcount != 1:
++                fail("DEVICE_AGENT_RECEIPT_CONFLICT", "核实回执已改变，未清除原记录", 409)
++            connection.execute("UPDATE recovery_audit SET acknowledged_at=? WHERE request_id=? AND receipt_id=?",
++                (int(time.time()), receipt["result"]["payload"]["request_id"], receipt["receipt_id"]))
++        receipt["phase"] = "acknowledged"
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_runtime.py
+@@
+-                        if receipt["phase"] == "report_pending":
++                        if receipt["phase"] == "recovery_pending":
++                            from .device_agent_recovery import deliver_recovery
++                            deliver_recovery(self.agent.client, self.journal, receipt)
++                        elif receipt["phase"] == "report_pending":
+*** End Patch

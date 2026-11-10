@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>公域闪剪视频 - 身份安全登录</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+    <!-- Locally bundled UI styles: login must not depend on public CDNs. -->
+    <link rel="stylesheet" href="/app-static/new/tailwind.generated.css">
+    <link rel="stylesheet" href="/app-static/new/vendor/fontawesome/css/all.min.css">
+    <script src="/app-static/workbench-runtime.js" defer></script>
+    <style>
+        body {
+            background-color: #030408;
+            height: 100vh;
+            color: #f3f4f6;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        /* Ambient Fluid Background Orbs */
+        .ambient-orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(100px);
+            opacity: 0.35;
+            z-index: -10;
+            pointer-events: none;
+            mix-blend-mode: screen;
+        }
+        .orb-indigo {
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, #6366f1 0%, transparent 70%);
+            top: -10%;
+            left: 10%;
+            animation: float-orb-1 25s infinite ease-in-out;
+        }
+        .orb-purple {
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, #a855f7 0%, transparent 75%);
+            bottom: -15%;
+            right: 5%;
+            animation: float-orb-2 30s infinite ease-in-out alternate;
+        }
+        .orb-cyan {
+            width: 450px;
+            height: 450px;
+            background: radial-gradient(circle, #06b6d4 0%, transparent 70%);
+            top: 40%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation: float-orb-3 20s infinite linear;
+        }
+
+        @keyframes float-orb-1 {
+            0% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(50px, 80px) scale(1.1); }
+            66% { transform: translate(-30px, 40px) scale(0.95); }
+            100% { transform: translate(0, 0) scale(1); }
+        }
+        @keyframes float-orb-2 {
+            0% { transform: translate(0, 0) rotate(0deg); }
+            50% { transform: translate(-80px, -50px) rotate(180deg) scale(1.15); }
+            100% { transform: translate(0, 0) rotate(360deg); }
+        }
+        @keyframes float-orb-3 {
+            0% { transform: translate(-50%, -50%) rotate(0deg) translate(80px) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg) translate(80px) rotate(-360deg); }
+        }
+
+        /* Glassmorphism card config */
+        .glass-card {
+            background: rgba(10, 15, 30, 0.45);
+            backdrop-filter: blur(25px);
+            -webkit-backdrop-filter: blur(25px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 30px 70px rgba(0, 0, 0, 0.5);
+            position: relative;
+            z-index: 10;
+        }
+
+        /* Floating Glowing Border effect (Dynamic stream border) */
+        .stream-border {
+            position: relative;
+            border-radius: 28px;
+            overflow: hidden;
+            padding: 1.5px; /* Border thickness */
+        }
+        .stream-border::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: conic-gradient(
+                from 0deg,
+                transparent 15%,
+                #6366f1 30%,
+                #06b6d4 45%,
+                transparent 55%,
+                #a855f7 70%,
+                #6366f1 85%,
+                transparent 100%
+            );
+            animation: rotate-stream 6s linear infinite;
+            z-index: 1;
+        }
+        .stream-inner {
+            position: relative;
+            border-radius: 27px;
+            background: rgba(8, 10, 20, 0.88);
+            z-index: 2;
+        }
+
+        @keyframes rotate-stream {
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Sweeping glossy light shine on buttons */
+        .btn-shine {
+            position: relative;
+            overflow: hidden;
+        }
+        .btn-shine::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -150%;
+            width: 50%;
+            height: 100%;
+            background: linear-gradient(
+                to right,
+                rgba(255, 255, 255, 0) 0%,
+                rgba(255, 255, 255, 0.4) 50%,
+                rgba(255, 255, 255, 0) 100%
+            );
+            transform: skewX(-25deg);
+            transition: 0.75s;
+        }
+        .btn-shine:hover::before {
+            left: 150%;
+            transition: 0.75s;
+        }
+        /* Continuous pulse sweep for buttons */
+        .btn-shine-auto::before {
+            animation: shine-sweep 4s infinite ease-in-out;
+        }
+        @keyframes shine-sweep {
+            0% { left: -150%; }
+            50%, 100% { left: 150%; }
+        }
+
+        /* Inputs customized focus aura */
+        .custom-input {
+            transition: all 0.3s ease;
+        }
+        .custom-input:focus {
+            border-color: #6366f1;
+            box-shadow: 0 0 18px rgba(99, 102, 241, 0.35);
+            background: rgba(4, 5, 10, 0.95);
+        }
+        
+        .glow-hover:hover {
+            text-shadow: 0 0 15px rgba(6, 182, 212, 0.8);
+        }
+
+        /* QR scanning lines */
+        .scan-line {
+            animation: scan 2.5s ease-in-out infinite alternate;
+            background: linear-gradient(to right, transparent, #06b6d4, transparent);
+            box-shadow: 0 0 10px #06b6d4;
+        }
+        @keyframes scan {
+            0% { top: 2%; }
+            100% { top: 98%; }
+        }
+
+        .page-fade-in {
+            animation: fadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.97) translateY(12px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+    </style>
+</head>
+<body class="font-sans antialiased h-screen overflow-hidden flex flex-col justify-center items-center">
+    <!-- Ambient Fluid Background Orbs -->
+    <div class="ambient-orb orb-indigo"></div>
+    <div class="ambient-orb orb-purple"></div>
+    <div class="ambient-orb orb-cyan"></div>
+
+    <!-- Notification Toast -->
+    <div id="toast" class="fixed top-6 right-6 z-50 transform translate-x-80 opacity-0 transition-all duration-300 pointer-events-none">
+        <div class="glass-panel-heavy px-5 py-4 rounded-xl shadow-2xl border border-white/10 border-l-4 border-l-brand-accent flex items-center gap-3" style="background: rgba(10,12,24,0.9); backdrop-filter: blur(15px);">
+            <div class="w-8 h-8 rounded-full bg-brand-accent/20 flex items-center justify-center text-brand-accent" id="toast-icon">
+                <i class="fa-solid fa-circle-info"></i>
+            </div>
+            <div>
+                <h4 class="font-bold text-sm text-white" id="toast-title">提示信息</h4>
+                <p class="text-xs text-gray-400 mt-0.5" id="toast-message">这已成功执行。</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top Branding Header -->
+    <header class="absolute top-0 left-0 w-full py-8 px-8 flex justify-between items-center z-20">
+        <div class="flex items-center gap-3">
+            <img src="/app-static/new/logo.png" alt="Logo" class="w-10 h-10 object-contain rounded-xl shadow-lg" onerror="this.outerHTML='<div class=\'w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-primary via-indigo-500 to-brand-accent flex items-center justify-center shadow-lg shadow-brand-primary/20\'><i class=\'fa-solid fa-wand-magic-sparkles text-lg text-white\'></i></div>'">
+            <div>
+                <span class="text-base font-extrabold text-white tracking-tight">公域闪剪视频</span>
+                <span class="text-[9px] block text-brand-accent font-semibold tracking-widest uppercase -mt-0.5">Synthesis Suite</span>
+            </div>
+        </div>
+        <a href="/app/new" class="text-xs text-gray-400 hover:text-white hover:underline transition-all"><i class="fa-solid fa-circle-info mr-1.5"></i>返回工作台</a>
+    </header>
+
+    <!-- Center Flowing Login Box -->
+    <main class="w-full flex-1 flex items-center justify-center px-4 py-8 z-10">
+        <!-- Flowing border container wrapper -->
+        <div class="w-full max-w-[450px] stream-border page-fade-in shadow-2xl shadow-brand-primary/10">
+            <!-- Glassmorphic content inner -->
+            <div class="stream-inner p-8 md:p-10">
+                
+                <!-- Branding Header -->
+                <div class="text-center mb-8">
+                    <h2 class="text-2xl md:text-3xl font-black bg-gradient-to-r from-white via-indigo-200 to-brand-accent bg-clip-text text-transparent tracking-tight">欢迎登录公域闪剪</h2>
+                    <p class="text-xs text-gray-400 mt-2.5 leading-relaxed">让创作更具质感，通过 AI 高并发推理生成您的爆款视频</p>
+                </div>
+
+                <!-- Toggle Navigation Switch tabs -->
+                <div class="grid grid-cols-2 gap-2 bg-slate-950/80 rounded-xl p-1.5 mb-6 border border-white/5 shadow-inner">
+                    <button onclick="switchTab('form')" id="tab-form" class="py-2 rounded-lg text-xs font-bold bg-brand-primary/20 text-brand-accent border border-brand-primary/30 transition-all shadow">账号密码登录</button>
+                    <button onclick="switchTab('qr')" id="tab-qr" class="py-2 rounded-lg text-xs font-bold text-gray-400 hover:text-white transition-all">极速扫码登录</button>
+                </div>
+
+                <!-- TAB 1: Account / Pass Login form -->
+                <form id="login-form" class="space-y-4" onsubmit="handleLoginSubmit(event)">
+                    <!-- Phone / Email -->
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-400 mb-1.5 uppercase tracking-wider">手机号或注册邮箱</label>
+                        <div class="relative">
+                            <i class="fa-solid fa-envelope absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500 text-xs"></i>
+                            <input type="text" id="login-username" required autocomplete="username" placeholder="请输入数字人网站账号" class="custom-input w-full bg-slate-950/70 border border-slate-800 rounded-xl py-3 pl-10 pr-4 text-xs text-gray-200 outline-none focus:outline-none">
+                        </div>
+                    </div>
+
+                    <!-- Password -->
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-400 mb-1.5 uppercase tracking-wider">安全访问密码</label>
+                        <div class="relative">
+                            <i class="fa-solid fa-lock absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500 text-xs"></i>
+                            <input type="password" id="login-password" required autocomplete="current-password" placeholder="请输入登录密码" class="custom-input w-full bg-slate-950/70 border border-slate-800 rounded-xl py-3 pl-10 pr-4 text-xs text-gray-200 outline-none focus:outline-none">
+                        </div>
+                    </div>
+
+                    <!-- Options -->
+                    <div class="flex items-center justify-between pt-1">
+                        <label class="flex items-center gap-2 cursor-pointer group">
+                            <input type="checkbox" checked disabled class="rounded text-brand-primary focus:ring-brand-primary bg-slate-950 border-slate-800 w-3.5 h-3.5">
+                            <span class="text-[10px] text-gray-400 group-hover:text-gray-300 transition-colors select-none">保持本次工作台登录</span>
+                        </label>
+                        <a href="#" onclick="showToast('账号提示', '请通过数字人网站或联系管理员处理密码问题。')" class="text-[10px] text-brand-accent hover:underline glow-hover transition-all">忘记密码？</a>
+                    </div>
+
+                    <!-- Login Button -->
+                    <button type="submit" id="btn-login" class="w-full btn-shine btn-shine-auto mt-6 py-3 rounded-xl bg-gradient-to-r from-brand-primary via-indigo-600 to-brand-accent text-white font-extrabold text-xs tracking-widest uppercase flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/20 hover:scale-[1.01] active:scale-[0.99] transition-all">
+                        <i class="fa-solid fa-right-to-bracket text-xs"></i>
+                        验证并进入系统
+                    </button>
+                </form>
+
+                <!-- TAB 2: QR Scanner code -->
+                <div id="qr-login" class="hidden flex flex-col items-center justify-center py-4 space-y-5">
+                    <!-- Tech styled scanning box -->
+                    <div class="relative p-2.5 bg-slate-900 border border-slate-800 rounded-2xl shadow-xl max-w-[160px] aspect-square overflow-hidden group">
+                        <!-- Holographic scanning laser line -->
+                        <div class="absolute left-0 w-full h-0.5 scan-line z-10"></div>
+                        <!-- Frame decorations -->
+                        <span class="absolute top-1 left-1 w-3.5 h-3.5 border-t-2 border-l-2 border-brand-accent"></span>
+                        <span class="absolute top-1 right-1 w-3.5 h-3.5 border-t-2 border-r-2 border-brand-accent"></span>
+                        <span class="absolute bottom-1 left-1 w-3.5 h-3.5 border-b-2 border-l-2 border-brand-accent"></span>
+                        <span class="absolute bottom-1 right-1 w-3.5 h-3.5 border-b-2 border-r-2 border-brand-accent"></span>
+                        
+                        <img src="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=300&auto=format&fit=crop&q=80" alt="QR code" class="w-full h-full object-cover rounded-lg filter blur-xs group-hover:blur-none transition-all duration-300">
+                        <div class="absolute inset-0 flex items-center justify-center bg-black/40 group-hover:bg-transparent transition-colors">
+                            <i class="fa-solid fa-qrcode text-white text-3xl group-hover:scale-0 transition-transform"></i>
+                        </div>
+                    </div>
+
+                    <div class="text-center">
+                        <p class="text-xs font-bold text-gray-200">打开手机「闪剪」扫码登录</p>
+                        <p class="text-[10px] text-gray-500 mt-1">使用已绑定的 App 进行授权验证，即可直接接入工作区</p>
+                    </div>
+
+                    <button onclick="showToast('暂未开放', '当前请使用数字人网站账号和密码登录。')" class="px-5 py-2 rounded-xl bg-slate-900 border border-slate-800 text-[11px] text-gray-500 font-bold tracking-wide flex items-center gap-1.5 shadow">
+                        <i class="fa-solid fa-clock"></i>
+                        扫码登录暂未开放
+                    </button>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+
+
+    <!-- Core Interactive Logic -->
+    <script>
+        let currentTab = 'form';
+
+        // Toast Helper
+        function showToast(title, message, iconType = 'info') {
+            const toast = document.getElementById('toast');
+            const iconBox = document.getElementById('toast-icon');
+            const titleEl = document.getElementById('toast-title');
+            const messageEl = document.getElementById('toast-message');
+
+            if (iconType === 'success') {
+                iconBox.innerHTML = '<i class="fa-solid fa-circle-check"></i>';
+                iconBox.className = "w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400";
+            } else if (iconType === 'error') {
+                iconBox.innerHTML = '<i class="fa-solid fa-circle-exclamation"></i>';
+                iconBox.className = "w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center text-red-400";
+            } else {
+                iconBox.innerHTML = '<i class="fa-solid fa-circle-info"></i>';
+                iconBox.className = "w-8 h-8 rounded-full bg-brand-accent/20 flex items-center justify-center text-brand-accent";
+            }
+
+            titleEl.textContent = title;
+            messageEl.textContent = message;
+
+            toast.classList.remove('translate-x-80', 'opacity-0');
+            toast.classList.add('translate-x-0', 'opacity-100');
+
+            setTimeout(() => {
+                toast.classList.remove('translate-x-0', 'opacity-100');
+                toast.classList.add('translate-x-80', 'opacity-0');
+            }, 3000);
+        }
+
+        // Switch Tabs between Account Login and QR code
+        function switchTab(tab) {
+            currentTab = tab;
+            const tabForm = document.getElementById('tab-form');
+            const tabQr = document.getElementById('tab-qr');
+            const formEl = document.getElementById('login-form');
+            const qrEl = document.getElementById('qr-login');
+
+            if (tab === 'form') {
+                tabForm.className = "py-2 rounded-lg text-xs font-bold bg-brand-primary/20 text-brand-accent border border-brand-primary/30 transition-all shadow";
+                tabQr.className = "py-2 rounded-lg text-xs font-bold text-gray-400 hover:text-white transition-all";
+                formEl.classList.remove('hidden');
+                qrEl.classList.add('hidden');
+            } else {
+                tabQr.className = "py-2 rounded-lg text-xs font-bold bg-brand-primary/20 text-brand-accent border border-brand-primary/30 transition-all shadow";
+                tabForm.className = "py-2 rounded-lg text-xs font-bold text-gray-400 hover:text-white transition-all";
+                qrEl.classList.remove('hidden');
+                formEl.classList.add('hidden');
+            }
+        }
+
+        function safeNextPath() {
+            const requested = new URLSearchParams(window.location.search).get('next') || '/app/new';
+            return requested === '/app/new' || requested.startsWith('/app/new/')
+                ? requested
+                : '/app/new';
+        }
+
+        async function redirectAuthenticatedSession() {
+            try {
+                const response = await fetch('/api/auth/session', { credentials: 'same-origin' });
+                if (!response.ok) return;
+                const session = await response.json();
+                if (session.authenticated) window.location.replace(safeNextPath());
+            } catch (_) {
+                // The login form remains usable and will show the authoritative API error.
+            }
+        }
+
+        // Authenticate against the existing digital-human account center through the workbench.
+        async function handleLoginSubmit(event) {
+            event.preventDefault();
+            const btn = document.getElementById('btn-login');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> 安全验证中...';
+
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('login-username').value.trim(),
+                        password: document.getElementById('login-password').value,
+                        next: safeNextPath()
+                    })
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(result.detail || '登录失败，请稍后重试');
+                window.location.replace(result.next || safeNextPath());
+            } catch (error) {
+                showToast('登录失败', error.message || '无法连接工作台服务', 'error');
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-right-to-bracket text-xs"></i> 验证并进入系统';
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', redirectAuthenticatedSession);
+    </script>
+</body>
+</html>

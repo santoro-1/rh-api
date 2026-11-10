@@ -1,0 +1,68 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+         self._nonce = None
++        self._closed = False
+@@
+     def _ensure_key(self):
++        if self._closed:
++            raise DeviceAuthorizationError("LOGIN_REQUIRED", "请重新登录账号", status_code=401)
+@@
+-                self.state = str(result.get("state", "AUTH_REFRESH_REQUIRED"))
++                self.state = self._registration_state(result)
+@@
+                 self._failed(exc)
+                 raise
+ 
++    def _registration_state(self, result: dict) -> str:
++        state = result.get("status")
++        if state not in {"UNREGISTERED", "PENDING", "ACTIVE", "REJECTED", "SUSPENDED", "REVOKED", "EXPIRED"}:
++            raise DeviceAuthorizationError("INVALID_DEVICE_AUTH_RESPONSE", "设备状态响应格式无效", status_code=502)
++        if result.get("thumbprint") not in {None, self._key.thumbprint}:
++            raise DeviceAuthorizationError("DEVICE_IDENTITY_MISMATCH", "设备状态与本机密钥不一致")
++        return state
++
++    def status(self) -> dict:
++        with self._lock:
++            try:
++                result = self._proof_request("status", token=self._login_token, bound=False)
++                state = self._registration_state(result)
++                if state != "ACTIVE":
++                    self._credentials, self._nonce = None, None
++                self.state, self.error_code = state, None
++                return result
++            except (DeviceAuthorizationError, DeviceIdentityError) as exc:
++                self._failed(exc)
++                raise
++
+@@
+-            state = self.state if self.state != "ACTIVE" or valid else "AUTH_REFRESH_REQUIRED"
++            state = self.state if self.state not in {"ACTIVE", "OFFLINE_GRACE"} or valid else "AUTH_REFRESH_REQUIRED"
+@@
+             self._credentials, self._nonce, self._login_token = None, None, ""
++            self._closed = True
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization.py
+@@
+-        if request["path"].endswith("/register"):
+-            self.issuer.signer = SignerFromJwkNotNeeded  # registration response only; no keys get created here
++        if request["path"].endswith(("/register", "/status")):
++            return {"status": "PENDING", "thumbprint": self.issuer.signer.thumbprint}
+@@
+     def test_missing_key_does_not_auto_initialize(self):
+@@
+         self.assertEqual(self.transport.calls, [])
+ 
++    def test_explicit_registration_and_status_do_not_confer_permissions(self):
++        result = self.session.register(label="test device", client_version="v4")
++        self.assertEqual(result["status"], "PENDING")
++        self.assertEqual(self.session.summary()["state"], "PENDING")
++        self.session.status()
++        self.assertEqual(self.transport.calls[-1]["method"], "GET")
++        self.assertIsNone(self.session._credentials)
++        self.assertEqual(self.identity.created, 0)
++
+@@
+         self.assertEqual(self.identity.created, 0)
+ 
+     def test_transport_rejects_redirects_and_does_not_echo_response_secrets(self):
+*** End Patch

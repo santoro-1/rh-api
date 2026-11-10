@@ -1,0 +1,282 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_execution.py
+@@
+ class LocalDecision:
+@@
+     policy_revision: int | None = None
++
++    def snapshot(self):
++        return {"schema": "publicvideo.local-operation.v1", "user_id": self.user_id,
++                "mode": self.mode, "scopes": sorted(self.scopes), "device_id": self.device_id,
++                "grant_id": self.grant_id, "thumbprint": self.thumbprint,
++                "grant_revision": self.grant_revision, "policy_revision": self.policy_revision,
++                "waiting": False}
++
++
++def current_local_authorizer():
++    return _authorizer.get()
++
++
++def render_operation_scopes(data):
++    output = data.get("output") if isinstance(data.get("output"), dict) else {}
++    export = data.get("export") if isinstance(data.get("export"), dict) else {}
++    skip = output.get("skip_export", data.get("skip_export", export.get("skip_export", False)))
++    # Match render_job's accepted truthy values; never infer from a client scope.
++    skip = skip.strip().lower() not in {"", "0", "false", "no", "off"} if isinstance(skip, str) else bool(skip)
++    return frozenset({"local:draft"} if skip else _SCOPES)
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_queue.py
++"""Queue checks preserve unstarted work, independent of provider failures."""
++from __future__ import annotations
++
++from functools import wraps
++import json
++from pathlib import Path
++
++from .device_auth_protocol import DeviceAuthorizationError
++from .device_identity_windows import DeviceIdentityError
++from .device_local_execution import (authorized_local_unit, local_authorization_context,
++                                     render_operation_scopes, requires_device_authorization)
++
++
++def device_guarded_queue_job(function):
++    @wraps(function)
++    def execute(queue, job_id, *args, **kwargs):
++        if not requires_device_authorization():
++            return function(queue, job_id, *args, **kwargs)
++        try:
++            authorizer = getattr(queue, "_device_authorizers", {}).get(job_id)
++            payload = queue.store.get_job_payload(job_id)
++            with local_authorization_context(authorizer):
++                with authorized_local_unit(render_operation_scopes(payload)) as decision:
++                    stored = (queue.store.get_status(job_id) or {}).get("device_authorization") or {}
++                    if stored.get("user_id") != decision.user_id:
++                        raise DeviceAuthorizationError("DEVICE_ACCOUNT_MISMATCH", "排队任务的设备账号不一致")
++                    if stored.get("thumbprint") and stored["thumbprint"] != decision.thumbprint:
++                        raise DeviceAuthorizationError("DEVICE_IDENTITY_MISMATCH", "排队任务需要原处理机授权")
++                    result = function(queue, job_id, *args, **kwargs)
++            queue._device_authorizers.pop(job_id, None)
++            return result
++        except (DeviceAuthorizationError, DeviceIdentityError) as exc:
++            status = queue.store.pause_for_device_authorization(job_id, exc.code)
++            # Existing UI reads both the database and this per-job status file.
++            status_path = Path(queue.settings.storage_root) / "jobs" / job_id / "status.json"
++            if status_path.is_file():
++                status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
++            return None
++    return execute
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_web.py
++"""Bind request identity internally, before local side effects; no UI-supplied grant."""
++from __future__ import annotations
++
++import re
++
++from fastapi import Request, HTTPException
++from fastapi.responses import JSONResponse
++from starlette.concurrency import run_in_threadpool
++
++from .device_auth_protocol import DeviceAuthorizationError
++from .device_identity_windows import DeviceIdentityError
++from .device_local_execution import (LocalDeviceAuthorizer, local_authorization_context,
++                                     requires_device_authorization)
++
++
++def local_failure(error):
++    code = error.code
++    status = getattr(error, "status_code", 409)
++    if status == 401 and code != "LOGIN_REQUIRED":
++        status = 409
++    return JSONResponse({"detail": str(error), "code": code, "device_authorization_required": True},
++                        status_code=status, headers={"Cache-Control": "no-store", "X-Workbench-Device-Error": code})
++
++
++class RequestLocalAuthorizer:
++    def __init__(self, request, registry, current_user, cookie_name):
++        self.request, self.registry, self.current_user, self.cookie_name = request, registry, current_user, cookie_name
++        self._authorizer = None
++
++    def authorize(self, scopes):
++        if self._authorizer is None:
++            user = self.current_user(self.request)
++            session = self.registry.get(str(user["user_id"]), self.request.cookies.get(self.cookie_name, ""))
++            self._authorizer = LocalDeviceAuthorizer(session)
++        return self._authorizer.authorize(scopes)
++
++
++class LocalExecutionMiddleware:
++    def __init__(self, app, *, registry, current_user, cookie_name):
++        self.app, self.registry, self.current_user, self.cookie_name = app, registry, current_user, cookie_name
++
++    async def __call__(self, scope, receive, send):
++        if scope["type"] != "http" or not requires_device_authorization():
++            return await self.app(scope, receive, send)
++        request = Request(scope, receive)
++        authorizer = RequestLocalAuthorizer(request, self.registry, self.current_user, self.cookie_name)
++        path = scope.get("path", "")
++        local_start = request.method == "POST" and (
++            path in {"/api/render", "/api/render/batch", "/api/render/excel-batch"}
++            or re.fullmatch(r"/api/new/projects/[^/]+/(?:postprocess/generate|variants/generate|items/[^/]+/(?:postprocess/export|variants/(?:supplement|retry)))", path))
++        if local_start:
++            try:
++                # Preflight before coordinator mutations/ASR. The queue and the
++                # actual renderer repeat checks at their own operation boundary.
++                scopes = {"local:draft"} if path.endswith("/postprocess/generate") else {"local:draft", "local:render"}
++                await run_in_threadpool(authorizer.authorize, scopes)
++            except (DeviceAuthorizationError, DeviceIdentityError) as exc:
++                return await local_failure(exc)(scope, receive, send)
++            except HTTPException as exc:
++                return await JSONResponse({"detail": exc.detail}, status_code=exc.status_code)(scope, receive, send)
++        with local_authorization_context(authorizer):
++            await self.app(scope, receive, send)
++
++
++def install_local_execution(app, *, registry, current_user, cookie_name):
++    app.add_middleware(LocalExecutionMiddleware, registry=registry, current_user=current_user, cookie_name=cookie_name)
++    async def failed(request, error):
++        return local_failure(error)
++    app.add_exception_handler(DeviceAuthorizationError, failed)
++    app.add_exception_handler(DeviceIdentityError, failed)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/render_job.py
+@@
+ from typing import Any, Mapping
++from .device_local_execution import protected_local_work, render_operation_scopes
+@@
+-def run_render_job(data: Mapping[str, Any]) -> RenderJobResult:
++@protected_local_work(render_operation_scopes)
++def run_render_job(data: Mapping[str, Any]) -> RenderJobResult:
+@@
+-def _export_mp4(
++@protected_local_work({"local:render"})
++def _export_mp4(
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/draft_factory.py
+@@
+ from typing import Iterable
++from .device_local_execution import protected_local_work
+@@
+-def create_plain_draft_from_video(
++@protected_local_work({"local:draft"})
++def create_plain_draft_from_video(
+@@
+-def create_plain_draft_from_videos(
++@protected_local_work({"local:draft"})
++def create_plain_draft_from_videos(
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/content_replace.py
+@@
+ from typing import Any
++from .device_local_execution import protected_local_work
+@@
+-def run_content_replace_job(job: ContentReplaceJob) -> ContentReplaceResult:
++@protected_local_work({"local:draft"})
++def run_content_replace_job(job: ContentReplaceJob) -> ContentReplaceResult:
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/task_store.py
+@@
+                 WHERE status='pending' AND cancel_requested=0
++                  AND COALESCE(json_extract(status_json, '$.device_authorization.waiting'), 0)=0
+@@
+-    def get_status(self, job_id: str) -> dict[str, Any] | None:
++    def get_job_payload(self, job_id: str) -> dict[str, Any]:
++        with self._connect() as connection:
++            row = connection.execute("SELECT payload_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
++        if row is None:
++            raise KeyError("任务不存在")
++        return _object(row["payload_json"], {})
++
++    def pause_for_device_authorization(self, job_id: str, code: str) -> dict[str, Any]:
++        with self._transaction() as connection:
++            row = connection.execute("SELECT status_json, assigned_agent_id, status, cancel_requested FROM jobs WHERE job_id=?", (job_id,)).fetchone()
++            if row is None:
++                raise KeyError("任务不存在")
++            status = _object(row["status_json"], {})
++            if row["status"] not in {"running", "pending"}:
++                return status
++            binding = dict(status.get("device_authorization") or {})
++            binding.update({"waiting": True, "code": code, "checked_at": _now()})
++            status.update({"status": "cancelled" if row["cancel_requested"] else "pending", "device_authorization": binding})
++            for field in ("assigned_agent_id", "started_at", "heartbeat_at", "lease_expires_at"):
++                status.pop(field, None)
++            connection.execute("UPDATE jobs SET status=?, status_json=?, assigned_agent_id=NULL, started_at=NULL, heartbeat_at=NULL, lease_expires_at=NULL WHERE job_id=?",
++                               (status["status"], _json(status), job_id))
++            connection.execute("UPDATE agents SET status='idle', current_job_id=NULL WHERE agent_id=? AND current_job_id=?", (row["assigned_agent_id"], job_id))
++        return status
++
++    def resume_device_authorization(self, job_id, user_id, binding):
++        with self._transaction() as connection:
++            row = connection.execute("SELECT status, cancel_requested, status_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
++            if row is None:
++                raise KeyError("任务不存在")
++            status = _object(row["status_json"], {})
++            original = status.get("device_authorization") or {}
++            if original.get("user_id") != user_id or binding.get("user_id") != user_id:
++                raise PermissionError("无权恢复该任务的设备授权")
++            if row["status"] != "pending" or row["cancel_requested"] or not original.get("waiting"):
++                raise ValueError("此任务不在等待授权状态")
++            status["device_authorization"] = binding
++            connection.execute("UPDATE jobs SET status_json=? WHERE job_id=?", (_json(status), job_id))
++        return status
++
++    def get_status(self, job_id: str) -> dict[str, Any] | None:
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+ import queue as queue_module
++from .device_local_execution import current_local_authorizer, current_local_decision, render_operation_scopes
++from .device_local_queue import device_guarded_queue_job
+@@
+         self._pending: list[str] = []
++        self._device_authorizers = {}
+@@
+     def submit(self, payload: dict[str, Any]) -> dict[str, Any]:
++        decision = current_local_decision(render_operation_scopes(payload))
+         self._ensure_queue_capacity(1)
+@@
+-        _write_json(job_dir / "status.json", status)
++        if decision is not None:
++            status["device_authorization"] = decision.snapshot()
++            self._device_authorizers[job_id] = current_local_authorizer()
++        _write_json(job_dir / "status.json", status)
+@@
+         if not payloads or len(payloads) != len(variants):
+             raise ValueError("批量任务参数为空或组合信息不匹配")
++        scopes = set().union(*(render_operation_scopes(payload) for payload in payloads))
++        decision = current_local_decision(scopes)
+         self._ensure_queue_capacity(len(payloads))
+@@
+-                _write_json(job_dir / "status.json", status)
++                if decision is not None:
++                    status["device_authorization"] = decision.snapshot()
++                    self._device_authorizers[job_id] = current_local_authorizer()
++                _write_json(job_dir / "status.json", status)
+@@
+-    def _run_job(self, job_id: str, *, already_claimed: bool = False) -> None:
++    @device_guarded_queue_job
++    def _run_job(self, job_id: str, *, already_claimed: bool = False) -> None:
+@@
+         auth_center.device_header_provider = DeviceBusinessProofs(
+             app.state.device_sessions, account_resolver=verify_site_token
+         )
++    from .device_local_web import install_local_execution
++    install_local_execution(app, registry=app.state.device_sessions,
++                            current_user=current_project_user, cookie_name=settings.site_cookie_name)
++
++    @app.post("/api/jobs/{job_id}/resume-authorization")
++    def resume_local_job_authorization(job_id: str, request: Request):
++        user = current_project_user(request)
++        try:
++            previous = render_queue.store.get_status(job_id)
++            if previous is None:
++                raise HTTPException(status_code=404, detail="任务不存在")
++            if (previous.get("device_authorization") or {}).get("user_id") != int(user["user_id"]):
++                raise HTTPException(status_code=404, detail="任务不存在")
++            job = render_queue.store.get_job_payload(job_id)
++            decision = current_local_decision(render_operation_scopes(job))
++            if decision is None:
++                raise HTTPException(status_code=409, detail="请使用配置正式授权的工作台恢复任务")
++            status = render_queue.store.resume_device_authorization(job_id, int(user["user_id"]), decision.snapshot())
++            render_queue._device_authorizers[job_id] = current_local_authorizer()
++            _write_json(_job_dir(settings, job_id) / "status.json", status)
++            if render_queue.execution_mode == "embedded":
++                render_queue._queue.put(job_id)
++            return status
++        except (KeyError, PermissionError) as exc:
++            raise HTTPException(status_code=404, detail="任务不存在") from exc
++        except ValueError as exc:
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
+*** End Patch

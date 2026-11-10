@@ -1,0 +1,165 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_h3.py
+@@
+ from .h3_audio_cleanup import H3_AUDIO_CLEANUP_VERSION, read_cleanup, request_cleanup
++from .h3_video_segments import (
++    H3_VIDEO_SEQUENCE_VERSION, freeze_segment, h3_video_sequence_ready,
++)
+@@
+     build_segment_cues,
++    _probe_duration,
+@@
+             and (not self._local_h3_files_ready(item)
++                 or not h3_video_sequence_ready(item)
+                  or (self.head_cleanup_enabled and item.get("outputs", {}).get("audio", {}).get("metadata", {}).get("head_cleanup_version") != H3_AUDIO_CLEANUP_VERSION))
+@@
+-            return
+-        assert self.storage_root is not None
+-        target_dir = (
++            if not h3_video_sequence_ready(item):
++                # Upgrade only the picture manifest. Keep the cleaned audio,
++                # ASR alignment and existing user draft files untouched.
++                metadata = self._register_video_segments(
++                    owner_user_id, project_id, item, remote_item, segments,
++                    segment_paths, signature,
++                    [_probe_duration(path) for path in segment_paths],
++                )
++                refreshed = self.store.get_project(owner_user_id, project_id)
++                current_item = next(value for value in refreshed["items"] if value["item_id"] == item_id)
++                base = self.store.add_asset(
++                    owner_user_id=owner_user_id, project_id=project_id, item_id=item_id,
++                    asset_type="base_video", source_type="h3", status="READY",
++                    filename=str(current_base.get("filename") or "H3静音底片.mp4"),
++                    managed_path=str(current_base_path),
++                    metadata={**current_base.get("metadata", {}), **metadata},
++                    make_current=True,
++                )
++                subtitles = dict(current_item.get("subtitles") or {})
++                subtitles["bound_video_asset_id"] = base["asset_id"]
++                if subtitles.get("status") == "PREVIEW_READY":
++                    subtitles["status"] = "READY"
++                self.store.set_item_subtitles(owner_user_id, project_id, item_id, subtitles)
++            return
++        assert self.storage_root is not None
++        target_dir = (
+@@
+             / signature
+         )
++        frozen_paths = [freeze_segment(path, target_dir / "segments") for path in segment_paths]
+         assets = self.media_preparer(
+-            segment_paths=segment_paths,
++            segment_paths=frozen_paths,
+@@
+         common_metadata = {
++            **self._register_video_segments(
++                owner_user_id, project_id, item, remote_item, segments,
++                frozen_paths, signature, list(assets.segment_durations_seconds),
++            ),
+             "h3_segment_signature": signature,
+@@
+         self.store.set_item_subtitles(
+             owner_user_id,
+             project_id,
+             item_id,
+             subtitles,
+         )
++
++    def _register_video_segments(
++        self, owner_user_id: str, project_id: str, item: dict[str, Any],
++        remote_item: dict[str, Any], segments: list[dict[str, Any]],
++        paths: list[Path], signature: str, durations: list[float],
++    ) -> dict[str, Any]:
++        assert self.storage_root is not None
++        root = self.storage_root / "projects" / str(owner_user_id) / project_id / str(item["item_id"]) / "h3" / signature / "segments"
++        existing = (item.get("outputs") or {}).get("original_video_segments", [])
++        ids = []
++        for index, (segment, path, duration) in enumerate(zip(segments, paths, durations, strict=True), start=1):
++            frozen = freeze_segment(path, root)
++            duration_us = round(duration * 1_000_000)
++            if duration_us <= 0:
++                raise H3MediaError("H3 原始分段时长无效")
++            asset = next((value for value in reversed(existing)
++                          if value.get("source_type") == "h3"
++                          and value.get("status") == "READY"
++                          and Path(str(value.get("managed_path") or "")) == frozen
++                          and value.get("metadata", {}).get("h3_segment_signature") == signature
++                          and value.get("external_ref", {}).get("segment_id") == segment["segment_id"]
++                          and value.get("external_ref", {}).get("batch_id") == remote_item.get("batch_id")
++                          and value.get("external_ref", {}).get("remote_item_id") == remote_item.get("item_id")
++                          and value.get("external_ref", {}).get("video_index") == index), None)
++            if asset is None:
++                asset = self.store.add_asset(
++                    owner_user_id=owner_user_id, project_id=project_id, item_id=str(item["item_id"]),
++                    asset_type="original_video_segment", source_type="h3", status="READY",
++                    filename=f"{item.get('row_key')}-H3第{index:03d}段.mp4", managed_path=str(frozen),
++                    external_ref={"batch_id": remote_item.get("batch_id"), "remote_item_id": remote_item.get("item_id"),
++                                  "segment_id": segment["segment_id"], "video_index": index},
++                    metadata={"h3_segment_signature": signature, "actual_duration_us": duration_us,
++                              "script_text": str(segment.get("script_text") or ""),
++                              "source_sha256": frozen.parent.name,
++                              "video_sequence_version": H3_VIDEO_SEQUENCE_VERSION},
++                )
++            ids.append(asset["asset_id"])
++        return {"video_sequence_version": H3_VIDEO_SEQUENCE_VERSION,
++                "segment_count": len(ids), "source_segment_asset_ids": ids}
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_video_source.py
+@@
+ from .draft_factory import probe_video_duration_us
++from .h3_video_segments import bound_h3_segments
+@@
+ def _segment_timeline(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+@@
+-        if speech_duration_us > 0 and generation_tail_us > 0:
++        if asset.get("source_type") != "h3" and speech_duration_us > 0 and generation_tail_us > 0:
+@@
+     if not segments or not timeline:
+         return False
++    if base.get("source_type") == "h3":
++        return False
+@@
+     if not isinstance(base, dict):
+         return []
++    if base.get("source_type") == "h3":
++        try:
++            timeline = _segment_timeline(bound_h3_segments(item))
++        except (OSError, RuntimeError, TypeError, ValueError):
++            return []
++        return [{"boundary_us": entry["start_us"],
++                 "segment_index": _segment_index(entry["asset"]),
++                 "segment_start_us": entry["start_us"], "segment_end_us": entry["end_us"],
++                 "script_text": entry["asset"].get("metadata", {}).get("script_text", "")}
++                for entry in timeline[1:]]
+@@
+     assert isinstance(base, dict)
++    if base.get("source_type") == "h3":
++        # H3 keeps its generated picture clock, not MiniMax input durations.
++        segments = bound_h3_segments(item)
++        sequence = [{"media_path": str(Path(asset["managed_path"]).resolve()),
++                     "target_duration_us": asset["metadata"]["actual_duration_us"],
++                     "video_index": _segment_index(asset), "volume": 0.0}
++                    for asset in segments]
++        dissolve_us = max(0, round(float(base.get("metadata", {}).get("visual_dissolve_seconds") or 0) * 1_000_000))
++        for first, second in zip(sequence, sequence[1:]):
++            first["transition_after_us"] = min(dissolve_us, first["target_duration_us"] // 2, second["target_duration_us"] // 2)
++        return {"type": "video_sequence", "items": sequence}
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/index.html
+@@
+                     && item?.outputs?.audio?.metadata?.head_cleanup_version === 'jyd.h3-head-silence.v1'
++                    && h3VideoSequenceReady(item)
+@@
+         function h3OutputFileAvailable(asset) {
+             return Boolean(asset) && asset.file_exists !== false;
+         }
++
++        function h3VideoSequenceReady(item) {
++            const meta = item?.outputs?.base_video?.metadata || {};
++            const ids = meta.source_segment_asset_ids || [];
++            const assets = item?.outputs?.original_video_segments || [];
++            return meta.video_sequence_version === 'jyd.h3-video-sequence.v1'
++                && ids.length > 0 && ids.length === meta.segment_count
++                && ids.every((id) => assets.some((asset) => asset.asset_id === id && h3OutputFileAvailable(asset)));
++        }
+@@
+-                    && (needsHeadCleanup || needsDissolveUpgrade || (remoteStatus === 'SUCCESS'
++                    && (needsHeadCleanup || needsDissolveUpgrade || (remoteStatus === 'SUCCESS' && !h3VideoSequenceReady(item)) || (remoteStatus === 'SUCCESS'
+*** End Patch

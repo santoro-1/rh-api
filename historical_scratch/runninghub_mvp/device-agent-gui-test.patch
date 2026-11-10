@@ -1,0 +1,124 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/render_agent.py
+@@
+-    def run_agent_in_background(values: dict[str, str], password: str) -> None:
++    def run_agent_in_background(values: dict[str, str], password_box: list[str]) -> None:
+         nonlocal agent_thread
++        password = password_box.pop()  # Thread arguments do not retain it for the whole run.
+@@
+-            root.after(0, lambda: start_button.configure(state="normal"))
++            try:
++                root.after(0, lambda: start_button.configure(state="normal"))
++            except (RuntimeError, tk.TclError):
++                pass  # The user may already have closed the idle window.
+@@
+-            args=(values, password),
++            args=(values, [password]),
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_agent_runtime.py
+@@
+ from io import BytesIO
++import json
+@@
+ def test_agent_command_failure_does_not_print_credentials(monkeypatch, tmp_path, capsys):
+@@
+     assert "secret" not in capsys.readouterr().err
++
++
++def test_gui_login_uses_verified_authority_and_does_not_save_website_credentials(monkeypatch, tmp_path):
++    import tkinter as tk
++    from tkinter import ttk
++
++    variables, buttons, callbacks, calls = [], {}, [], []
++    completed = threading.Event()
++    session = SimpleNamespace(user_id=7)
++
++    class Variable:
++        def __init__(self, value=""):
++            self.value = value
++            variables.append(self)
++        def get(self):
++            return self.value
++        def set(self, value):
++            self.value = value
++
++    class Widget:
++        def __init__(self, *args, **kwargs):
++            self.command = kwargs.get("command")
++            if self.command:
++                buttons[kwargs.get("text")] = self.command
++        def pack(self, *args, **kwargs): pass
++        def grid(self, *args, **kwargs): pass
++        def configure(self, *args, **kwargs): pass
++        def columnconfigure(self, *args, **kwargs): pass
++        def insert(self, *args, **kwargs): pass
++        def see(self, *args, **kwargs): pass
++
++    class Root(Widget):
++        def title(self, *args): pass
++        def geometry(self, *args): pass
++        def minsize(self, *args): pass
++        def protocol(self, *args): pass
++        def after(self, delay, callback):
++            callbacks.append(callback)
++        def destroy(self): pass
++        def mainloop(self):
++            variables[-1].set("website-password-test")
++            buttons["保存并启动"]()
++            assert completed.wait(5), "mock Agent did not finish"
++            for worker in threading.enumerate():
++                if worker.name == "render-agent-gui":
++                    worker.join(timeout=5)
++            for callback in callbacks:
++                callback()
++            assert variables[-1].get() == ""
++
++    for name in ("Frame", "Label", "LabelFrame", "Radiobutton", "Entry", "Button"):
++        monkeypatch.setattr(ttk, name, Widget)
++    monkeypatch.setattr(tk, "Tk", Root)
++    monkeypatch.setattr(tk, "StringVar", Variable)
++    monkeypatch.setattr(tk, "Text", Widget)
++    monkeypatch.setattr(render_agent, "requires_device_authorization", lambda: True)
++    monkeypatch.setattr(render_agent, "_agent_config_root", lambda: tmp_path)
++    monkeypatch.setattr(render_agent, "_load_agent_gui_config", lambda: {
++        "server_url": "http://127.0.0.1:8010", "token": "central-password-test", "draft_root": str(tmp_path),
++        "device_auth_server_url": "https://authority.example", "device_user": "website-user-test",
++    })
++    def trusted(url):
++        assert url == "https://authority.example"
++        calls.append("trust")
++        return "verified-trust"
++    class Accounts:
++        def __init__(self, trust):
++            assert trust == "verified-trust" and calls == ["trust"]
++        def login(self, user, password):
++            assert (user, password) == ("website-user-test", "website-password-test")
++            calls.append("login")
++            return SimpleNamespace(token="website-token-test")
++    @contextmanager
++    def account_context(account, trust):
++        assert account.token == "website-token-test" and trust == "verified-trust"
++        calls.append("session")
++        try:
++            yield session
++        finally:
++            calls.append("closed")
++            completed.set()
++    def api(url, token, *, agent_id, authorizer):
++        assert token == "central-password-test" and agent_id == "processor-01-u7"
++        assert authorizer.session is session
++        return object()
++    class Agent:
++        def __init__(self, client, **kwargs): pass
++        def run_forever(self, *, stop_event):
++            calls.append("run")
++    monkeypatch.setattr(render_agent, "bundled_trust", trusted)
++    monkeypatch.setattr(render_agent, "CommandAccountClient", Accounts)
++    monkeypatch.setattr(render_agent, "account_authorization", account_context)
++    monkeypatch.setattr(render_agent, "AgentApiClient", api)
++    monkeypatch.setattr(render_agent, "RenderAgent", Agent)
++    assert render_agent.launch_agent_gui() == 0
++    saved = (tmp_path / "config.json").read_text(encoding="utf-8")
++    assert "website-password-test" not in saved and "website-token-test" not in saved
++    assert json.loads(saved)["device_user"] == "website-user-test"
++    assert calls == ["trust", "login", "session", "run", "closed"]
+*** End Patch

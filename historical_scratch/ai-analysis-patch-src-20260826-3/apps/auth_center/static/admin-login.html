@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>账号中心管理员登录</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <div class="eyebrow">JYD AUTH CENTER</div>
+    <h1>统一账号管理</h1>
+    <p>管理员可以创建、停用和重置员工账号。</p>
+    <form id="loginForm">
+      <label><span>管理员账号</span><input id="username" autocomplete="username" value="admin" required /></label>
+      <label><span>管理员密码</span><input id="password" type="password" autocomplete="current-password" required autofocus /></label>
+      <button type="submit">登录管理后台</button>
+      <div id="message" class="message" aria-live="polite"></div>
+    </form>
+  </main>
+  <script src="/static/admin-login.js"></script>
+</body>
+</html>

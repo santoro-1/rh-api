@@ -1,0 +1,106 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_semantic_visuals.py
+@@
+ def _catalog():
+     return load_semantic_visual_catalog(CATALOG_ROOT)
++
++
++def _catalog_with_editorial_broll() -> SemanticVisualCatalog:
++    catalog = _catalog()
++    pool_ids = (
++        "editorial.home_daily",
++        "editorial.meal_daily",
++        "editorial.leisure_daily",
++        "editorial.family_life",
++        "editorial.mood_atmosphere",
++    )
++    concepts = tuple(catalog.concepts) + tuple(
++        {
++            "concept_id": concept_id,
++            "label": concept_id,
++            "description": f"测试空镜池 {concept_id}",
++            "aliases": [concept_id],
++        }
++        for concept_id in pool_ids
++    )
++    base_video = next(
++        asset
++        for asset in catalog.assets
++        if asset.get("media_type") == "video"
++        and "full_screen_broll" in set(asset.get("usage_modes", ()))
++        and "seam_broll" in set(asset.get("usage_modes", ()))
++    )
++    video = json.loads(json.dumps(base_video))
++    video["asset_id"] = "editorial.test.video.01"
++    video.setdefault("video_taxonomy", {})["fallback_concept_ids"] = list(pool_ids)
++    return SemanticVisualCatalog(
++        root=catalog.root,
++        schema=catalog.schema,
++        library_id=catalog.library_id,
++        catalog_version="editorial-test",
++        concepts=concepts,
++        assets=(video,),
++    )
+@@
+ def test_enrichment_never_offers_unrelated_rotating_concepts() -> None:
+@@
+     assert enrichment == []
++
++
++@pytest.mark.parametrize(
++    ("article_type", "included", "excluded"),
++    [
++        ("鸡汤文", "editorial.family_life", "editorial.meal_daily"),
++        ("干货类", "editorial.meal_daily", "editorial.family_life"),
++        ("带人设介绍的干货类", "editorial.family_life", None),
++    ],
++)
++def test_editorial_broll_pools_are_limited_by_article_type(
++    article_type: str, included: str, excluded: str | None
++) -> None:
++    script = "真正长期能坚持的改变，往往来自每天都做得到的小选择。" * 8
++    candidates = recall_semantic_visual_candidates(
++        script,
++        _catalog_with_editorial_broll(),
++        video_duration_us=60_000_000,
++        article_type=article_type,
++    )["candidates"]
++    enrichment = [item for item in candidates if item.get("usage") == "enrichment"]
++
++    assert enrichment
++    offered = {
++        concept["concept_id"]
++        for item in enrichment
++        for concept in item["allowed_concepts"]
++    }
++    assert included in offered
++    if excluded is not None:
++        assert excluded not in offered
++
++
++def test_editorial_pool_can_create_seam_candidate_without_literal_alias() -> None:
++    script = "先把前面的道理说清楚。接下来聊聊怎样把改变放进普通生活。"
++    candidate = next(
++        item
++        for item in recall_semantic_visual_candidates(
++            script,
++            _catalog_with_editorial_broll(),
++            video_duration_us=12_000_000,
++            segment_boundaries=[
++                {"boundary_us": 5_000_000, "script_text": "接下来聊聊怎样把改变放进普通生活。"}
++            ],
++            article_type="鸡汤文",
++        )["candidates"]
++        if item.get("usage") == "seam_broll"
++    )
++
++    assert candidate["text"].startswith("接下来")
++    assert {
++        concept["concept_id"] for concept in candidate["allowed_concepts"]
++    } == {
++        "editorial.home_daily",
++        "editorial.leisure_daily",
++        "editorial.family_life",
++        "editorial.mood_atmosphere",
++    }
+*** End Patch

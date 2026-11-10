@@ -1,0 +1,49 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/processor_windows.py
+@@
+ def main(argv: list[str] | None = None) -> int:
++    arguments = list(sys.argv[1:] if argv is None else argv)
++    if arguments == ["--device-release-info"]:
++        # Read compiled PUBLIC configuration only: no config/logs, account,
++        # network, CNG key, UAC, ASR, collector or local service is started.
++        import hashlib
++        from jyd_probe.device_trust_roots import TRUSTED_ISSUERS
++
++        canonical = json.dumps(
++            TRUSTED_ISSUERS, sort_keys=True, separators=(",", ":"), ensure_ascii=True
++        )
++        print(json.dumps({
++            "schema": "publicvideo.device-release.v1",
++            "trust_sha256": hashlib.sha256(canonical.encode("ascii")).hexdigest(),
++            "issuer_count": len(TRUSTED_ISSUERS),
++        }))
++        return 0
+     from jyd_probe.device_identity_setup import dispatch_setup_helper
+@@
+-    helper_result = dispatch_setup_helper(list(sys.argv[1:] if argv is None else argv))
++    helper_result = dispatch_setup_helper(arguments)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_processor_launcher.py
+@@
+ class ProcessorLauncherTest(unittest.TestCase):
++    def test_release_diagnostic_is_read_only_and_uses_compiled_roots(self) -> None:
++        from contextlib import redirect_stdout
++        import hashlib
++        import io
++        from unittest.mock import patch
++        from apps.processor import processor_windows
++        from jyd_probe.device_trust_roots import TRUSTED_ISSUERS
++
++        output = io.StringIO()
++        with patch.object(processor_windows, "_application_root", side_effect=AssertionError("no runtime state")), patch.object(
++            processor_windows, "build_parser", side_effect=AssertionError("no ordinary startup")
++        ), redirect_stdout(output):
++            self.assertEqual(processor_windows.main(["--device-release-info"]), 0)
++        canonical = json.dumps(TRUSTED_ISSUERS, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
++        self.assertEqual(json.loads(output.getvalue()), {
++            "schema": "publicvideo.device-release.v1",
++            "trust_sha256": hashlib.sha256(canonical.encode("ascii")).hexdigest(),
++            "issuer_count": len(TRUSTED_ISSUERS),
++        })
++
+     def test_standalone_launcher_opens_the_new_workspace_on_port_8010(self) -> None:
+*** End Patch

@@ -1,0 +1,29 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_new_frontend.py
+@@
+             ready.outputs.audio.metadata = {head_cleanup_version:'jyd.h3-head-silence.v1'};
++            ready.outputs.base_video.metadata = {video_sequence_version:'jyd.h3-video-sequence.v1', segment_count:1, source_segment_asset_ids:['clip-1']};
++            ready.outputs.original_video_segments = [{asset_id:'clip-1', file_exists:true}];
+@@
+             assert.equal(h3HasPendingPostprocess(project),true);
++            ready.outputs.original_video_segments[0].file_exists=false;
++            assert.equal(h3NeedsLocalMaterialization(project),true);
++            assert.equal(h3HasPendingPostprocess(project),false);
++            ready.outputs.original_video_segments[0].file_exists=true;
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_postprocess.py
+@@
+-            if source.get("type") == "video_sequence":
++            if base_video.get("source_type") == "h3" and source.get("type") == "video_sequence":
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_h3.py
+@@
+-                    metadata={**current_base.get("metadata", {}), **metadata},
++                    metadata={**current_item["outputs"]["base_video"].get("metadata", {}), **metadata},
+@@
+         frozen_paths = [freeze_segment(path, target_dir / "segments") for path in segment_paths]
++        if cleanup_assets and any(path.parent.name != clean.raw_sha256
++                                  for path, clean in zip(frozen_paths, cleanup_assets, strict=True)):
++            raise H3MediaError("H3 分段在声音清理后发生变化，请重试本地处理")
+@@
+                           and value.get("metadata", {}).get("h3_segment_signature") == signature
++                          and value.get("metadata", {}).get("actual_duration_us") == duration_us
+*** End Patch

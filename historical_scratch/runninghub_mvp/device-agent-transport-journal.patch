@@ -1,0 +1,220 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_transport.py
++"""Bounded, no-redirect Agent transport; never replay central mutations silently."""
++
++from __future__ import annotations
++
++import re
++from urllib.error import HTTPError, URLError
++from urllib.request import HTTPRedirectHandler, Request, build_opener
++
++from .device_agent_protocol import AgentRequestContext, agent_origin, fail
++from .device_auth_protocol import canonical_json, strict_json
++from .device_local_execution import requires_device_authorization
++
++MAX_RESPONSE = 8 * 1024 * 1024
++CHALLENGE_PATH = "/api/agents/device-authorization/challenge"
++
++
++class AgentRequestError(RuntimeError):
++    def __init__(self, code, status=0):
++        self.code, self.status_code = code, status
++        super().__init__(f"中央服务请求未完成（{code}），不会自动重复执行任务")
++
++
++class _NoRedirect(HTTPRedirectHandler):
++    def redirect_request(self, req, fp, code, msg, headers, newurl):
++        return None
++
++
++class AgentApiClient:
++    def __init__(self, server_url, token, timeout=30, *, authorizer=None, agent_id=None):
++        self.server_url = agent_origin(server_url.strip())
++        self.token = token.strip()
++        self.timeout = max(5, min(120, int(timeout)))
++        self.authorizer, self.agent_id = authorizer, agent_id
++        self._opener = build_opener(_NoRedirect())
++        if not self.token or len(self.token) > 8192 or any(ord(c) <= 32 or ord(c) >= 127 for c in self.token):
++            raise ValueError("缺少有效的处理机接入密码")
++        if requires_device_authorization() and authorizer is None:
++            fail("DEVICE_AGENT_PROTOCOL_REQUIRED", "请先登录执行机的网站账号", 409)
++
++    def _send(self, path, payload, extra_headers=None):
++        if not isinstance(path, str) or not path.startswith("/api/agents/") or any(c in path for c in "?#\\\r\n"):
++            fail("INVALID_AGENT_REQUEST", "中央请求地址无效", 422)
++        request = Request(
++            self.server_url + path, data=canonical_json(payload).encode("ascii"), method="POST",
++            headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json", **(extra_headers or {})},
++        )
++        try:
++            with self._opener.open(request, timeout=self.timeout) as response:
++                raw = response.read(MAX_RESPONSE + 1)
++            if len(raw) > MAX_RESPONSE:
++                raise AgentRequestError("RESPONSE_TOO_LARGE")
++            result = strict_json(raw)
++            if not isinstance(result, dict):
++                raise ValueError()
++            return result
++        except HTTPError as exc:
++            code = "HTTP_" + str(exc.code)
++            try:
++                raw = exc.read(8193)
++                if len(raw) <= 8192:
++                    parsed = strict_json(raw)
++                    candidate = parsed.get("code") if isinstance(parsed, dict) else None
++                    if isinstance(candidate, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", candidate):
++                        code = candidate
++            except (ValueError, TypeError, UnicodeError, OSError):
++                pass
++            finally:
++                exc.close()
++            raise AgentRequestError(code, exc.code) from None
++        except (URLError, OSError, TimeoutError):
++            raise AgentRequestError("CONNECTION_UNCERTAIN") from None
++        except (ValueError, TypeError, UnicodeError, RecursionError):
++            raise AgentRequestError("INVALID_RESPONSE") from None
++
++    def post(self, path, payload=None):
++        payload = {} if payload is None else payload
++        if not isinstance(payload, dict):
++            fail("INVALID_AGENT_REQUEST", "处理机请求必须为对象", 422)
++        if self.authorizer is None:
++            if requires_device_authorization():
++                fail("DEVICE_AGENT_PROTOCOL_REQUIRED", "执行机缺少设备授权会话", 409)
++            return self._send(path, payload)
++        context = AgentRequestContext.for_request(self.server_url, self.agent_id, path, payload)
++        challenge = self._send(CHALLENGE_PATH, {"agent_id": self.agent_id, "path": path, "payload": payload})
++        if (
++            set(challenge) != {"schema", "nonce", "expires_in"}
++            or challenge["schema"] != "publicvideo.agent-challenge.v1"
++            or type(challenge["expires_in"]) is not int
++            or not 0 < challenge["expires_in"] <= 120
++            or not isinstance(challenge["nonce"], str)
++            or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", challenge["nonce"])
++        ):
++            raise AgentRequestError("INVALID_CHALLENGE")
++        headers = self.authorizer.headers(context, challenge["nonce"])
++        return self._send(path, payload, headers)  # Exactly one business request.
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_journal.py
++"""Durable local execution receipts without login tokens or device credentials."""
++
++from __future__ import annotations
++
++from contextlib import contextmanager
++import os
++from pathlib import Path
++import sqlite3
++import time
++import uuid
++
++from .device_agent_protocol import fail
++from .device_auth_protocol import canonical_json, sha256_b64, strict_json
++
++
++class AgentJournal:
++    def __init__(self, root):
++        self.root = Path(root).resolve()
++        self.root.mkdir(parents=True, exist_ok=True)
++        self.path = self.root / "execution-receipts.sqlite3"
++        with self._connect() as connection:
++            connection.execute("PRAGMA journal_mode=WAL")
++            connection.execute(
++                "CREATE TABLE IF NOT EXISTS receipts(receipt_id TEXT PRIMARY KEY,central TEXT NOT NULL,"
++                "agent_id TEXT NOT NULL,user_id INTEGER NOT NULL,job_id TEXT NOT NULL,execution_id TEXT NOT NULL,"
++                "phase TEXT NOT NULL,claim_json TEXT NOT NULL,payload_json TEXT NOT NULL,result_json TEXT,updated_at INTEGER NOT NULL)"
++            )
++
++    def _connect(self):
++        connection = sqlite3.connect(self.path, timeout=10)
++        connection.row_factory = sqlite3.Row
++        connection.execute("PRAGMA synchronous=FULL")
++        return connection
++
++    @contextmanager
++    def single_process(self):
++        # Fixed per-Windows-user runtime location, independent of the EXE path or
++        # central/account selection; two Agents must not control one UI at once.
++        with (self.root / "execution.lock").open("a+b") as lock:
++            if lock.seek(0, 2) == 0:
++                lock.write(b"0")
++                lock.flush()
++            lock.seek(0)
++            acquired = False
++            try:
++                if os.name == "nt":
++                    import msvcrt
++                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
++                else:
++                    import fcntl
++                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++                acquired = True
++            except OSError:
++                fail("DEVICE_AGENT_ALREADY_RUNNING", "本机已有处理机执行进程，请勿重复启动", 409)
++            try:
++                yield
++            finally:
++                if acquired:
++                    lock.seek(0)
++                    if os.name == "nt":
++                        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
++                    else:
++                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
++
++    @staticmethod
++    def _record(row):
++        value = dict(row)
++        for name in ("claim", "payload", "result"):
++            value[name] = strict_json(value.pop(name + "_json")) if value[name + "_json"] is not None else None
++        return value
++
++    def pending(self, central, agent_id, user_id):
++        with self._connect() as connection:
++            rows = connection.execute(
++                "SELECT * FROM receipts WHERE central=? AND agent_id=? AND user_id=? AND phase!='acknowledged' ORDER BY updated_at,receipt_id",
++                (central, agent_id, user_id),
++            ).fetchall()
++        return [self._record(row) for row in rows]
++
++    def prepare(self, central, agent_id, user_id, claim, payload):
++        job_id = claim["job_id"]
++        key = sha256_b64(canonical_json([central, agent_id, user_id, job_id]))
++        encoded_claim, encoded_payload = canonical_json(claim), canonical_json(payload)
++        with self._connect() as connection:
++            connection.execute("BEGIN IMMEDIATE")
++            row = connection.execute("SELECT * FROM receipts WHERE receipt_id=?", (key,)).fetchone()
++            if row is None:
++                connection.execute("INSERT INTO receipts VALUES(?,?,?,?,?,?,'prepared',?,?,NULL,?)",
++                                   (key, central, agent_id, user_id, job_id, uuid.uuid4().hex, encoded_claim, encoded_payload, int(time.time())))
++                row = connection.execute("SELECT * FROM receipts WHERE receipt_id=?", (key,)).fetchone()
++            else:
++                previous = self._record(row)
++                if canonical_json(previous["claim"]["payload"]) != canonical_json(claim["payload"]) or row["payload_json"] != encoded_payload:
++                    fail("DEVICE_AGENT_RECEIPT_CONFLICT", "原任务输入与执行回执不一致，未重复渲染", 409)
++        return self._record(row)
++
++    def executing(self, receipt):
++        with self._connect() as connection:
++            cursor = connection.execute("UPDATE receipts SET phase='executing',updated_at=? WHERE receipt_id=? AND phase='prepared'",
++                                        (int(time.time()), receipt["receipt_id"]))
++            if cursor.rowcount != 1:
++                fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "原任务不是可首次执行状态，未重复渲染", 409)
++
++    def save_result(self, receipt, *, action, payload):
++        if action not in {"complete", "fail"}:
++            raise ValueError("invalid report action")
++        result = canonical_json({"action": action, "payload": payload})
++        with self._connect() as connection:
++            cursor = connection.execute("UPDATE receipts SET phase='report_pending',result_json=?,updated_at=? WHERE receipt_id=? AND phase='executing'",
++                                        (result, int(time.time()), receipt["receipt_id"]))
++            if cursor.rowcount != 1:
++                fail("DEVICE_AGENT_RECEIPT_CONFLICT", "无法保存原执行结果，请保留文件并核对", 409)
++        receipt.update(phase="report_pending", result=strict_json(result))
++
++    def acknowledge(self, receipt):
++        with self._connect() as connection:
++            cursor = connection.execute("UPDATE receipts SET phase='acknowledged',updated_at=? WHERE receipt_id=? AND phase='report_pending'",
++                                        (int(time.time()), receipt["receipt_id"]))
++            if cursor.rowcount != 1:
++                fail("DEVICE_AGENT_RECEIPT_CONFLICT", "原结果回报状态需要核对", 409)
++        receipt["phase"] = "acknowledged"
+*** End Patch

@@ -1,0 +1,335 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization.py
++from __future__ import annotations
++
++import copy
++import io
++import json
++from pathlib import Path
++import secrets
++import sys
++import tempfile
++import unittest
++from unittest.mock import Mock, patch
++from urllib.error import HTTPError, URLError
++
++import jwt
++from cryptography.hazmat.primitives import hashes
++from cryptography.hazmat.primitives.asymmetric import ec, utils
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from jyd_probe.device_auth_protocol import (
++    ACCESS_TYPE, LEASE_TYPE, DeviceAuthorizationError, TrustedIssuer,
++    VerifiedCredentials, b64url, bundled_trust, canonical_uri, jwk_thumbprint,
++    make_proof, strict_jwt_parts,
++)
++from jyd_probe.device_authorization import DeviceAuthorizationSession, DeviceAuthTransport, DeviceLeaseCache, _NoRedirect
++from jyd_probe.device_identity_windows import DeviceIdentityError
++
++
++class Clock:
++    def __init__(self):
++        self.wall, self.mono = 1700000000.0, 100.0
++
++    def advance(self, seconds):
++        self.wall += seconds
++        self.mono += seconds
++
++
++def jwk(key):
++    numbers = key.public_key().public_numbers()
++    return {"kty": "EC", "crv": "P-256", "x": b64url(numbers.x.to_bytes(32, "big")), "y": b64url(numbers.y.to_bytes(32, "big"))}
++
++
++class Signer:
++    protection = "tpm"
++
++    def __init__(self):
++        self.key = ec.generate_private_key(ec.SECP256R1())
++        self.public_jwk = jwk(self.key)
++        self.thumbprint = jwk_thumbprint(self.public_jwk)
++        self.closed = False
++
++    def sign(self, message):
++        if self.closed:
++            raise DeviceIdentityError("KEY_UNAVAILABLE", "test key unavailable")
++        r, s = utils.decode_dss_signature(self.key.sign(message, ec.ECDSA(hashes.SHA256())))
++        return r.to_bytes(32, "big") + s.to_bytes(32, "big")
++
++    def close(self):
++        self.closed = True
++
++
++class Identity:
++    def __init__(self, signer=None):
++        self.signer = signer
++        self.created = 0
++
++    def open_existing(self):
++        return self.signer
++
++    def initialize_for_activation(self, **_):
++        if self.signer is None:
++            self.signer = Signer()
++            self.created += 1
++        return self.signer
++
++
++class Issuer:
++    def __init__(self, clock, signer):
++        self.clock, self.signer = clock, signer
++        self.key = ec.generate_private_key(ec.SECP256R1())
++        self.trust = TrustedIssuer("https://license.example", "production", {"first": self.key.public_key()})
++        self.overrides = {}
++
++    def credentials(self):
++        claims = {"schema": "runninghub.workbench-auth.v2", "iss": self.trust.issuer,
++                  "environment": "production", "product": "PublicVideoWorkbench", "sub": "7", "user_id": 7,
++                  "username": "tester", "password_revision": "revision", "device_id": "device-a", "grant_id": "grant-a",
++                  "grant_revision": 1, "policy_revision": 1, "cnf": {"jkt": self.signer.thumbprint},
++                  "scopes": ["local:draft", "local:render", "cloud:generate"], "iat": int(self.clock.wall),
++                  "nbf": int(self.clock.wall), "exp": int(self.clock.wall + 1800)}
++        claims.update(self.overrides)
++        def token(typ, audience):
++            return jwt.encode({**claims, "jti": secrets.token_urlsafe(24), "aud": "PublicVideoWorkbench:" + audience},
++                              self.key, algorithm="ES256", headers={"typ": typ, "kid": "first"})
++        return {"access_token": token(ACCESS_TYPE, "cloud"), "local_lease": token(LEASE_TYPE, "local"),
++                "token_type": "DPoP", "device_id": claims["device_id"], "grant_id": claims["grant_id"],
++                "thumbprint": self.signer.thumbprint, "expires_in": 1800, "refresh_after_seconds": 300}
++
++
++class Transport:
++    def __init__(self, issuer):
++        self.issuer = issuer
++        self.error = None
++        self.calls = []
++
++    def request(self, **request):
++        self.calls.append(request)
++        if self.error:
++            raise self.error
++        if request["path"].endswith("/challenge"):
++            return {"nonce": secrets.token_urlsafe(32), "expires_in": 120}
++        if request["path"].endswith("/register"):
++            self.issuer.signer = SignerFromJwkNotNeeded  # registration response only; no keys get created here
++        return self.issuer.credentials()
++
++
++class DeviceAuthorizationTest(unittest.TestCase):
++    def setUp(self):
++        self.clock, self.signer = Clock(), Signer()
++        self.identity = Identity(self.signer)
++        self.issuer = Issuer(self.clock, self.signer)
++        self.transport = Transport(self.issuer)
++        self.session = self.new_session()
++
++    def new_session(self, **overrides):
++        kwargs = dict(user_id=7, login_token="legacy-account-token", trust=self.issuer.trust, identity=self.identity,
++                      transport=self.transport, wall_clock=lambda: self.clock.wall, monotonic_clock=lambda: self.clock.mono)
++        kwargs.update(overrides)
++        return DeviceAuthorizationSession(**kwargs)
++
++    def verified(self, payload=None, **kwargs):
++        return VerifiedCredentials.from_response(payload or self.issuer.credentials(), self.issuer.trust,
++                                                 user_id=kwargs.get("user_id", 7), thumbprint=kwargs.get("thumbprint", self.signer.thumbprint), now=self.clock.wall)
++
++    def test_valid_pair_binds_identity_and_hides_credentials_from_repr(self):
++        payload = self.issuer.credentials()
++        value = self.verified(payload)
++        self.assertEqual(value.claims["device_id"], "device-a")
++        self.assertNotIn(payload["access_token"], repr(value))
++        with self.assertRaises(TypeError):
++            value.claims["cnf"]["jkt"] = "changed"
++
++    def test_signed_but_wrong_account_device_environment_or_product_rejected(self):
++        for overrides in ({"user_id": 8, "sub": "8"}, {"cnf": {"jkt": Signer().thumbprint}},
++                          {"environment": "test"}, {"product": "OtherProduct"}, {"user_id": True},
++                          {"scopes": ["local:render", "unknown"]}, {"nbf": int(self.clock.wall - 1)},
++                          {"exp": int(self.clock.wall + 1801)}):
++            with self.subTest(overrides=overrides):
++                self.issuer.overrides = overrides
++                with self.assertRaises(DeviceAuthorizationError):
++                    self.verified()
++
++    def test_expired_and_future_issued_leases_are_rejected(self):
++        old = self.issuer.credentials()
++        self.clock.advance(1800)
++        with self.assertRaises(DeviceAuthorizationError):
++            self.verified(old)
++        self.issuer.overrides = {"iat": int(self.clock.wall + 6), "nbf": int(self.clock.wall + 6)}
++        with self.assertRaises(DeviceAuthorizationError):
++            self.verified()
++
++    def test_access_lease_type_swap_and_mismatched_pair_are_rejected(self):
++        original = self.issuer.credentials()
++        swapped = {**original, "local_lease": original["access_token"]}
++        with self.assertRaises(DeviceAuthorizationError):
++            self.verified(swapped)
++        self.issuer.overrides = {"grant_revision": 2}
++        changed = self.issuer.credentials()
++        with self.assertRaises(DeviceAuthorizationError):
++            self.verified({**original, "local_lease": changed["local_lease"]})
++
++    def test_unsigned_metadata_cannot_rebind_or_extend_authorization(self):
++        original = self.issuer.credentials()
++        for name in ("device_id", "grant_id", "thumbprint"):
++            with self.assertRaises(DeviceAuthorizationError):
++                self.verified({**original, name: "different"})
++        value = self.verified({**original, "expires_in": 99999999, "refresh_after_seconds": 99999999})
++        self.assertEqual(value.refresh_after_seconds, 300)
++        self.assertEqual(value.claims["exp"], self.clock.wall + 1800)
++
++    def test_unknown_key_and_client_editable_server_url_are_not_trusted(self):
++        payload = self.issuer.credentials()
++        other = TrustedIssuer(self.issuer.trust.origin, "production", {"first": Signer().key.public_key()})
++        with self.assertRaises(DeviceAuthorizationError):
++            VerifiedCredentials.from_response(payload, other, user_id=7, thumbprint=self.signer.thumbprint, now=self.clock.wall)
++        with self.assertRaises(DeviceAuthorizationError) as error:
++            bundled_trust("https://attacker.example")
++        self.assertEqual(error.exception.code, "DEVICE_TRUST_NOT_CONFIGURED")
++        with self.assertRaises(ValueError):
++            TrustedIssuer("http://license.example", "production", {"first": self.issuer.key.public_key()})
++
++    def test_rotation_overlap_verifies_both_keys_without_new_device(self):
++        payload = self.issuer.credentials()
++        new = ec.generate_private_key(ec.SECP256R1())
++        trust = TrustedIssuer(self.issuer.trust.origin, "production", {"first": self.issuer.key.public_key(), "next": new.public_key()})
++        claims = strict_jwt_parts(payload["local_lease"])[1]
++        next_lease = jwt.encode(claims, new, algorithm="ES256", headers={"typ": LEASE_TYPE, "kid": "next"})
++        for lease in (payload["local_lease"], next_lease):
++            result = trust.verify(lease, typ=LEASE_TYPE, user_id=7, thumbprint=self.signer.thumbprint, now=self.clock.wall)
++            self.assertEqual(result["cnf"]["jkt"], self.signer.thumbprint)
++
++    def test_ambiguous_or_private_jose_is_rejected(self):
++        payload = self.issuer.credentials()
++        header, claims = strict_jwt_parts(payload["local_lease"])
++        duplicate = b64url(b'{"alg":"ES256","alg":"none","typ":"workbench-lease+jwt","kid":"first"}')
++        parts = payload["local_lease"].split(".")
++        for token in (duplicate + "." + parts[1] + "." + parts[2], payload["local_lease"] + "=",
++                      jwt.encode(claims, self.issuer.key, algorithm="ES256", headers={**header, "jku": "https://other.example/key"})):
++            with self.assertRaises(DeviceAuthorizationError):
++                self.verified({**payload, "local_lease": token})
++
++    def test_proofs_are_unique_and_bind_method_target_token_and_key(self):
++        arguments = dict(method="POST", path="/api/workbench/h3/batches", access_token="account-token", nonce="n" * 32, now=int(self.clock.wall))
++        proofs = [make_proof(self.signer, self.issuer.trust, **arguments) for _ in range(2)]
++        claims = [jwt.decode(p, self.signer.key.public_key(), algorithms=["ES256"], options={"verify_iat": False}) for p in proofs]
++        self.assertNotEqual(claims[0]["jti"], claims[1]["jti"])
++        self.assertEqual(claims[0]["htu"], "https://license.example/api/workbench/h3/batches")
++        self.assertEqual(claims[0]["htm"], "POST")
++        self.assertEqual(claims[0]["nonce"], "n" * 32)
++
++    def test_proof_cannot_be_sent_to_third_party_or_normalized_escape(self):
++        for path in ("https://rh.example/file", "//attacker.example/api/workbench/x", "/api/workbench/../auth", "/api/workbench/x?q=1", "/api/workbench/x#fragment", "/api/workbench/%2e%2e/auth"):
++            with self.assertRaises(DeviceAuthorizationError):
++                make_proof(self.signer, self.issuer.trust, method="POST", path=path, access_token="t", nonce="n" * 32, now=int(self.clock.wall))
++        self.assertEqual(canonical_uri("https://EXAMPLE.com:443/a/%7e/b/../c"), "https://example.com/a/~/c")
++
++    def test_refresh_opens_existing_key_and_never_registers(self):
++        self.session.refresh()
++        self.clock.advance(301)
++        self.session.refresh()
++        self.assertEqual(self.identity.created, 0)
++        self.assertEqual([c["path"].rsplit("/", 1)[-1] for c in self.transport.calls], ["challenge", "exchange", "challenge", "refresh"])
++        self.assertEqual(self.session.summary()["state"], "ACTIVE")
++
++    def test_missing_key_does_not_auto_initialize(self):
++        identity = Identity()
++        with self.assertRaises(DeviceAuthorizationError):
++            self.new_session(identity=identity).refresh()
++        self.assertEqual(identity.created, 0)
++        self.assertEqual(self.transport.calls, [])
++
++    def test_short_network_failure_only_uses_existing_lease_until_original_expiry(self):
++        self.session.refresh()
++        self.clock.advance(301)
++        self.transport.error = DeviceAuthorizationError("DEVICE_AUTH_UNREACHABLE", "offline", status_code=503, transient=True)
++        admission = self.session.require_local("local:render")
++        self.assertEqual(admission["user_id"], 7)
++        self.assertEqual(self.session.summary()["state"], "OFFLINE_GRACE")
++        self.clock.advance(1499)
++        with self.assertRaises(DeviceAuthorizationError):
++            self.session.require_local("local:render")
++        self.assertNotEqual(self.session.summary()["state"], "ACTIVE")
++
++    def test_revocation_clears_credentials_instead_of_using_grace(self):
++        self.session.refresh()
++        self.clock.advance(301)
++        self.transport.error = DeviceAuthorizationError("DEVICE_REVOKED", "revoked")
++        with self.assertRaises(DeviceAuthorizationError):
++            self.session.require_local("local:render")
++        self.assertEqual(self.session.summary()["state"], "REVOKED")
++
++    def test_clock_rollback_cannot_extend_offline_grace(self):
++        self.session.refresh()
++        self.clock.wall -= 100
++        self.transport.error = DeviceAuthorizationError("DEVICE_AUTH_UNREACHABLE", "offline", transient=True)
++        with self.assertRaises(DeviceAuthorizationError):
++            self.session.require_local("local:draft")
++        self.assertEqual(self.identity.created, 0)
++
++    def test_local_admission_checks_live_key_and_scope(self):
++        self.issuer.overrides = {"scopes": ["local:draft"]}
++        self.session.refresh()
++        with self.assertRaises(DeviceAuthorizationError):
++            self.session.require_local("local:render")
++        self.signer.closed = True
++        with self.assertRaises(DeviceIdentityError):
++            self.session.require_local("local:draft")
++        self.assertEqual(self.session.summary()["state"], "KEY_UNAVAILABLE")
++
++    def test_cached_lease_does_not_authorize_restart_or_another_machine(self):
++        credentials = self.verified()
++        with tempfile.TemporaryDirectory(prefix="device-lease-test-") as folder:
++            cache = DeviceLeaseCache(Path(folder))
++            cache.save(7, self.signer.thumbprint, credentials)
++            raw = cache.path_for(7, self.signer.thumbprint).read_text(encoding="utf-8")
++            self.assertNotIn(credentials.access_token, raw)
++            self.assertNotIn("legacy-account-token", raw)
++            self.assertEqual(cache.hint(self.issuer.trust, user_id=7, thumbprint=self.signer.thumbprint, now=self.clock.wall)["state"], "AUTH_REFRESH_REQUIRED")
++            self.transport.error = DeviceAuthorizationError("DEVICE_AUTH_UNREACHABLE", "offline", transient=True)
++            with self.assertRaises(DeviceAuthorizationError):
++                self.new_session(cache=cache).require_local("local:render")
++            clone = Signer()
++            with self.assertRaises(DeviceAuthorizationError):
++                self.verified(thumbprint=clone.thumbprint)
++            self.assertIsNone(cache.hint(self.issuer.trust, user_id=8, thumbprint=self.signer.thumbprint, now=self.clock.wall))
++
++    def test_cache_write_failure_does_not_invalidate_online_lease(self):
++        cache = Mock()
++        cache.save.side_effect = PermissionError("test cache denied")
++        session = self.new_session(cache=cache)
++        session.refresh()
++        self.assertTrue(session.summary()["cache_warning"])
++        self.assertEqual(session.require_local("local:draft")["device_id"], "device-a")
++
++    def test_request_nonces_reused_but_every_proof_has_fresh_jti(self):
++        args = dict(method="POST", path="/api/workbench/h3/batches/prepare", scope="cloud:generate")
++        first, second = self.session.request_headers(**args), self.session.request_headers(**args)
++        first_claims, second_claims = strict_jwt_parts(first["DPoP"])[1], strict_jwt_parts(second["DPoP"])[1]
++        self.assertEqual(first_claims["nonce"], second_claims["nonce"])
++        self.assertNotEqual(first_claims["jti"], second_claims["jti"])
++        self.assertEqual(len(self.transport.calls), 3)
++        self.assertNotIn(first["Authorization"], json.dumps(self.session.summary()))
++
++    def test_close_forgets_tokens_without_deleting_device_identity(self):
++        self.session.refresh()
++        self.session.close()
++        self.assertEqual(self.session.summary()["state"], "LOGIN_REQUIRED")
++        self.assertEqual(self.identity.created, 0)
++
++    def test_transport_rejects_redirects_and_does_not_echo_response_secrets(self):
++        self.assertIsNone(_NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil.example"))
++        for status, raw in ((302, b"secret-token"), (403, b'{"code":"DEVICE_REVOKED","detail":"secret-token"}')):
++            opener = Mock()
++            opener.open.side_effect = HTTPError("https://license.example", status, "test", {}, io.BytesIO(raw))
++            transport = DeviceAuthTransport(self.issuer.trust, opener=opener)
++            with self.assertRaises(DeviceAuthorizationError) as caught:
++                transport.request(method="POST", path="/api/workbench/device-auth/refresh", headers={})
++            self.assertNotIn("secret-token", str(caught.exception))
++            self.assertFalse(caught.exception.transient)
++
++
++if __name__ == "__main__":
++    unittest.main()
+*** End Patch

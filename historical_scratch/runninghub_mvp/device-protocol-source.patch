@@ -1,0 +1,321 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_auth_protocol.py
++"""Desktop half of the versioned device contract; no network or private-key storage.
++
++Trust must come from the bundled release module, not processor_config, a response,
++or a downloaded manifest. Tests can explicitly supply an independent test trust.
++"""
++from __future__ import annotations
++
++import base64
++from dataclasses import dataclass, field
++import hashlib
++import hmac
++import json
++import re
++import secrets
++from types import MappingProxyType
++from typing import Any, Mapping, Protocol
++from urllib.parse import urlsplit, urlunsplit
++
++import jwt
++from cryptography.hazmat.primitives.asymmetric import ec, utils
++from cryptography.hazmat.primitives import hashes
++
++PRODUCT = "PublicVideoWorkbench"
++SCHEMA = "runninghub.workbench-auth.v2"
++MAX_LEASE_SECONDS = 1800
++MAX_REFRESH_SECONDS = 300
++MAX_JWT_SIZE = 8192
++ACCESS_TYPE = "workbench-access+jwt"
++LEASE_TYPE = "workbench-lease+jwt"
++_B64URL = re.compile(r"^[A-Za-z0-9_-]+$")
++_UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
++
++
++class DeviceAuthorizationError(RuntimeError):
++    def __init__(self, code: str, message: str, *, status_code: int = 403, transient: bool = False):
++        super().__init__(message)
++        self.code = code
++        self.status_code = status_code
++        self.transient = transient
++
++
++class DeviceSigner(Protocol):
++    public_jwk: dict[str, str]
++    thumbprint: str
++    protection: str
++
++    def sign(self, message: bytes) -> bytes: ...
++    def close(self) -> None: ...
++
++
++def b64url(value: bytes) -> str:
++    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
++
++
++def canonical_json(value: Any) -> str:
++    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False)
++
++
++def sha256_b64(value: str) -> str:
++    return b64url(hashlib.sha256(value.encode("ascii")).digest())
++
++
++def _no_duplicates(pairs):
++    result = {}
++    for name, value in pairs:
++        if name in result:
++            raise ValueError("duplicate JSON member")
++        result[name] = value
++    return result
++
++
++def strict_json(raw: bytes | str) -> Any:
++    def reject_constant(_):
++        raise ValueError("invalid JSON constant")
++    return json.loads(raw, object_pairs_hook=_no_duplicates, parse_constant=reject_constant)
++
++
++def strict_jwt_parts(token: str) -> tuple[dict, dict]:
++    if not isinstance(token, str) or not 1 <= len(token) <= MAX_JWT_SIZE:
++        raise ValueError("invalid JWT length")
++    parts = token.split(".")
++    if len(parts) != 3 or any(not _B64URL.fullmatch(part) for part in parts):
++        raise ValueError("invalid JWT encoding")
++    decoded = []
++    for part in parts:
++        raw = base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
++        if b64url(raw) != part:
++            raise ValueError("non-canonical JWT encoding")
++        decoded.append(raw)
++    if len(decoded[2]) != 64:
++        raise ValueError("invalid ES256 signature width")
++    header, claims = strict_json(decoded[0]), strict_json(decoded[1])
++    if not isinstance(header, dict) or not isinstance(claims, dict):
++        raise ValueError("invalid JWT structure")
++    return header, claims
++
++
++def public_key(jwk: Any) -> ec.EllipticCurvePublicKey:
++    if not isinstance(jwk, dict) or set(jwk) != {"kty", "crv", "x", "y"}:
++        raise ValueError("public JWK required")
++    if jwk["kty"] != "EC" or jwk["crv"] != "P-256":
++        raise ValueError("unsupported public JWK")
++    for name in ("x", "y"):
++        value = jwk[name]
++        if not isinstance(value, str) or len(value) != 43 or not _B64URL.fullmatch(value):
++            raise ValueError("invalid coordinate")
++        raw = base64.urlsafe_b64decode(value + "=")
++        if len(raw) != 32 or b64url(raw) != value:
++            raise ValueError("invalid coordinate width")
++    result = jwt.PyJWK.from_dict(jwk, algorithm="ES256").key
++    if not isinstance(result, ec.EllipticCurvePublicKey) or not isinstance(result.curve, ec.SECP256R1):
++        raise ValueError("invalid public key")
++    return result
++
++
++def jwk_thumbprint(jwk: dict) -> str:
++    public_key(jwk)
++    return sha256_b64(canonical_json(jwk))
++
++
++def canonical_uri(value: str) -> str:
++    if not isinstance(value, str) or len(value) > 4096 or any(ord(c) <= 32 or ord(c) >= 127 for c in value):
++        raise ValueError("invalid URI")
++    parsed = urlsplit(value)
++    if parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username is not None or parsed.password is not None:
++        raise ValueError("invalid URI authority")
++    if "?" in value or "#" in value or "\\" in value:
++        raise ValueError("proof URI must not contain query or fragment")
++    host = parsed.hostname.lower()
++    if ":" in host:
++        host = f"[{host}]"
++    port = parsed.port
++    if port is not None and port != (443 if parsed.scheme == "https" else 80):
++        host += f":{port}"
++    path = parsed.path or "/"
++    if re.search(r"%(?![0-9A-Fa-f]{2})", path):
++        raise ValueError("invalid URI percent escape")
++    path = re.sub(r"%([0-9A-Fa-f]{2})", lambda m: chr(int(m[1], 16)) if chr(int(m[1], 16)) in _UNRESERVED else "%" + m[1].upper(), path)
++    segments = []
++    for segment in path.split("/")[1:]:
++        if segment == ".":
++            continue
++        if segment == "..":
++            if segments:
++                segments.pop()
++        else:
++            segments.append(segment)
++    normalized = "/" + "/".join(segments)
++    if path.endswith(("/.", "/..")) and not normalized.endswith("/"):
++        normalized += "/"
++    return urlunsplit((parsed.scheme, host, normalized, "", ""))
++
++
++@dataclass(frozen=True)
++class TrustedIssuer:
++    origin: str
++    environment: str
++    verification_keys: Mapping[str, ec.EllipticCurvePublicKey] = field(repr=False)
++
++    def __post_init__(self):
++        origin = canonical_uri(self.origin).rstrip("/")
++        parsed = urlsplit(origin)
++        if parsed.path or self.environment not in {"production", "development", "test"}:
++            raise ValueError("invalid trust context")
++        if parsed.scheme != "https" and not (self.environment != "production" and parsed.hostname in {"127.0.0.1", "localhost", "testserver"}):
++            raise ValueError("production trust requires HTTPS")
++        keys = dict(self.verification_keys)
++        if not 1 <= len(keys) <= 16:
++            raise ValueError("missing or excessive verification keys")
++        for kid, key in keys.items():
++            if not isinstance(kid, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", kid):
++                raise ValueError("invalid key ID")
++            if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256R1):
++                raise ValueError("ES256 public verification keys only")
++        object.__setattr__(self, "origin", origin)
++        object.__setattr__(self, "verification_keys", MappingProxyType(keys))
++
++    @property
++    def issuer(self) -> str:
++        return self.origin + "/workbench-device-auth"
++
++    def request_uri(self, path: str) -> str:
++        # Only the account center's private workbench contract can request proofs.
++        # No absolute URL, third-party media host, fragment, query, or dot escape.
++        if not isinstance(path, str) or not path.startswith("/api/workbench/") or path.startswith("//"):
++            raise DeviceAuthorizationError("UNTRUSTED_DEVICE_AUTH_TARGET", "设备验证只能发送到受信任的工作台服务")
++        try:
++            uri = canonical_uri(self.origin + path)
++            if uri != self.origin + path:
++                raise ValueError()
++            return uri
++        except ValueError as exc:
++            raise DeviceAuthorizationError("UNTRUSTED_DEVICE_AUTH_TARGET", "设备验证请求地址无效") from exc
++
++    def verify(self, token: str, *, typ: str, user_id: int, thumbprint: str, now: float) -> dict:
++        try:
++            if typ not in {ACCESS_TYPE, LEASE_TYPE} or type(user_id) is not int or user_id < 1:
++                raise ValueError()
++            header, claims = strict_jwt_parts(token)
++            if set(header) != {"alg", "typ", "kid"} or header["alg"] != "ES256" or header["typ"] != typ:
++                raise ValueError()
++            key = self.verification_keys[header["kid"]]
++            audience = PRODUCT + (":cloud" if typ == ACCESS_TYPE else ":local")
++            jwt.decode(token, key, algorithms=["ES256"], audience=audience, issuer=self.issuer,
++                       options={"verify_iat": False, "verify_exp": False, "verify_nbf": False,
++                                "require": ["iss", "aud", "sub", "iat", "exp", "nbf", "jti"]})
++            if claims.get("schema") != SCHEMA or claims.get("product") != PRODUCT or claims.get("environment") != self.environment or claims.get("aud") != audience:
++                raise ValueError()
++            for name in ("user_id", "grant_revision", "policy_revision", "iat", "nbf", "exp"):
++                if type(claims.get(name)) is not int or claims[name] < 1:
++                    raise ValueError()
++            if claims["user_id"] != user_id or claims.get("sub") != str(user_id):
++                raise ValueError()
++            if claims["nbf"] != claims["iat"] or claims["iat"] > now + 5 or now >= claims["exp"] or not 0 < claims["exp"] - claims["iat"] <= MAX_LEASE_SECONDS:
++                raise ValueError()
++            cnf = claims.get("cnf")
++            if not isinstance(cnf, dict) or set(cnf) != {"jkt"} or not isinstance(cnf["jkt"], str) or not hmac.compare_digest(cnf["jkt"], thumbprint):
++                raise ValueError()
++            for name in ("device_id", "grant_id", "jti", "username", "password_revision"):
++                if not isinstance(claims.get(name), str) or not 1 <= len(claims[name]) <= 128:
++                    raise ValueError()
++            scopes = claims.get("scopes")
++            if not isinstance(scopes, list) or len(scopes) != len(set(scopes)) or not set(scopes) <= {"cloud:generate", "local:draft", "local:render"}:
++                raise ValueError()
++            return claims
++        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, jwt.PyJWTError) as exc:
++            raise DeviceAuthorizationError("INVALID_DEVICE_CREDENTIAL", "设备授权凭据校验失败，请联网重新校验", status_code=401) from exc
++
++
++def bundled_trust(base_url: str) -> TrustedIssuer:
++    """Read code-bundled public roots only; never load user-editable config as trust."""
++    from .device_trust_roots import TRUSTED_ISSUERS
++    try:
++        origin = canonical_uri(base_url).rstrip("/")
++        matches = [entry for entry in TRUSTED_ISSUERS if entry["origin"] == origin]
++        if len(matches) != 1:
++            raise ValueError()
++        entry = matches[0]
++        keys = {item["kid"]: public_key(item["jwk"]) for item in entry["keys"]}
++        if len(keys) != len(entry["keys"]):
++            raise ValueError()
++        return TrustedIssuer(origin, entry["environment"], keys)
++    except (ValueError, TypeError, KeyError, jwt.PyJWTError) as exc:
++        raise DeviceAuthorizationError("DEVICE_TRUST_NOT_CONFIGURED", "此程序未配置该服务器的可信授权公钥，请使用正式发布包", status_code=503) from exc
++
++
++def make_proof(signer: DeviceSigner, trust: TrustedIssuer, *, method: str, path: str, access_token: str, nonce: str, now: int) -> str:
++    uri = trust.request_uri(path)
++    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"} or type(now) is not int:
++        raise DeviceAuthorizationError("INVALID_DEVICE_PROOF_INPUT", "设备验证请求无效")
++    if not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", nonce):
++        raise DeviceAuthorizationError("INVALID_DEVICE_CHALLENGE", "服务器设备验证挑战无效")
++    if not isinstance(access_token, str) or not 1 <= len(access_token) <= 16384 or any(ord(c) <= 32 or ord(c) >= 127 for c in access_token):
++        raise DeviceAuthorizationError("INVALID_ACCOUNT_TOKEN", "账号登录凭据无效", status_code=401)
++    if not hmac.compare_digest(jwk_thumbprint(signer.public_jwk), signer.thumbprint):
++        raise DeviceAuthorizationError("DEVICE_IDENTITY_MISMATCH", "设备公钥与本机身份不一致")
++    header = {"typ": "dpop+jwt", "alg": "ES256", "jwk": signer.public_jwk}
++    claims = {"jti": secrets.token_urlsafe(24), "htm": method, "htu": uri, "iat": now,
++              "ath": sha256_b64(access_token), "nonce": nonce}
++    encoded = b64url(canonical_json(header).encode("ascii")) + "." + b64url(canonical_json(claims).encode("ascii"))
++    signature = signer.sign(encoded.encode("ascii"))
++    if len(signature) != 64:
++        raise DeviceAuthorizationError("INVALID_DEVICE_SIGNATURE", "本机设备签名格式异常")
++    return encoded + "." + b64url(signature)
++
++
++def assert_key_available(signer: DeviceSigner) -> None:
++    """Fresh, internal-only proof for local admission; no web arbitrary-sign API."""
++    message = b"publicvideo.local-admission.v1\0" + secrets.token_bytes(32)
++    signature = signer.sign(message)
++    try:
++        if len(signature) != 64:
++            raise ValueError()
++        der = utils.encode_dss_signature(int.from_bytes(signature[:32], "big"), int.from_bytes(signature[32:], "big"))
++        public_key(signer.public_jwk).verify(der, message, ec.ECDSA(hashes.SHA256()))
++    except Exception as exc:
++        raise DeviceAuthorizationError("DEVICE_KEY_PROOF_FAILED", "无法验证本机设备密钥", status_code=403) from exc
++
++
++@dataclass(frozen=True)
++class VerifiedCredentials:
++    access_token: str = field(repr=False)
++    local_lease: str = field(repr=False)
++    claims: Mapping[str, Any] = field(repr=False)
++    refresh_after_seconds: int
++
++    @classmethod
++    def from_response(cls, payload: dict, trust: TrustedIssuer, *, user_id: int, thumbprint: str, now: float):
++        try:
++            if not isinstance(payload, dict) or payload.get("token_type") != "DPoP":
++                raise ValueError()
++            access = trust.verify(payload["access_token"], typ=ACCESS_TYPE, user_id=user_id, thumbprint=thumbprint, now=now)
++            lease = trust.verify(payload["local_lease"], typ=LEASE_TYPE, user_id=user_id, thumbprint=thumbprint, now=now)
++            identity = {name: value for name, value in access.items() if name not in {"aud", "jti"}}
++            if identity != {name: value for name, value in lease.items() if name not in {"aud", "jti"}}:
++                raise ValueError()
++            if payload.get("device_id") != lease["device_id"] or payload.get("grant_id") != lease["grant_id"] or payload.get("thumbprint") != thumbprint:
++                raise ValueError()
++            refresh = payload.get("refresh_after_seconds")
++            if type(refresh) is not int or refresh < 1:
++                raise ValueError()
++            # Response timers cannot extend a signed lease.
++            refresh = min(refresh, MAX_REFRESH_SECONDS, max(1, int(lease["exp"] - now)))
++            lease["scopes"] = tuple(lease["scopes"])
++            lease["cnf"] = MappingProxyType(lease["cnf"])
++            return cls(payload["access_token"], payload["local_lease"], MappingProxyType(lease), refresh)
++        except (KeyError, TypeError, ValueError) as exc:
++            raise DeviceAuthorizationError("INVALID_DEVICE_CREDENTIAL", "服务器返回了不一致的设备授权凭据", status_code=401) from exc
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_trust_roots.py
++"""Release-owned public trust configuration, compiled into the backend.
++
++Do not read roots from processor_config.json, environment variables, a remote
++response or a sibling mutable JSON file. The release pipeline must populate this
++module with approved PUBLIC keys. Empty source checkout cannot activate devices.
++Server private keys and device private keys must never appear here.
++"""
++
++TRUSTED_ISSUERS: tuple[dict, ...] = ()
+*** End Patch

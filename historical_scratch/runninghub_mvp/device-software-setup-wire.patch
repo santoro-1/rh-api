@@ -1,0 +1,209 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_setup.py
+@@
+-MODES = frozenset({"initialize", "repair-access"})
++MODES = frozenset({"initialize", "repair-access", "initialize-software"})
+@@
+     30: ("KEY_INITIALIZATION_CONFLICT", "另一初始化尚未完成，请稍后明确重试"),
++    31: ("KEY_SETUP_CHANNEL_FAILED", "初始化安全通道未完成；请明确重试"),
++    32: ("SOFTWARE_APPROVAL_REQUIRED", "软件初始化许可无效或已过期，请联网重新明确申请"),
+@@
+-    def __init__(self, *, api_factory=None):
++    def __init__(self, *, api_factory=None, channel_factory=None):
+         self._api_factory = api_factory
++        self._channel_factory = channel_factory
++        self._channel = None
+@@
+         handle, self._handle = self._handle, None
+-        self._api.close(handle)
++        try:
++            self._api.close(handle)
++        finally:
++            if self._channel is not None:
++                self._channel.close()
++                self._channel = None
+@@
+-        if mode not in MODES:
++        if mode not in {"initialize", "repair-access"}:
+@@
+         finally:
+             self._lock.release()
+ 
+ 
++    def run_software(self, permit_provider):
++        if not callable(permit_provider):
++            raise DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "软件初始化上下文无效")
++        if not self._lock.acquire(blocking=False):
++            raise _in_progress()
++        try:
++            if self._handle is not None:
++                self._finish()
++                return
++            api = self._process_api()
++            context = api.software_context()
++            permit = permit_provider(context=context)
++            from .device_initialization_channel import SoftwareInitializationChannel
++            factory = self._channel_factory or SoftwareInitializationChannel
++            self._channel = factory(context, permit)
++            try:
++                self._handle = api.launch("initialize-software", nonce=context.nonce)
++                self._channel.bind_helper(api.process_id(self._handle))
++            except BaseException:
++                self._channel.close()
++                if self._handle is None:
++                    self._channel = None
++                # A successfully launched helper remains observed by its handle.
++                raise
++            self._finish(45000)
++        finally:
++            self._lock.release()
++
++
+ _coordinator = DeviceSetupCoordinator()
+@@
+-    Software-mode creation still needs a separate server-authorized bootstrap.
+-    There is deliberately no provider choice or approval boolean in this adapter.
++    Software creation has a separate signed-permit bootstrap. A browser cannot
++    choose a provider or inject an approval boolean into normal activation.
+@@
+     def repair_operator_access(self):
+@@
+             pass
++
++    def initialize_software_for_activation(self, permit_provider):
++        existing = self.open_existing()
++        if existing is not None:
++            return existing
++        self._coordinator.run_software(permit_provider)
++        return self._reopen_after_setup()
+@@
+-        len(argv) != 3
++        len(argv) not in {3, 4}
+@@
+         or not isinstance(argv[2], str)
+@@
+         return 20
++    if (argv[1] == "initialize-software") != (len(argv) == 4):
++        return 20
+     from .device_identity_setup_windows import parse_operator_process
++    from .device_auth_protocol import DeviceAuthorizationError
+@@
+         pid, creation_time = parse_operator_process(argv[2])
++        if argv[1] == "initialize-software":
++            from .device_initialization_channel import pipe_name
++            pipe_name(argv[3])
+@@
+             if argv[1] == "initialize":
+@@
+                     pass
++            elif argv[1] == "initialize-software":
++                import time
++                from .device_software_initialization import (
++                    SoftwareInitializationContext, verify_initializer_handoff,
++                )
++                context = SoftwareInitializationContext(pid, creation_time, operator_sid, argv[3])
++                raw = api.receive_software_permit(context)
++                def verify():
++                    verify_initializer_handoff(raw, context=context, now=time.time())
++                verify()
++                with identity.initialize_for_activation(
++                    operator_sid=operator_sid, protection="software",
++                    software_approved=True, before_create=verify,
++                ):
++                    pass
+             else:
+                 identity.repair_operator_access(api, operator_sid)
+         return 0
++    except DeviceAuthorizationError:
++        return 32
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_setup_windows.py
+@@
+             "GetExitCodeProcess": ([handle, ctypes.POINTER(dword)], wintypes.BOOL),
++            "GetProcessId": ([handle], dword),
+@@
+-    def launch(self, mode):
++    def software_context(self):
++        from .device_software_initialization import SoftwareInitializationContext
++        return SoftwareInitializationContext(
++            os.getpid(), self._creation(wintypes.HANDLE(-1)),
++            validate_operator_sid(self._cng.current_user_sid()),
++        )
++
++    def process_id(self, handle):
++        value = self._kernel.GetProcessId(handle)
++        self._require(value)
++        return value
++
++    def receive_software_permit(self, context):
++        from .device_initialization_channel import NativePipeIO
++        return NativePipeIO().receive(context.nonce, context.process_id)
++
++    def launch(self, mode, *, nonce=None):
+         from .device_identity_setup import HELPER_FLAG, MODES
+ 
+         self._require(mode in MODES)
++        if mode == "initialize-software":
++            from .device_initialization_channel import pipe_name
++            pipe_name(nonce)
++        else:
++            self._require(nonce is None)
+@@
+-        info.lpParameters = subprocess.list2cmdline([HELPER_FLAG, mode, marker])
++        arguments = [HELPER_FLAG, mode, marker]
++        if nonce is not None:
++            arguments.append(nonce)  # random pipe locator, NOT a signed permit/token
++        info.lpParameters = subprocess.list2cmdline(arguments)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_store.py
+@@
+-        self, *, operator_sid=None, software_approved=False, protection="tpm"
++        self, *, operator_sid=None, software_approved=False, protection="tpm", before_create=None
+@@
+                 if protection == "software" and software_approved is not True:
+@@
+                         "SOFTWARE_APPROVAL_REQUIRED", "软件保护须先取得服务器签名许可"
+                     )
++                if before_create is not None:
++                    before_create()  # recheck permit after waiting for machine lock
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+     def software_initialization_permit(self, *, context):
+@@
+                 monotonic_clock=self._mono,
+             )
++
++    def register_software(self, *, label="", client_version=""):
++        """Explicit compatibility action; never a fallback from normal activation."""
++        with self._lock:
++            if self._closed:
++                raise DeviceAuthorizationError("LOGIN_REQUIRED", "请重新登录账号", status_code=401)
++            if self._key is None:
++                self._key = self.identity.initialize_software_for_activation(
++                    self.software_initialization_permit
++                )
++            return self.register(label=label, client_version=client_version)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization_routes.py
+@@
+ class DeviceAccessRepair(BaseModel):
+@@
+     confirm_repair: StrictBool = False
++
++
++class DeviceSoftwareApplication(DeviceApplication):
++    confirm_software: StrictBool = False
+@@
+-    @app.post("/api/new/device-authorization/refresh")
++    @app.post("/api/new/device-authorization/apply-software")
++    def apply_software_device_authorization(request: Request, payload: DeviceSoftwareApplication):
++        _same_origin_action(request)
++        if payload.confirm_initialize is not True or payload.confirm_software is not True:
++            raise HTTPException(status_code=422, detail="请确认首次初始化及软件保护兼容模式")
++        try:
++            session = session_for(request)
++            session.register_software(label=payload.label, client_version=payload.client_version)
++            return response(session.summary())
++        except (DeviceAuthorizationError, DeviceIdentityError) as exc:
++            return failure(exc)
++
++    @app.post("/api/new/device-authorization/refresh")
+     def refresh_device_authorization(request: Request):
+*** End Patch

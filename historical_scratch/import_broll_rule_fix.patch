@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tools/library/import_broll_20260814.py
+@@
+-    rule("好好吃饭", "素食家常餐", "展示清淡素食餐的制作和用餐", ["meal.light_meal", "food.vegetable"], ["l2.meal.light", "l2.meal.general", "l2.food.vegetable"], ["editorial.meal_daily"], actions=["cooking", "eating"], person="identifiable", health="general_wellness", platform="embedded"),
++    rule("【3】_好好吃饭", "素食家常餐", "展示清淡素食餐的制作和用餐", ["meal.light_meal", "food.vegetable"], ["l2.meal.light", "l2.meal.general", "l2.food.vegetable"], ["editorial.meal_daily"], actions=["cooking", "eating"], person="identifiable", health="general_wellness", platform="embedded"),
+*** End Patch

@@ -1,0 +1,210 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_software_initialization.py
++"""Verify server consent for software-key setup, not permission to do business.
++
++Consent is short-lived, account/process/nonce-bound and held only in memory.
++The caller must still verify actual Windows context, preserve any existing key,
++and obtain normal device approval. No key or provider is touched by this module.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++import hmac
++import math
++import re
++import secrets
++import threading
++from types import MappingProxyType
++
++import jwt
++
++from .device_auth_protocol import (
++    DeviceAuthorizationError, PRODUCT, canonical_json, sha256_b64, strict_jwt_parts,
++)
++from .device_identity_windows import validate_operator_sid
++
++PERMIT_TYPE = "workbench-software-initialization+jwt"
++PERMIT_AUDIENCE = PRODUCT + ":software-initialization"
++PERMIT_SCHEMA = "publicvideo.software-initialization.v1"
++PERMIT_SECONDS = 120
++PERMIT_PATH = "/api/workbench/device-auth/software-initialization-permit"
++
++
++@dataclass(frozen=True)
++class SoftwareInitializationContext:
++    """Correlation only. The initializer must derive it from a real process token."""
++
++    process_id: int
++    creation_time: int
++    operator_sid: str = field(repr=False)
++    nonce: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
++
++    def __post_init__(self):
++        if (
++            type(self.process_id) is not int or not 1 <= self.process_id <= 0xFFFFFFFF
++            or type(self.creation_time) is not int or not 1 <= self.creation_time <= 0xFFFFFFFFFFFFFFFF
++            or not isinstance(self.nonce, str)
++            or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", self.nonce)
++        ):
++            raise ValueError("invalid software initialization context")
++        validate_operator_sid(self.operator_sid)
++
++    @property
++    def context_hash(self):
++        # No Windows user SID, PID or image path leaves the local process.
++        return sha256_b64(canonical_json({
++            "schema": "publicvideo.initialization-context.v1",
++            "process_id": self.process_id,
++            "creation_time": self.creation_time,
++            "operator_sid": self.operator_sid,
++            "nonce": self.nonce,
++        }))
++
++
++def verify_software_initialization_permit(
++    trust, token, *, context, user_id, account_hash, now
++):
++    try:
++        if (
++            not isinstance(context, SoftwareInitializationContext)
++            or type(user_id) is not int or user_id < 1
++            or not isinstance(account_hash, str)
++            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", account_hash)
++            or not math.isfinite(now)
++        ):
++            raise ValueError()
++        header, claims = strict_jwt_parts(token)
++        if (
++            set(header) != {"alg", "typ", "kid"}
++            or header["alg"] != "ES256"
++            or header["typ"] != PERMIT_TYPE
++        ):
++            raise ValueError()
++        jwt.decode(
++            token, trust.verification_keys[header["kid"]], algorithms=["ES256"],
++            issuer=trust.issuer, audience=PERMIT_AUDIENCE,
++            options={"verify_iat": False, "verify_exp": False, "verify_nbf": False,
++                     "require": ["iss", "aud", "sub", "iat", "nbf", "exp", "jti"]},
++        )
++        if set(claims) != {
++            "schema", "iss", "aud", "product", "environment", "sub", "user_id",
++            "ath", "nonce", "context_hash", "action", "software_allowed",
++            "policy_revision", "iat", "nbf", "exp", "jti",
++        }:
++            raise ValueError()
++        if (
++            claims["schema"] != PERMIT_SCHEMA or claims["product"] != PRODUCT
++            or claims["environment"] != trust.environment or claims["aud"] != PERMIT_AUDIENCE
++            or claims["action"] != "initialize-software-key"
++            or claims["software_allowed"] is not True
++        ):
++            raise ValueError()
++        for name in ("user_id", "policy_revision", "iat", "nbf", "exp"):
++            if type(claims[name]) is not int or claims[name] < 1:
++                raise ValueError()
++        if (
++            claims["user_id"] != user_id or claims["sub"] != str(user_id)
++            or claims["nbf"] != claims["iat"] or claims["iat"] > now + 5
++            or now >= claims["exp"]
++            or not 0 < claims["exp"] - claims["iat"] <= PERMIT_SECONDS
++        ):
++            raise ValueError()
++        for name, expected in (("ath", account_hash), ("nonce", context.nonce), ("context_hash", context.context_hash)):
++            if not isinstance(claims[name], str) or not hmac.compare_digest(claims[name], expected):
++                raise ValueError()
++        if not isinstance(claims["jti"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", claims["jti"]):
++            raise ValueError()
++        return MappingProxyType(claims)
++    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, jwt.PyJWTError) as exc:
++        raise DeviceAuthorizationError(
++            "INVALID_SOFTWARE_INITIALIZATION_PERMIT",
++            "软件保护初始化许可无效，请联网重新确认；未创建或替换密钥", status_code=409,
++        ) from exc
++
++
++class SoftwareInitializationPermit:
++    """One in-memory delivery to the initializer; not a serializable session."""
++
++    def __init__(self, *, token, claims, context, wall_clock, monotonic_clock, started_wall, started_mono):
++        self._token, self._claims, self._context = token, claims, context
++        self._wall, self._mono = wall_clock, monotonic_clock
++        self._started_wall, self._started_mono = started_wall, started_mono
++        self._lock, self._consumed = threading.Lock(), False
++
++    def __repr__(self):
++        return "<SoftwareInitializationPermit (not a device grant)>"
++
++    def _assert_current(self, context):
++        now, mono = self._wall(), self._mono()
++        elapsed = mono - self._started_mono
++        if (
++            context != self._context
++            or not all(math.isfinite(value) for value in (now, mono, elapsed))
++            or elapsed < 0 or abs((now - self._started_wall) - elapsed) > 5
++            or now >= self._claims["exp"]
++            or elapsed >= self._claims["exp"] - self._started_wall
++        ):
++            raise DeviceAuthorizationError(
++                "SOFTWARE_INITIALIZATION_EXPIRED",
++                "初始化许可已过期或当前进程发生变化，请重新明确申请", status_code=409,
++            )
++
++    def consume_for_initializer(self, context):
++        with self._lock:
++            if self._consumed:
++                raise DeviceAuthorizationError(
++                    "SOFTWARE_INITIALIZATION_ALREADY_USED", "本次初始化许可已交付，不能重复使用", status_code=409,
++                )
++            self._assert_current(context)
++            self._consumed = True
++            # Dedicated initializer IPC only. Never return this through Web API,
++            # persist it, or put it in process arguments or ordinary diagnostics.
++            return self._token
++
++
++def request_software_initialization_permit(
++    *, trust, transport, user_id, account_token, context, wall_clock, monotonic_clock
++):
++    if not isinstance(context, SoftwareInitializationContext):
++        raise DeviceAuthorizationError("INVALID_DEVICE_INITIALIZATION", "设备初始化上下文无效", status_code=422)
++    started_wall, started_mono = wall_clock(), monotonic_clock()
++    response = transport.request(
++        method="POST", path=PERMIT_PATH,
++        headers={"Authorization": "Bearer " + account_token},
++        payload={"nonce": context.nonce, "context_hash": context.context_hash},
++    )
++    if not isinstance(response, dict) or set(response) != {"initialization_permit"}:
++        raise DeviceAuthorizationError("INVALID_SOFTWARE_INITIALIZATION_PERMIT", "软件初始化许可响应无效", status_code=409)
++    token = response["initialization_permit"]
++    claims = verify_software_initialization_permit(
++        trust, token, context=context, user_id=user_id,
++        account_hash=sha256_b64(account_token), now=wall_clock(),
++    )
++    permit = SoftwareInitializationPermit(
++        token=token, claims=claims, context=context, wall_clock=wall_clock,
++        monotonic_clock=monotonic_clock, started_wall=started_wall, started_mono=started_mono,
++    )
++    permit._assert_current(context)
++    return permit
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
+@@
+                 "local-policy",
++                "software-initialization-permit",
+@@
+-    def repair_key_access(self) -> dict:
++    def software_initialization_permit(self, *, context):
++        """Explicit bootstrap consent only; never called by status/refresh/queues."""
++        from .device_software_initialization import request_software_initialization_permit
++
++        with self._lock:
++            if self._closed:
++                raise DeviceAuthorizationError("LOGIN_REQUIRED", "请重新登录账号", status_code=401)
++            return request_software_initialization_permit(
++                trust=self.trust, transport=self._transport, user_id=self.user_id,
++                account_token=self._login_token, context=context,
++                wall_clock=self._wall, monotonic_clock=self._mono,
++            )
++
++    def repair_key_access(self) -> dict:
+*** End Patch

@@ -1,0 +1,43 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/README.md
+@@
+-2026-08-31 设备授权开发中：已接入本机密钥/签名凭据基础、设备登记接口、H3 持钥业务请求、激活页面（账号菜单 → 设备授权）及本地建草稿/导出核心和内嵌队列授权等待/手动恢复。正常升级不换设备密钥，设备拒绝不冒充账号退出或自动重发付费请求。其他私有入口、独立 Agent、后台刷新、发布公钥/包保护及真实跨电脑验收仍未完成；当前受保护 EXE 缺发布信任根，暂不要打包分发，不能作为防转拷完成版发布。详见 [设备授权实施文档](../../数字人/runninghub_mvp/工作台设备授权与免重复激活开发文档.md)。
++2026-09-01 设备授权开发中：已接入设备登记、H3 持钥/云端队列、本地核心与内嵌队列恢复、H3 历史批次显式补授权、独立后台刷新，以及正式 EXE 的 TPM 初始化提权与原密钥访问修复。正常升级不换密钥，权限修复不重新登记或恢复任务。软件兼容初始化、其他私有入口和独立 Agent/CLI、发布公钥/包保护及真实跨电脑验收仍未完成；当前受保护 EXE 缺发布信任根，暂不要打包分发，不能作为防转拷完成版发布。详见 [设备授权实施文档](../../数字人/runninghub_mvp/工作台设备授权与免重复激活开发文档.md)。
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/DEVELOPER_GUIDE.md
+@@
+ # 开发者指南
+ 
++### 2026-09-01 设备授权后续（开发中）
++
++- H3 历史批次支持原账号分页查看、明确确认后补授权，不创建生成任务或重发远程请求。`device_h3_recovery_routes.py` 和页面脚本接通原持钥通道。`device_background_refresh.py` 随服务运行，只刷新既有账号会话，不初始化密钥或恢复任务。
++- `device_identity_setup.py` 将首次 TPM 初始化交给同一正式 EXE 的固定提权辅助入口；`processor_windows.main()` 在配置/ASR/网站/任务启动前分派该入口，正常启动无初始化副作用。原密钥可用时直接复用，源码测试不自动创建机器密钥。
++- `device_identity_setup_windows.py` 通过原 PID/创建时间、存活状态、同 EXE/交互会话及 TokenUser 核对真正操作用户；不从网页接受 SID 或任意命令。UAC 取消不重试，超时保留原辅助进程句柄，不把观察失败当成进程结束。
++- `device_identity_acl.py` 在明确修复时为原密钥合并一个操作用户的读/签名权限，保留其他条目；不创建或删除密钥。`repair-key-access` 接口要求同源和严格确认；修复成功后重新打开原钥并联网校验，不调用 register，不批准设备或自动继续任务。
++- 本阶段模拟专项 `54 passed`，工作台初始化/授权/后台/本地核心/启动器/前端相关 `200 passed`，两端合同 `57 passed`。先前 H3 恢复阶段网站完整回归 `707 passed`，本轮未重跑网站全量（无服务端业务代码变化）。集合重叠不相加。浏览器模拟交互和请求证据通过，截图未获取，不算实机 TPM/跨机验收。
++- 软件保护的受控初始化与原软件密钥恢复、真实 UAC/ACL、多机/连续 EXE 更新、其他私有入口/独立 Agent/CLI、发布公钥与完整包保护仍未完成，暂不要打包分发。详细合同以 [开发文档第 17、18 节](../../../数字人/runninghub_mvp/工作台设备授权与免重复激活开发文档.md) 为准；以下为较早阶段记录。
++
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/WEB_API.md
+@@
+ # Web API
+ 
++## 2026-09-01 设备初始化、访问修复和 H3 补授权（开发中）
++
++- 新增 `POST /api/new/device-authorization/repair-key-access`，仅接受 `confirm_repair:true`。网站登录、同源和 `X-Device-Authorization-Action: 1` 必须同时满足；额外的 SID、进程 ID、命令、密钥名、软件批准字段拒绝。仅修复已有 TPM 密钥访问权限并校验原授权，不 register、不启动队列。
++- `/apply` 保持原严格参数。正式 EXE 在密钥确实缺失且用户明确申请时发起 UAC；已有钥匙只复用。`KEY_SETUP_IN_PROGRESS` 对应 `KEY_INITIALIZING`，观察仍活跃的辅助进程而不重开；取消为独立错误，不误退出账号。GET/refresh 不提权、不自动登记。
++- H3 本地恢复 API：`GET /api/new/device-authorization/h3-waiting`（可传 `after_id`）、`POST /api/new/device-authorization/h3/{batch_id}/prepare`、`POST /api/new/device-authorization/h3/{batch_id}/resume`。resume 严格接收 `resume_confirmed:true`、`review_token` 和 `request_key`，仍要求同源、专用头和云端持钥校验；不允许正文注入其他设备身份。
++- 云端恢复保留原批次/任务/费用计划，只更新合规未提交分段的授权关联；同键返回原回执，查看状态变化需重新确认。后台刷新独立于浏览器运行，只刷新既有会话，不自动恢复这些任务。
++- 所有设备响应继续不缓存；Windows 访问修复不能代替云端批准。当前发布信任根仍为空，软件兼容、其他入口和实机/整包验收仍未完成，暂不要打包或启用强制模式。以下为较早阶段合同与测试记录。
++
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_LAYOUT.md
+@@
+ 非权威缓存；`device_authorization_routes.py` 提供复用网站账号的本地登记接口。
++`device_identity_setup.py` 协调显式初始化/原密钥访问修复；`device_identity_setup_windows.py` 只启动并验证固定 EXE 辅助入口，`device_identity_acl.py` 合并已验证操作用户的原钥匙权限。普通读取和更新不调用提权。
++`device_background_refresh.py` 为既有会话独立后台刷新；`device_h3_recovery_routes.py` 与 `device-h3-recovery.js` 提供 H3 原批次显式补授权，不自动重新生成。
+@@
+-这些模块不属于音视频处理算法。其他私有入口、独立 Agent、后台刷新、发布公钥和完整包保护尚未完成；当前不要打包分发。
++这些模块不属于音视频处理算法。软件兼容初始化、其他私有入口、独立 Agent/CLI、发布公钥、完整包保护和真实 TPM/跨机验收尚未完成；当前不要打包分发。
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/docs/PROJECT_STATUS.md
+@@
+-> 2026-08-31 设备授权开发中：机器级密钥、签名凭据/刷新会话及本地登记接口已加入源码；工作台相关回归 `63 passed`，服务端真实两端合同及原授权/迁移回归 `29 passed`。使用模拟密钥，未验证真实 TPM 或跨机复制。发布信任根为空，激活页面、UAC/ACL、现有业务与队列准入、整包保护尚未完成；未启用强制拦截、未打包/推送/部署。
++> 2026-09-01 设备授权开发中：设备登记/持钥、H3 云端准入与历史队列补授权、本地核心/内嵌队列恢复、后台刷新均已有源码接入。最新增加正式 EXE 的 TPM 初始化提权与原密钥访问修复；模拟专项 `54 passed`、工作台相关回归 `200 passed`、两端合同 `57 passed`。软件兼容、其他私有入口/独立 Agent/CLI、发布公钥/整包保护和真实 TPM/跨机/连续升级验收尚未完成。信任根仍为空，暂不要打包分发；无真实提权或密钥创建、未推送部署。
+*** End Patch

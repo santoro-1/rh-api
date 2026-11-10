@@ -1,0 +1,240 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_initialization_channel.py
++"""One outbound local named-pipe message for software initialization consent.
++
++No HTTP endpoint, pickle, commands, login tokens or signing oracle. The server
++checks the launched helper PID; the helper checks the original server PID. The
++helper must additionally verify the signed envelope and original process token.
++"""
++from __future__ import annotations
++
++import ctypes
++from ctypes import wintypes
++import json
++import os
++import re
++import threading
++
++from .device_identity_store import _SecurityAttributes
++from .device_identity_windows import DeviceIdentityError, validate_operator_sid
++
++MAX_MESSAGE = 16384
++HANDOFF_SCHEMA = "publicvideo.software-initializer-handoff.v1"
++
++
++def pipe_name(nonce):
++    if not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", nonce):
++        raise DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "初始化通道标识无效")
++    return r"\\.\pipe\PublicVideoWorkbench.SoftwareInit." + nonce
++
++
++def _failure():
++    return DeviceIdentityError("KEY_SETUP_CHANNEL_FAILED", "初始化安全通道未完成，请明确重试；不会替换原密钥")
++
++
++class NativePipeIO:
++    def __init__(self, *, kernel=None, advapi=None, overlapped_api=None):
++        if kernel is None:
++            if os.name != "nt":
++                raise DeviceIdentityError("WINDOWS_REQUIRED", "设备初始化需要 Windows")
++            import _winapi
++            kernel = ctypes.WinDLL("kernel32.dll", winmode=0x800, use_last_error=True)
++            advapi = ctypes.WinDLL("advapi32.dll", winmode=0x800, use_last_error=True)
++            overlapped_api = _winapi
++        self._kernel, self._advapi, self._ov = kernel, advapi, overlapped_api
++        ptr, dword, handle = ctypes.c_void_p, wintypes.DWORD, wintypes.HANDLE
++        for name, args, result in (
++            ("CreateNamedPipeW", [wintypes.LPCWSTR] + [dword] * 6 + [ctypes.POINTER(_SecurityAttributes)], handle),
++            ("CreateFileW", [wintypes.LPCWSTR, dword, dword, ptr, dword, dword, handle], handle),
++            ("WaitNamedPipeW", [wintypes.LPCWSTR, dword], wintypes.BOOL),
++            ("GetNamedPipeClientProcessId", [handle, ctypes.POINTER(dword)], wintypes.BOOL),
++            ("GetNamedPipeServerProcessId", [handle, ctypes.POINTER(dword)], wintypes.BOOL),
++            ("CancelIoEx", [handle, ptr], wintypes.BOOL),
++            ("CloseHandle", [handle], wintypes.BOOL),
++            ("LocalFree", [ptr], ptr),
++        ):
++            fn = getattr(kernel, name)
++            fn.argtypes, fn.restype = args, result
++        advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
++            wintypes.LPCWSTR, dword, ctypes.POINTER(ptr), ctypes.POINTER(dword)]
++        advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
++
++    def create_server(self, nonce, operator_sid):
++        name, sid = pipe_name(nonce), validate_operator_sid(operator_sid)
++        descriptor, size = ctypes.c_void_p(), wintypes.DWORD()
++        # Only this operator, SYSTEM and elevated administrators can open it.
++        if not self._advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
++            f"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{sid})", 1,
++            ctypes.byref(descriptor), ctypes.byref(size)
++        ):
++            raise _failure()
++        try:
++            security = _SecurityAttributes(ctypes.sizeof(_SecurityAttributes), descriptor, False)
++            handle = self._kernel.CreateNamedPipeW(
++                name, 2 | 0x40000000 | 0x80000, 4 | 2 | 8, 1,
++                MAX_MESSAGE, 0, 10000, ctypes.byref(security))
++        finally:
++            self._kernel.LocalFree(descriptor)
++        if handle in {None, 0, ctypes.c_void_p(-1).value}:
++            raise _failure()
++        return handle
++
++    def _complete(self, ov, *, pending, timeout_ms):
++        try:
++            if pending and self._ov.WaitForMultipleObjects([ov.event], False, timeout_ms) != 0:
++                raise _failure()
++            count, error = ov.GetOverlappedResult(False)
++            if error:
++                raise _failure()
++            return count
++        except BaseException:
++            # Finish cancellation before releasing buffers/overlapped objects.
++            ov.cancel()
++            ov.GetOverlappedResult(True)
++            raise
++
++    def connect(self, handle):
++        ov = self._ov.ConnectNamedPipe(handle, overlapped=True)
++        self._complete(ov, pending=True, timeout_ms=120000)
++
++    def peer_pid(self, handle, *, server):
++        value = wintypes.DWORD()
++        fn = self._kernel.GetNamedPipeServerProcessId if server else self._kernel.GetNamedPipeClientProcessId
++        if not fn(handle, ctypes.byref(value)) or not value.value:
++            raise _failure()
++        return value.value
++
++    def write(self, handle, message):
++        if not isinstance(message, bytes) or not 1 <= len(message) <= MAX_MESSAGE:
++            raise _failure()
++        ov, error = self._ov.WriteFile(handle, message, overlapped=True)
++        count = self._complete(ov, pending=error == 997, timeout_ms=5000)
++        if count != len(message):
++            raise _failure()
++
++    def receive(self, nonce, expected_pid):
++        if type(expected_pid) is not int or not 1 <= expected_pid <= 0xFFFFFFFF:
++            raise _failure()
++        name = pipe_name(nonce)
++        if not self._kernel.WaitNamedPipeW(name, 10000):
++            raise _failure()
++        handle = self._kernel.CreateFileW(name, 0x80000000, 0, None, 3, 0x40000000, None)
++        if handle in {None, 0, ctypes.c_void_p(-1).value}:
++            raise _failure()
++        try:
++            if self.peer_pid(handle, server=True) != expected_pid:
++                raise _failure()
++            # Exactly one message; oversize/partial messages are never parsed.
++            ov, error = self._ov.ReadFile(handle, MAX_MESSAGE + 1, overlapped=True)
++            count = self._complete(ov, pending=error == 997, timeout_ms=10000)
++            if not 1 <= count <= MAX_MESSAGE:
++                raise _failure()
++            return bytes(ov.getbuffer())[:count]
++        finally:
++            self.close(handle)
++
++    def cancel(self, handle):
++        self._kernel.CancelIoEx(handle, None)
++
++    def close(self, handle):
++        self._kernel.CloseHandle(handle)
++
++
++class SoftwareInitializationChannel:
++    """Owns only a bounded ephemeral pipe, not the helper process or any CNG key."""
++
++    def __init__(self, context, permit, *, api=None):
++        self.context, self._permit = context, permit
++        self._api = api if api is not None else NativePipeIO()
++        self._handle = self._api.create_server(context.nonce, context.operator_sid)
++        self._helper_pid = None
++        self._published, self._stop = threading.Event(), threading.Event()
++        self._lock = threading.Lock()
++        self.error_code = None
++        self._thread = threading.Thread(target=self._serve, name="device-setup-pipe", daemon=True)
++        try:
++            self._thread.start()
++        except BaseException:
++            self._api.close(self._handle)
++            self._handle = None
++            raise
++
++    def bind_helper(self, pid):
++        if type(pid) is not int or not 1 <= pid <= 0xFFFFFFFF:
++            raise _failure()
++        with self._lock:
++            if self._helper_pid is not None:
++                raise _failure()
++            self._helper_pid = pid
++            self._published.set()
++
++    def _serve(self):
++        try:
++            self._api.connect(self._handle)
++            if not self._published.wait(10) or self._stop.is_set():
++                raise _failure()
++            if self._api.peer_pid(self._handle, server=False) != self._helper_pid:
++                raise _failure()
++            payload = self._permit.initializer_handoff(self.context)
++            message = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
++            self._api.write(self._handle, message)
++        except Exception:
++            # Do not log exception text, signed permits, SID or account metadata.
++            self.error_code = "KEY_SETUP_CHANNEL_FAILED"
++        finally:
++            with self._lock:
++                handle, self._handle = self._handle, None
++                if handle is not None:
++                    self._api.close(handle)
++            self._permit = None
++
++    def close(self):
++        self._stop.set()
++        self._published.set()
++        with self._lock:
++            if self._handle is not None:
++                self._api.cancel(self._handle)
++        # The I/O thread closes its own handle after observed completion/cancel.
++        self._thread.join(2)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_software_initialization.py
+@@
+     strict_jwt_parts,
++    strict_json,
++    bundled_trust,
+@@
+     def consume_for_initializer(self, context):
+@@
+             return self._token
++
++    def initializer_handoff(self, context):
++        from .device_initialization_channel import HANDOFF_SCHEMA
++
++        return {
++            "schema": HANDOFF_SCHEMA,
++            "origin": self._claims["iss"].removesuffix("/workbench-device-auth"),
++            "user_id": self._claims["user_id"],
++            "account_hash": self._claims["ath"],
++            "initialization_permit": self.consume_for_initializer(context),
++        }
++
++
++def verify_initializer_handoff(raw, *, context, now, trust_resolver=bundled_trust):
++    from .device_initialization_channel import HANDOFF_SCHEMA, MAX_MESSAGE
++
++    try:
++        if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_MESSAGE:
++            raise ValueError()
++        value = strict_json(raw)
++        if not isinstance(value, dict) or set(value) != {
++            "schema", "origin", "user_id", "account_hash", "initialization_permit"
++        } or value["schema"] != HANDOFF_SCHEMA:
++            raise ValueError()
++        trust = trust_resolver(value["origin"])
++        return verify_software_initialization_permit(
++            trust, value["initialization_permit"], context=context,
++            user_id=value["user_id"], account_hash=value["account_hash"], now=now)
++    except (ValueError, TypeError, UnicodeError, RecursionError, KeyError) as exc:
++        raise DeviceAuthorizationError(
++            "INVALID_SOFTWARE_INITIALIZATION_PERMIT", "软件初始化交接无效，未创建或替换密钥", status_code=409
++        ) from exc
+*** End Patch

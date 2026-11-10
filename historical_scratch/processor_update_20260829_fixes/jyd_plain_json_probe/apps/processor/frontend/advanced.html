@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>剪映批量渲染</title>
+    <link rel="stylesheet" href="/app-static/styles.css?v=20260714-4" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>视频批量生成</h1>
+          <p>选择原始视频或剪辑母版，组合字幕、音乐、特效和文字模板后批量输出。</p>
+        </div>
+        <div class="header-actions">
+          <a href="/app">视频生成</a>
+          <a href="/app/assets">素材管理</a>
+          <button id="adminLogoutBtn" type="button">退出后台</button>
+          <div class="status" id="apiStatus">检测后端中...</div>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>1. 选择输入来源</h2>
+        </div>
+
+        <div class="grid three">
+          <label class="field">
+            <span>来源方式</span>
+            <select id="sourceMode">
+              <option value="video">上传 MP4，从空白草稿生成</option>
+              <option value="mother">使用已导入母版，保留原视频</option>
+              <option value="template-replace">上传 MP4，替换旧模板视频槽</option>
+            </select>
+          </label>
+          <label id="videoSourceField" class="field">
+            <span>视频文件</span>
+            <input id="videoFile" type="file" accept="video/*" />
+          </label>
+          <label class="field">
+            <span>输出草稿目录</span>
+            <input id="draftRoot" type="text" value="D:/剪映草稿/JianyingPro Drafts" />
+          </label>
+        </div>
+
+        <div id="templateUsage" class="template-use-box hidden">
+          <div class="grid two">
+            <label class="field">
+              <span id="templateSelectLabel">选择母版</span>
+              <select id="templateSelect"></select>
+            </label>
+            <div class="template-usage-summary" id="templateUsageSummary"></div>
+          </div>
+        </div>
+
+        <div id="sourceSummary" class="source-summary">上传一个 MP4 后，系统会先创建基础剪映草稿。</div>
+
+        <details class="template-manager">
+          <summary>开发工具：从渲染服务器本机草稿导入旧模板</summary>
+          <div class="template-import-box">
+            <div class="grid three">
+              <label class="field">
+                <span>剪映草稿根目录</span>
+                <input id="draftScanRoot" type="text" value="D:/剪映草稿/JianyingPro Drafts" />
+              </label>
+              <label class="field">
+                <span>服务器草稿</span>
+                <select id="draftSelect"></select>
+              </label>
+              <label class="field">
+                <span>模板名称</span>
+                <input id="templateImportName" type="text" placeholder="默认使用草稿文件夹名" />
+              </label>
+              <label class="field">
+                <span>模板 ID（可选）</span>
+                <input id="templateImportId" type="text" placeholder="留空自动生成" />
+              </label>
+              <label class="field checkbox">
+                <input id="templateImportReplace" type="checkbox" />
+                <span>覆盖同 ID 模板</span>
+              </label>
+              <div class="actions inline-actions">
+                <button id="scanDraftsBtn" type="button">扫描草稿</button>
+                <button id="importDraftBtn" type="button">导入模板库</button>
+                <button id="refreshTemplatesBtn" type="button">刷新模板</button>
+              </div>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>2. 字幕与文字</h2>
+        </div>
+        <div class="grid three text-mode-row">
+          <label class="field">
+            <span>文字方式</span>
+            <select id="textMode">
+              <option value="preserve">保留母版现有字幕</option>
+              <option value="restyle">保留字幕内容，统一替换样式</option>
+              <option value="captions">长文案自动字幕</option>
+              <option value="add">新增文字</option>
+              <option value="replace">替换已有文字</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>字体样式</span>
+            <select id="textStyleSelect"></select>
+          </label>
+          <label class="field">
+            <span>花字（仅新增文字）</span>
+            <select id="textEffectSelect"></select>
+          </label>
+        </div>
+
+        <div id="captionEditor" class="subtitle-workspace">
+          <div class="subtitle-controls">
+            <label class="field">
+              <span>长文案</span>
+              <textarea id="captionText" rows="8" placeholder="输入与视频口播对应的完整文案。程序会按标点和最大字数切成多段字幕。"></textarea>
+            </label>
+            <div class="grid three compact-grid">
+              <label class="field">
+                <span>开始时间（秒）</span>
+                <input id="captionStart" type="number" min="0" step="0.1" value="0" />
+              </label>
+              <label class="field">
+                <span>覆盖时长（秒，0 为整段视频）</span>
+                <input id="captionDuration" type="number" min="0" step="0.1" value="0" />
+              </label>
+              <label class="field">
+                <span>每条最多字数</span>
+                <input id="captionMaxChars" type="number" min="4" max="60" step="1" value="16" />
+              </label>
+              <label class="field">
+                <span>字号</span>
+                <input id="captionSize" type="number" min="3" max="40" step="0.5" value="15" />
+              </label>
+              <label class="field">
+                <span>文字颜色</span>
+                <input id="captionColor" type="color" value="#ffffff" />
+              </label>
+              <label class="field">
+                <span>字幕最大宽度 <output id="captionWidthValue">82%</output></span>
+                <input id="captionWidth" type="range" min="40" max="96" step="1" value="82" />
+              </label>
+              <label class="field">
+                <span>水平位置 <output id="captionXValue">0.00</output></span>
+                <input id="captionX" type="range" min="-1" max="1" step="0.02" value="0" />
+              </label>
+              <label class="field">
+                <span>垂直位置 <output id="captionYValue">-0.80</output></span>
+                <input id="captionY" type="range" min="-1" max="1" step="0.02" value="-0.8" />
+              </label>
+            </div>
+            <div class="caption-summary" id="captionSummary">选择视频并输入文案后生成切分预览。</div>
+          </div>
+
+          <div class="preview-column">
+            <div class="video-preview" id="videoPreviewFrame">
+              <video id="captionVideo" controls playsinline preload="metadata"></video>
+              <div id="captionOverlay" class="caption-overlay hidden"></div>
+              <div id="previewEmpty" class="preview-empty">选择 MP4 或母版后在这里预览</div>
+            </div>
+            <div class="preview-time" id="previewTime">00:00.0 / 00:00.0</div>
+          </div>
+        </div>
+
+        <div id="captionCueList" class="caption-cue-list"></div>
+
+        <div id="singleTextEditor" class="grid three hidden">
+          <label class="field">
+            <span>文字内容</span>
+            <input id="textValue" type="text" placeholder="例如：限时优惠，立即预约" />
+          </label>
+          <label class="field">
+            <span>开始时间（秒）</span>
+            <input id="textStart" type="number" min="0" step="0.1" value="0" />
+          </label>
+          <label class="field">
+            <span>持续时间（秒，0 为到视频结尾）</span>
+            <input id="textDuration" type="number" min="0" step="0.1" value="0" />
+          </label>
+          <label class="field text-replace-only hidden">
+            <span>文本轨道下标</span>
+            <input id="textTrackIndex" type="number" min="0" step="1" value="0" />
+          </label>
+          <label class="field text-replace-only hidden">
+            <span>文本片段下标</span>
+            <input id="textSegmentIndex" type="number" min="0" step="1" value="0" />
+          </label>
+        </div>
+
+        <div class="text-template-editor">
+          <div class="section-title compact-title">
+            <h3>复合文字模板</h3>
+          </div>
+          <div class="grid three">
+            <label class="field">
+              <span>模板</span>
+              <select id="textTemplateSelect"></select>
+            </label>
+            <label class="field">
+              <span>开始时间（秒）</span>
+              <input id="textTemplateStart" type="number" min="0" step="0.1" value="0" />
+            </label>
+            <label class="field">
+              <span>持续时间（秒，0 为到视频结尾）</span>
+              <input id="textTemplateDuration" type="number" min="0" step="0.1" value="0" />
+            </label>
+          </div>
+          <div id="textTemplateSlots" class="grid two text-template-slots"></div>
+          <div id="textTemplateSummary" class="caption-summary">不添加复合文字模板。</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-title combination-title">
+          <div>
+            <h2>3. 素材组合</h2>
+            <p>每类素材可以不使用、固定使用一个，或让多个候选项参与排列组合。</p>
+          </div>
+          <label class="field combination-mode-field">
+            <span>生成方式</span>
+            <select id="combinationMode">
+              <option value="batch">批量排列组合</option>
+              <option value="single">单个测试</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="batchCombinationEditor" class="combination-editor">
+          <div class="combination-columns">
+            <div class="asset-picker">
+              <div class="asset-picker-head">
+                <div>
+                  <strong>BGM</strong>
+                  <span id="batchAudioCount">已选 0 首</span>
+                </div>
+                <label class="dimension-mode-field">
+                  <span>使用方式</span>
+                  <select id="batchAudioDimensionMode">
+                    <option value="disabled" selected>不使用</option>
+                    <option value="fixed">固定一个</option>
+                    <option value="product">参与组合</option>
+                  </select>
+                </label>
+                <div class="asset-picker-actions">
+                  <button id="selectVisibleAudioBtn" type="button">全选当前分类</button>
+                  <button id="clearAudioSelectionBtn" type="button">清空</button>
+                </div>
+              </div>
+              <label class="field asset-filter">
+                <span>按分类筛选</span>
+                <select id="batchAudioCategorySelect"></select>
+              </label>
+              <div id="batchAudioList" class="asset-check-list"></div>
+              <audio id="batchAudioPreview" class="batch-audio-preview" controls preload="metadata"></audio>
+            </div>
+
+            <div class="asset-picker">
+              <div class="asset-picker-head">
+                <div>
+                  <strong>视频特效</strong>
+                  <span id="batchEffectCount">已选 0 个</span>
+                </div>
+                <label class="dimension-mode-field">
+                  <span>使用方式</span>
+                  <select id="batchEffectDimensionMode">
+                    <option value="disabled" selected>不使用</option>
+                    <option value="fixed">固定一个</option>
+                    <option value="product">参与组合</option>
+                  </select>
+                </label>
+                <div class="asset-picker-actions">
+                  <button id="selectAllEffectsBtn" type="button">全选</button>
+                  <button id="clearEffectSelectionBtn" type="button">清空</button>
+                </div>
+              </div>
+              <div id="batchEffectList" class="asset-check-list effect-check-list"></div>
+            </div>
+
+            <div class="asset-picker">
+              <div class="asset-picker-head">
+                <div>
+                  <strong>新增文字花字</strong>
+                  <span id="batchTextEffectCount">已选 0 个</span>
+                </div>
+                <label class="dimension-mode-field">
+                  <span>使用方式</span>
+                  <select id="batchTextEffectDimensionMode">
+                    <option value="disabled" selected>不使用花字</option>
+                    <option value="fixed">固定一个</option>
+                    <option value="product">参与组合</option>
+                  </select>
+                </label>
+                <div class="asset-picker-actions">
+                  <button id="selectAllTextEffectsBtn" type="button">全选</button>
+                  <button id="clearTextEffectSelectionBtn" type="button">清空</button>
+                </div>
+              </div>
+              <div class="asset-picker-note">使用上方“新增文字”的内容、样式和时间，仅切换花字外观。</div>
+              <div id="batchTextEffectList" class="asset-check-list compact-asset-list"></div>
+            </div>
+
+            <div class="asset-picker">
+              <div class="asset-picker-head">
+                <div>
+                  <strong>复合文字模板</strong>
+                  <span id="batchTextTemplateCount">已选 0 个</span>
+                </div>
+                <label class="dimension-mode-field">
+                  <span>使用方式</span>
+                  <select id="batchTextTemplateDimensionMode">
+                    <option value="disabled" selected>不使用</option>
+                    <option value="fixed">固定一个</option>
+                    <option value="product">参与组合</option>
+                  </select>
+                </label>
+                <div class="asset-picker-actions">
+                  <button id="selectAllTextTemplatesBtn" type="button">全选</button>
+                  <button id="clearTextTemplateSelectionBtn" type="button">清空</button>
+                </div>
+              </div>
+              <div class="asset-picker-note">每个模板使用其保存的文字槽默认值；上方正在编辑的模板使用当前填写值。</div>
+              <div id="batchTextTemplateList" class="asset-check-list compact-asset-list"></div>
+            </div>
+          </div>
+          <div id="batchCombinationSummary" class="combination-summary">
+            当前没有参与组合的素材，将生成 1 个固定任务。
+          </div>
+          <label class="field batch-limit-field">
+            <span>单批任务上限</span>
+            <input id="batchMaxJobs" type="number" min="1" max="1000" step="1" value="500" />
+          </label>
+        </div>
+
+        <div id="singleCombinationEditor" class="grid three content-grid hidden">
+          <label class="field">
+            <span>BGM 来源</span>
+            <select id="audioMode">
+              <option value="library-next">音乐库：按分类顺序自动选择</option>
+              <option value="library-specific">音乐库：指定音乐</option>
+              <option value="upload">临时上传音乐</option>
+              <option value="none">不添加 BGM</option>
+            </select>
+          </label>
+          <label class="field audio-library-field" id="audioCategoryField">
+            <span>音乐大类</span>
+            <select id="audioCategorySelect"></select>
+          </label>
+          <label class="field audio-library-field" id="audioAssetField">
+            <span>音乐</span>
+            <select id="audioLibrarySelect"></select>
+          </label>
+          <label class="field hidden" id="audioUploadField">
+            <span>BGM 文件</span>
+            <input id="audioFile" type="file" accept="audio/*" />
+          </label>
+          <label class="field">
+            <span>特效</span>
+            <select id="effectSelect"></select>
+          </label>
+          <div class="field audio-preview-field">
+            <span>音乐试听</span>
+            <audio id="audioPreview" controls preload="metadata"></audio>
+            <small id="audioSelectionHint">音乐库加载中。</small>
+          </div>
+        </div>
+
+        <div class="grid three content-grid combination-common-settings">
+          <label class="field">
+            <span>BGM 开始时间（秒）</span>
+            <input id="audioStart" type="number" min="0" step="0.1" value="0" />
+          </label>
+          <label class="field">
+            <span>BGM 持续时间（秒，0 为视频长度）</span>
+            <input id="audioDuration" type="number" min="0" step="0.1" value="0" />
+          </label>
+          <label class="field">
+            <span>BGM 截取开始（秒）</span>
+            <input id="audioSourceStart" type="number" min="0" step="0.1" value="0" />
+          </label>
+          <label class="field">
+            <span>BGM 音量 <output id="audioVolumeValue">30%</output></span>
+            <input id="audioVolume" type="range" min="0" max="100" step="1" value="30" />
+          </label>
+        </div>
+
+        <details class="template-manager audio-manager">
+          <summary>音乐库分类管理</summary>
+          <div class="audio-manager-toolbar">
+            <label class="field">
+              <span>新分类名称</span>
+              <input id="audioCategoryName" type="text" placeholder="例如：轻松口播" />
+            </label>
+            <button id="createAudioCategoryBtn" type="button">创建分类</button>
+            <button id="refreshAudioLibraryBtn" type="button">刷新音乐库</button>
+          </div>
+          <div id="audioCatalogManager" class="audio-catalog-manager"></div>
+        </details>
+      </section>
+
+      <section class="panel">
+        <h2>4. 导出设置</h2>
+        <div class="grid three">
+          <label class="field">
+            <span>分辨率</span>
+            <select id="resolution">
+              <option>1080P</option>
+              <option>720P</option>
+              <option>2K</option>
+              <option>4K</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>帧率</span>
+            <select id="framerate">
+              <option>30fps</option>
+              <option>25fps</option>
+              <option>24fps</option>
+              <option>50fps</option>
+              <option>60fps</option>
+            </select>
+          </label>
+          <label class="field checkbox">
+            <input id="skipExport" type="checkbox" />
+            <span>只生成草稿，不导出 MP4</span>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="renderBtn" class="primary" type="button">开始生成</button>
+        </div>
+      </section>
+
+      <section class="panel result-panel">
+        <h2>运行结果</h2>
+        <pre id="logBox">等待提交任务。</pre>
+        <div id="batchResultList" class="batch-result-list hidden"></div>
+        <a id="downloadLink" class="download hidden" href="#">下载 MP4</a>
+      </section>
+    </main>
+    <script src="/app-static/admin-session.js?v=20260714-1"></script>
+    <script src="/app-static/app.js?v=20260715-5"></script>
+  </body>
+</html>

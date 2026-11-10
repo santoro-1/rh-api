@@ -1,0 +1,48 @@
+{
+  "schema": "jyd.render_job.v1",
+  "source": {
+    "type": "template",
+    "template_draft_dir": "D:/工作内容/轻盈健/公寓/jy-draftc/decrypted"
+  },
+  "decrypt": {
+    "enabled": true,
+    "force": false,
+    "work_root": "",
+    "exe": "",
+    "install_dir": "",
+    "debug": false
+  },
+  "output": {
+    "draft_root": "D:/工作内容/轻盈健/公寓/_local_loop_test",
+    "draft_name": "",
+    "mp4_path": "D:/工作内容/轻盈健/公寓/_local_loop_test/render_job_template.mp4",
+    "skip_export": true
+  },
+  "texts": [
+    {
+      "type": "add",
+      "scope": "top",
+      "track_name": "auto_title",
+      "text": "这里是模板模式新增文字",
+      "start_us": 0,
+      "duration_us": 5000000,
+      "style_json_path": "D:/工作内容/轻盈健/公寓/text_style_library/抖音美好体测试.json",
+      "apply_clip": true
+    }
+  ],
+  "audios": [],
+  "effects": [
+    {
+      "effect_json_path": "D:/工作内容/轻盈健/公寓/effect_library/流星雨.json",
+      "target_video_track_index": 0,
+      "target_video_segment_index": 0,
+      "start_us": -1,
+      "duration_us": 0
+    }
+  ],
+  "export": {
+    "resolution": "1080P",
+    "framerate": "30fps",
+    "timeout": 1200
+  }
+}

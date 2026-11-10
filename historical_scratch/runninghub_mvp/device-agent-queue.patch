@@ -1,0 +1,109 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_queue.py
++"""Ownership checks for a cryptographically admitted Agent, never job input flags."""
++
++from __future__ import annotations
++
++import time
++
++from .device_agent_protocol import AgentDecision, fail
++
++
++def require_decision(decision, intent):
++    if not isinstance(decision, AgentDecision) or decision.intent != intent:
++        fail("DEVICE_AGENT_CONTEXT_REQUIRED", "缺少已验证的执行机授权", 409)
++    if decision.expires_at <= time.time():
++        fail("AGENT_PERMIT_EXPIRED", "处理机许可已过期，请重新验证", 409)
++    return decision
++
++
++def matches_assignment(status, decision):
++    source = status.get("device_authorization") or {}
++    binding = status.get("agent_device_authorization") or {}
++    return (
++        type(source.get("user_id")) is int and source["user_id"] == decision.user_id
++        and type(binding.get("user_id")) is int and binding["user_id"] == decision.user_id
++        and binding.get("schema") == "publicvideo.agent-assignment.v1"
++        and binding.get("thumbprint") == decision.thumbprint
++        and (decision.thumbprint is not None or decision.mode in {"OFF", "OBSERVE"})
++    )
++
++
++def require_assignment(status, decision):
++    if not matches_assignment(status, decision):
++        fail("DEVICE_AGENT_ASSIGNMENT_MISMATCH", "原任务不属于此账号和执行机", 409)
++
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/task_store.py
+@@
+             for row in rows:
+                 status = _object(row["status_json"], {})
++                if status.get("agent_device_authorization"):
++                    # Losing an Agent lease is not proof its renderer stopped.
++                    # Keep the original assignment for result recovery, and never
++                    # silently hand potentially running work to a second machine.
++                    status["agent_recovery_required"] = True
++                    status["recovery_reason"] = "authorized_agent_lease_uncertain"
++                    status.pop("lease_expires_at", None)
++                    connection.execute(
++                        "UPDATE jobs SET status_json=?, lease_expires_at=NULL WHERE job_id=?",
++                        (_json(status), row["job_id"]),
++                    )
++                    connection.execute(
++                        "UPDATE agents SET status='offline' WHERE agent_id=? AND current_job_id=?",
++                        (row["assigned_agent_id"], row["job_id"]),
++                    )
++                    continue
+                 cancelled = bool(row["cancel_requested"])
+@@
+-    def claim_job(self, agent_id: str, lease_seconds: int = 120) -> dict[str, Any] | None:
++    def claim_job(self, agent_id: str, lease_seconds: int = 120, *, authorization=None) -> dict[str, Any] | None:
++        from .device_agent_queue import require_decision, require_assignment
++        from .device_agent_protocol import fail
++        from .device_local_execution import render_operation_scopes
++
++        if authorization is not None:
++            require_decision(authorization, "execute")
+         self.recover_expired_leases()
+@@
+         with self._transaction() as connection:
++            if authorization is not None:
++                require_decision(authorization, "execute")
+             agent = connection.execute(
+@@
+                 row = connection.execute(
+                     "SELECT * FROM jobs WHERE job_id=?", (agent["current_job_id"],)
+                 ).fetchone()
++                if row is not None and authorization is not None:
++                    status = _object(row["status_json"], {})
++                    require_assignment(status, authorization)
++                    if status.get("agent_recovery_required"):
++                        fail("DEVICE_AGENT_EXECUTION_UNCERTAIN", "原处理任务状态待确认，未重复分配", 409)
++                    if not render_operation_scopes(_object(row["payload_json"], {})) <= authorization.scopes:
++                        fail("DEVICE_SCOPE_DENIED", "此执行机当前没有原任务所需权限")
+                 return self._job_claim_dict(row) if row is not None else None
+@@
+             row = connection.execute(
+                 """
+                 SELECT * FROM jobs
+@@
+                 """
+             ).fetchone()
++            if authorization is not None:
++                # Only server-recorded owners count. Legacy/unowned jobs and
++                # user_id fields inside the job payload are never guessed.
++                candidates = connection.execute(
++                    "SELECT * FROM jobs WHERE status='pending' AND cancel_requested=0 "
++                    "AND COALESCE(json_extract(status_json, '$.device_authorization.waiting'), 0)=0 "
++                    "AND json_type(status_json, '$.device_authorization.user_id')='integer' "
++                    "AND json_extract(status_json, '$.device_authorization.user_id')=? "
++                    "ORDER BY queued_at, created_at, rowid",
++                    (authorization.user_id,),
++                )
++                row = next((candidate for candidate in candidates
++                            if render_operation_scopes(_object(candidate["payload_json"], {})) <= authorization.scopes), None)
+@@
+             status = _object(row["status_json"], {})
++            if authorization is not None:
++                status["agent_device_authorization"] = authorization.snapshot()
+             status.update(
+*** End Patch

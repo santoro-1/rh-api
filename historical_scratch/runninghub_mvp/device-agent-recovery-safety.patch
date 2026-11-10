@@ -1,0 +1,117 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/task_store.py
+@@
+         normalized = dict(status)
+         current = str(normalized.get("status") or "failed")
++        if normalized.get("agent_device_authorization"):
++            # A copied/stale status file must not reset an authoritative DB row.
++            # If the DB really was lost, preserve the old execution assignment
++            # for reporting; never import possibly running Agent work as pending.
++            with self._transaction() as connection:
++                if connection.execute("SELECT 1 FROM jobs WHERE job_id=?", (job_id,)).fetchone():
++                    return
++                if current in {"pending", "running"}:
++                    current = "running"
++                    normalized.update(agent_recovery_required=True, recovery_reason="imported_authorized_agent_uncertain")
++                    normalized.pop("lease_expires_at", None)
++                normalized["status"] = current
++                now = _now()
++                connection.execute(
++                    "INSERT INTO jobs(job_id,batch_id,status,payload_json,status_json,assigned_agent_id,created_at,queued_at,"
++                    "started_at,finished_at,retry_count,cancel_requested,error,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++                    (job_id, normalized.get("batch_id") or None, current, _json(payload), _json(normalized),
++                     normalized.get("assigned_agent_id"), normalized.get("created_at") or now, normalized.get("queued_at") or now,
++                     normalized.get("started_at"), normalized.get("finished_at"), int(normalized.get("retry_count") or 0),
++                     int(normalized.get("cancel_requested") is True), str(normalized.get("error") or ""),
++                     _json(normalized["result"]) if isinstance(normalized.get("result"), dict) else None),
++                )
++            return
+         if current == "running":
+@@
+                 return self._job_claim_dict(row) if row is not None else None
++
++            if authorization is not None and authorization.thumbprint is not None:
++                busy = connection.execute(
++                    "SELECT 1 FROM jobs WHERE status='running' AND json_extract(status_json, '$.agent_device_authorization.thumbprint')=? LIMIT 1",
++                    (authorization.thumbprint,),
++                ).fetchone()
++                if busy is not None:
++                    # Several labels/accounts must not give one physical key
++                    # concurrent render slots in the same central queue.
++                    return None
+@@
+                 WHERE status='pending' AND cancel_requested=0
+                   AND COALESCE(json_extract(status_json, '$.device_authorization.waiting'), 0)=0
++                  AND json_type(status_json, '$.agent_device_authorization') IS NULL
+@@
+                     "AND COALESCE(json_extract(status_json, '$.device_authorization.waiting'), 0)=0 "
++                    "AND json_type(status_json, '$.agent_device_authorization') IS NULL "
+                     "AND json_type(status_json, '$.device_authorization.user_id')='integer' "
+@@
+             for row in rows:
+-                if row["status"] == "pending":
+-                    status = _object(row["status_json"], {})
++                status = _object(row["status_json"], {})
++                unstarted_agent = row["status"] == "running" and bool(status.get("agent_device_authorization")) and not status.get("agent_execution")
++                if row["status"] == "pending" or unstarted_agent:
+@@
+                     cancelled.append(str(row["job_id"]))
++                    if unstarted_agent:
++                        connection.execute("UPDATE agents SET current_job_id=NULL,status='idle' WHERE current_job_id=?", (row["job_id"],))
+                 elif row["status"] == "running":
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+             if status.get("status") not in {"pending", "running"}:
+                 continue
++            if status.get("agent_device_authorization"):
++                # A mode switch/restart cannot prove the original Agent stopped.
++                continue
+             status["status"] = "failed"
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_operations.py
+@@
+         row, status = _assigned(connection, agent_id, job_id, decision)
++        if row["status"] == "cancelled" and not status.get("agent_execution"):
++            return {"job_id": job_id, "execution_id": execution_id, "started": False, "cancelled": True}
+         if row["status"] != "running" or row["cancel_requested"]:
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_journal.py
+@@
+         value = dict(row)
+         for name in ("claim", "payload", "result"):
+-            value[name] = (
+-                strict_json(value.pop(name + "_json"))
+-                if value[name + "_json"] is not None
+-                else None
+-            )
++            raw = value.pop(name + "_json")
++            value[name] = strict_json(raw) if raw is not None else None
+         return value
++
++    def cancel_prepared(self, receipt):
++        with self._connect() as connection:
++            cursor = connection.execute("UPDATE receipts SET phase='acknowledged',updated_at=? WHERE receipt_id=? AND phase='prepared'",
++                                        (int(time.time()), receipt["receipt_id"]))
++            if cursor.rowcount != 1:
++                fail("DEVICE_AGENT_RECEIPT_CONFLICT", "取消回执不属于未启动的任务", 409)
++        receipt["phase"] = "acknowledged"
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_runtime.py
+@@
+                 except Exception as exc:
+                     code = getattr(exc, "code", type(exc).__name__)
++                    if code == "DEVICE_AGENT_REGISTRATION_REQUIRED":
++                        self.registered = False
+@@
+                 acknowledgement = self.agent.client.post(
+                     path + "/start", {"execution_id": execution_id}
+                 )
++                if acknowledgement == {"job_id": job_id, "execution_id": execution_id, "started": False, "cancelled": True}:
++                    self.journal.cancel_prepared(receipt)
++                    self.agent._log(f"原任务已取消，未启动渲染：{job_id}")
++                    return
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_routes.py
+@@
+-        path = request.scope.get("raw_path", b"").decode("ascii")
++        try:
++            path = request.scope.get("raw_path", b"").decode("ascii")
++        except UnicodeError:
++            fail("INVALID_AGENT_REQUEST", "处理机请求地址编码无效", 422)
+*** End Patch

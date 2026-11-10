@@ -1,0 +1,205 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+     @app.get("/app/new/generate")
+     def new_generation_frontend() -> FileResponse:
+         return new_frontend_file("index.html")
++
++    @app.get("/app/new/device-authorization")
++    def device_authorization_frontend() -> FileResponse:
++        return new_frontend_file("device-authorization.html")
+@@
++    def h3_auth_error_response(exc: AuthCenterError):
++        if exc.response_headers:
++            return JSONResponse(
++                {"detail": str(exc), "code": exc.error_code, "device_authorization_required": True},
++                status_code=exc.status_code, headers=exc.response_headers,
++            )
++        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++
+     def project_h3_coordinator(client: AuthCenterClient) -> ProjectH3Coordinator:
+@@     def review_new_project_h3_audio(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def inspect_new_project_h3_quotes(project_id: str, request: Request, payload: dict[str, Any] = Body(...)):
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def cancel_new_project_h3_quote(project_id: str, batch_id: str, request: Request, payload: dict[str, Any] = Body(...)):
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def prepare_new_project_h3(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def confirm_new_project_h3(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def sync_new_project_h3(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def prepare_new_project_h3_regeneration(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def confirm_new_project_h3_regeneration(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def prepare_new_project_h3_retry(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def confirm_new_project_h3_retry(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+@@     def cancel_new_project_h3_segment(
+         except AuthCenterError as exc:
+-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++            return h3_auth_error_response(exc)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/index.html
+@@
+-                        <a href="/app/new/login" onclick="handleLogout(event)" class="flex items-center gap-2 px-3.5 py-2 text-[10px] text-red-400 hover:bg-red-500/10 transition-all border-t border-white/5"><i class="fa-solid fa-right-from-bracket"></i>退出登录</a>
++                        <a href="/app/new/device-authorization" class="flex items-center gap-2 px-3.5 py-2 text-[10px] text-gray-300 hover:text-white hover:bg-white/5 transition-all"><i class="fa-solid fa-shield-halved text-brand-accent"></i>设备授权</a>
++                        <a href="/app/new/login" onclick="handleLogout(event)" class="flex items-center gap-2 px-3.5 py-2 text-[10px] text-red-400 hover:bg-red-500/10 transition-all border-t border-white/5"><i class="fa-solid fa-right-from-bracket"></i>退出登录</a>
+@@
+                 error.detail = detail;
++                error.code = result.code || response.headers.get('X-Workbench-Device-Error') || '';
++                if (result.device_authorization_required || error.code.startsWith('DEVICE_') || error.code === 'AUTH_REFRESH_REQUIRED') {
++                    error.message += '（请打开右上角账号菜单 → 设备授权；无需重新注册账号）';
++                }
+                 throw error;
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.html
++<!DOCTYPE html>
++<html lang="zh-CN">
++<head>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1">
++  <title>设备授权 · 公域闪剪工作台</title>
++  <link rel="stylesheet" href="/app-static/new/device-authorization.css">
++  <script src="/app-static/new/device-authorization.js" defer></script>
++</head>
++<body>
++  <main>
++    <nav><a href="/app/new">← 返回工作台</a><span>公域闪剪 · 处理机管理</span></nav>
++    <header><p class="eyebrow">DEVICE AUTHORIZATION</p><h1>设备授权</h1><p>首次批准一次，正常更新无需重复激活。</p></header>
++    <section class="card" aria-labelledby="status-title">
++      <div class="status-heading"><span id="status-dot" class="dot"></span><div><h2 id="status-title">正在读取授权状态</h2><p id="status-description" aria-live="polite">正在连接当前处理机，请稍候。</p></div></div>
++      <dl><div><dt>当前账号</dt><dd id="account">—</dd></div><div><dt>处理机编号</dt><dd id="device-id">—</dd></div><div><dt>密钥保护</dt><dd id="protection">—</dd></div><div><dt>本次凭据有效至</dt><dd id="expires">—</dd></div></dl>
++      <p class="note">授权绑定的是运行工作台服务的电脑。通过远程桌面或浏览器连接 250 时，申请的是 250 的授权，不是你手边的电脑。</p>
++      <p id="error" class="error" role="alert" hidden></p>
++      <div class="actions"><button id="refresh" type="button">重新校验授权</button><a id="login" href="/app/new/login" hidden>重新登录账号</a><a id="continue" class="primary" href="/app/new" hidden>返回工作台</a></div>
++    </section>
++    <section id="application" class="card" hidden>
++      <h2>申请这台处理机的使用权限</h2><p>提交后由管理员在网站后台批准，不需要自己生成或保管密钥。</p>
++      <form id="apply-form"><label for="label">设备备注（可选）</label><input id="label" name="label" maxlength="80" placeholder="例如：250 处理机 / 剪辑室电脑" autocomplete="off">
++        <label class="check"><input id="confirm" type="checkbox" required><span>我确认要为当前处理机申请设备授权。</span></label>
++        <button id="apply" class="primary" type="submit" disabled>申请设备授权</button>
++      </form>
++    </section>
++    <section class="help"><h2>什么时候不需要重新申请？</h2><p>覆盖更新程序、移动安装目录、重启电脑、清除浏览器缓存或重新登录，都应沿用原设备授权。</p><p>如果重装系统或更换硬件导致密钥丢失，请联系管理员办理恢复或换机。不要反复申请，也不要复制别人的授权文件。</p></section>
++    <footer>设备授权与账号登录分别管理。此页面不修改已有任务、素材或草稿。</footer>
++  </main>
++</body>
++</html>
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.css
++:root{color-scheme:dark;font-family:"Microsoft YaHei",system-ui,sans-serif;background:#090c18;color:#edf0fb}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 85% 0,#28214766,transparent 50%);min-height:100vh}main{max-width:820px;margin:auto;padding:28px 24px 40px}nav{display:flex;justify-content:space-between;gap:20px;font-size:13px;color:#939eb8}a{color:#69dae4;text-decoration:none}a:hover{text-decoration:underline}header{margin:50px 0 28px}.eyebrow{letter-spacing:2.4px;font-size:11px;color:#9b8ef6}h1{font-size:36px;margin:10px 0 12px;letter-spacing:1px}h2{font-size:18px;margin:0 0 10px}p{color:#a8b2cb;line-height:1.8;margin:0 0 14px}.card{padding:28px;border:1px solid #2b324b;border-radius:18px;background:#111627dd;margin:20px 0}.status-heading{display:flex;align-items:flex-start;gap:14px}.dot{display:block;flex:none;width:10px;height:10px;background:#9b8ef6;border-radius:50%;margin-top:7px;box-shadow:0 0 16px #9585ff55}.dot[data-tone=ok]{background:#4fddb3}.dot[data-tone=warning]{background:#f4bd69}.dot[data-tone=error]{background:#f58b95}dl{margin:20px 0 24px;border-top:1px solid #262e43}dl>div{display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px;border-bottom:1px solid #262e43;padding:13px 0;font-size:13px}dt{color:#8d9bb6}dd{margin:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.note{font-size:12px;background:#161e31;padding:14px;border-radius:10px;line-height:1.9}.actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:23px}button,.actions a.primary{border:1px solid #3c4462;background:#222b43;color:#f3f4fc;font:inherit;font-size:13px;font-weight:600;padding:11px 18px;border-radius:9px;cursor:pointer}.primary{background:linear-gradient(120deg,#7364e8,#9d55df)!important;border-color:#9a80ef!important;color:white}button:hover:not(:disabled){filter:brightness(1.14)}button:disabled{opacity:.45;cursor:not-allowed}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid #7ce4ec;outline-offset:4px}form{margin-top:22px}label{display:block;font-size:13px;margin-bottom:10px}input[type=text],input:not([type]){width:100%;background:#0b1120;color:#eef0fa;border:1px solid #39435e;border-radius:8px;padding:12px;font:inherit;font-size:14px}.check{display:flex;align-items:flex-start;gap:8px;color:#b7c0d5;margin:18px 0}.check input{accent-color:#9582ef;margin:2px 0 0}.error{font-size:13px;padding:12px 14px;border:1px solid #783c51;background:#311927;border-radius:9px;color:#ffc4ce;overflow-wrap:anywhere}.help{padding:20px 4px 10px}.help h2{font-size:15px}.help p,footer{font-size:12px}footer{color:#737f9c;padding-top:22px;border-top:1px solid #252d41}[hidden]{display:none!important}@media(max-width:560px){main{padding:22px 18px}nav span{display:none}header{margin-top:36px}h1{font-size:30px}.card{padding:22px 18px}dl>div{grid-template-columns:110px minmax(0,1fr)}.actions button,.actions a.primary{flex:1;text-align:center}}
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.js
++(() => {
++  'use strict';
++  const el = id => document.getElementById(id);
++  let busy = false;
++  let state = 'LOADING';
++  let timer = null;
++  const descriptions = {
++    UNREGISTERED: ['尚未申请设备授权', '为这台处理机提交一次申请，管理员批准后即可使用。', 'warning'],
++    PENDING: ['等待管理员批准', '申请已经提交，无需再次申请或重新安装。批准后会自动继续校验。', 'warning'],
++    ACTIVE: ['设备已授权', '原设备身份已确认。正常覆盖更新、移动目录和重新登录无需重复激活。', 'ok'],
++    OFFLINE_GRACE: ['暂时无法联网校验', '仅能在已有短期凭据的有效范围内使用获准功能；不会重新开始宽限期。', 'warning'],
++    AUTH_REFRESH_REQUIRED: ['需要重新校验授权', '这是凭据刷新，不是重新激活。请保持联网后重新校验。', 'warning'],
++    REJECTED: ['设备申请未获批准', '请联系管理员核对申请，不要重复申请。', 'error'],
++    SUSPENDED: ['设备授权已暂停', '请联系管理员恢复授权；重新安装不会解除暂停。', 'error'],
++    REVOKED: ['设备授权已撤销', '请联系管理员办理授权或换机，原授权不会因重新安装恢复。', 'error'],
++    EXPIRED: ['设备授权已到期', '请联系管理员确认授权期限。', 'warning'],
++    KEY_UNAVAILABLE: ['无法读取本机设备密钥', '请先检查系统权限或 TPM 状态；程序不会自动删除或替换原密钥。', 'error'],
++    LOGIN_REQUIRED: ['请先登录数字人账号', '登录成功后会复用这台处理机已有的批准关系，不需要重新申请。', 'warning'],
++    CLIENT_UPGRADE_REQUIRED: ['请更新工作台程序', '更新程序后保留原设备授权，无需管理员再次批准。', 'warning']
++  };
++  async function api(action = '') {
++    const options = {credentials:'same-origin', cache:'no-store', headers:{}};
++    if (action) {
++      options.method = 'POST';
++      options.headers['X-Device-Authorization-Action'] = '1';
++      if (action === '/apply') {
++        options.headers['Content-Type'] = 'application/json';
++        options.body = JSON.stringify({label:el('label').value.trim(), confirm_initialize:true});
++      }
++    }
++    const response = await fetch('/api/new/device-authorization' + action, options);
++    const body = await response.json().catch(() => ({}));
++    if (response.status === 401) body.state = 'LOGIN_REQUIRED';
++    if (!response.ok && !body.state) body.state = 'AUTH_REFRESH_REQUIRED';
++    if (!body.state) throw new Error('处理机没有返回有效的授权状态，请更新兼容版本的程序。');
++    return body;
++  }
++  function render(data) {
++    state = data.state;
++    let info = descriptions[state] || ['授权状态暂不可用', '请重新校验或联系管理员检查服务配置。', 'warning'];
++    if (data.code === 'DEVICE_TRUST_NOT_CONFIGURED') info = ['此程序尚未配置正式授权', '请使用包含正式验证公钥的工作台版本。重复申请设备不会解决程序配置问题。', 'warning'];
++    el('status-title').textContent = info[0];
++    el('status-description').textContent = info[1];
++    el('status-dot').dataset.tone = info[2];
++    el('application').hidden = state !== 'UNREGISTERED';
++    el('login').hidden = state !== 'LOGIN_REQUIRED';
++    el('continue').hidden = state !== 'ACTIVE';
++    el('device-id').textContent = data.device_id || (data.thumbprint ? data.thumbprint.slice(0,16) + '…' : '尚未读取');
++    el('device-id').title = data.thumbprint || '';
++    if (data.user_id) el('account').textContent = '账号 ID：' + data.user_id;
++    el('protection').textContent = data.protection_report === 'tpm' ? 'TPM（本机报告，未做服务器硬件证明）' : data.protection_report === 'software' ? '软件兼容保护（较弱）' : '—';
++    el('expires').textContent = Number.isFinite(data.exp) ? new Date(data.exp * 1000).toLocaleString() : '—';
++    el('error').hidden = !data.detail;
++    el('error').textContent = typeof data.detail === 'string' ? data.detail : '';
++  }
++  function schedule() {
++    clearTimeout(timer);
++    if (['PENDING','ACTIVE','AUTH_REFRESH_REQUIRED','OFFLINE_GRACE'].includes(state)) {
++      timer = setTimeout(() => {if (!document.hidden) run(); else schedule();}, state === 'ACTIVE' ? 300000 : 15000);
++    }
++  }
++  async function run(action = '') {
++    if (busy) return;
++    busy = true;
++    el('refresh').disabled = true;
++    el('apply').disabled = true;
++    try {
++      let data = await api(action);
++      // Reading a server approval is informational; refresh obtains signed
++      // credentials. This never creates a key or makes another application.
++      if (!action && data.state === 'AUTH_REFRESH_REQUIRED' && data.thumbprint && !data.code && !data.error_code) data = await api('/refresh');
++      render(data);
++    } catch (error) {
++      el('error').hidden = false;
++      el('error').textContent = error.message || '网络暂时不可用，请稍后重试。';
++    } finally {
++      busy = false;
++      el('refresh').disabled = false;
++      el('apply').disabled = !el('confirm').checked;
++      schedule();
++    }
++  }
++  el('confirm').addEventListener('change', () => {el('apply').disabled = busy || !el('confirm').checked;});
++  el('apply-form').addEventListener('submit', event => {
++    event.preventDefault();
++    if (state === 'UNREGISTERED' && el('confirm').checked && !busy) run('/apply');
++  });
++  el('refresh').addEventListener('click', () => run('/refresh'));
++  document.addEventListener('visibilitychange', () => {if (!document.hidden && !busy) run();});
++  window.addEventListener('pagehide', () => clearTimeout(timer));
++  run();
++})();
+*** End Patch

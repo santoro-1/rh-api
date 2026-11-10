@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-h3-recovery.js
+@@
+     checking = true; pending = null; el('h3-recovery-review').hidden = true; el('h3-waiting-error').hidden = true; render();
++    el('h3-recovery-confirm').checked = false; el('h3-recovery-submit').disabled = true;
+*** End Patch

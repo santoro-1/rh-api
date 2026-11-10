@@ -1,0 +1,10 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_command_authorization.py
+@@
+-from contextlib import contextmanager
+-import importlib.util
+@@
+-    "raw", [b"[]", b"null", b"{", b"\xff", b'{"user":{},"user":{}}', b" " * 65537]
++    "raw", [b"[]", b"null", b"{", b"\xff", b'{"user":{},"user":{}}', b" " * 65537],
++    ids=["array", "null", "invalid", "invalid-utf8", "duplicate-field", "oversized"],
+*** End Patch

@@ -1,0 +1,115 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_h3_recovery_routes.py
++from pathlib import Path
++import json
++import sys
++from unittest.mock import Mock, patch
++
++import pytest
++from fastapi import FastAPI, HTTPException
++from fastapi.testclient import TestClient
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from jyd_probe.auth_center import AuthCenterClient, AuthCenterDeviceError
++from jyd_probe.device_h3_recovery_routes import install_h3_recovery_routes
++from jyd_probe.device_business_transport import is_h3_contract_path
++from test_device_business_transport import Response
++
++
++@pytest.fixture
++def recovery():
++    app, upstream = FastAPI(), Mock()
++    def user(request):
++        if request.cookies.get("site") != "owner-token":
++            raise HTTPException(status_code=401, detail="请登录")
++        return {"user_id": "7"}
++    install_h3_recovery_routes(app, current_user=user,
++                               client_access=lambda request: (upstream, request.cookies.get("site")))
++    with TestClient(app) as client:
++        yield client, upstream
++
++
++HEADERS = {"Origin": "http://testserver", "X-Device-Authorization-Action": "1"}
++BODY = {"resume_confirmed": True, "request_key": "original-request", "review_token": "a" * 64}
++PREFIX = "/api/new/device-authorization/h3/batch-1"
++
++
++def test_routes_use_cookie_owner_and_explicit_confirmation(recovery):
++    client, upstream = recovery
++    assert client.get("/api/new/device-authorization/h3-waiting").status_code == 401
++    upstream.list_h3_authorization_waiting.assert_not_called()
++    client.cookies.set("site", "owner-token")
++    upstream.list_h3_authorization_waiting.return_value = {"batches": [], "next_cursor": None}
++    response = client.get("/api/new/device-authorization/h3-waiting?after_id=page-1")
++    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
++    upstream.list_h3_authorization_waiting.assert_called_once_with("owner-token", after_id="page-1")
++    assert client.post(PREFIX + "/resume", json=BODY).status_code == 403
++    assert client.post(PREFIX + "/prepare").status_code == 403
++    upstream.prepare_h3_authorization_recovery.return_value = {"can_resume": True}
++    assert client.post(PREFIX + "/prepare", headers=HEADERS).status_code == 200
++    upstream.resume_h3_authorization_recovery.assert_not_called()
++    upstream.resume_h3_authorization_recovery.return_value = {"already_applied": False}
++    response = client.post(PREFIX + "/resume", headers=HEADERS, json=BODY)
++    assert response.status_code == 200
++    upstream.resume_h3_authorization_recovery.assert_called_once_with("owner-token", "batch-1", **BODY)
++
++
++@pytest.mark.parametrize("change", [{"resume_confirmed": 1}, {"resume_confirmed": "true"},
++    {"review_token": "bad"}, {"request_key": ""}, {"access_token": "other"}, {"device_id": "forged"}])
++def test_invalid_or_identity_injected_body_does_not_reach_cloud(recovery, change):
++    client, upstream = recovery
++    client.cookies.set("site", "owner-token")
++    response = client.post(PREFIX + "/resume", headers=HEADERS, json={**BODY, **change})
++    assert response.status_code in {409, 422}
++    upstream.resume_h3_authorization_recovery.assert_not_called()
++
++
++def test_device_rejection_is_not_website_logout_or_resubmission(recovery):
++    client, upstream = recovery
++    client.cookies.set("site", "owner-token")
++    upstream.resume_h3_authorization_recovery.side_effect = AuthCenterDeviceError(
++        "需要校验", error_code="DEVICE_BOUND_TOKEN_REQUIRED", status_code=401)
++    response = client.post(PREFIX + "/resume", headers=HEADERS, json=BODY)
++    assert response.status_code == 409
++    assert response.json()["code"] == "DEVICE_BOUND_TOKEN_REQUIRED"
++    assert response.headers["x-workbench-device-error"] == "DEVICE_BOUND_TOKEN_REQUIRED"
++    assert response.headers["cache-control"] == "no-store"
++    assert upstream.resume_h3_authorization_recovery.call_count == 1
++
++
++def test_client_contract_attaches_proof_once_and_keeps_business_key(monkeypatch):
++    client, requests = AuthCenterClient("https://license.example"), []
++    proof = Mock(return_value={"Authorization": "DPoP bound", "DPoP": "proof"})
++    proof.origin = client.base_url
++    client.device_header_provider = proof
++    def request(req, **_):
++        requests.append(req)
++        return Response({"ok": True})
++    monkeypatch.setattr("jyd_probe.auth_center._device_urlopen", request)
++    monkeypatch.setattr("jyd_probe.auth_center.urlopen", lambda *_a, **_kw: pytest.fail("no fallback"))
++    client.list_h3_authorization_waiting("login", after_id="page-1")
++    client.prepare_h3_authorization_recovery("login", "batch-1")
++    client.resume_h3_authorization_recovery("login", "batch-1", **BODY)
++    assert len(requests) == 3 and json.loads(requests[-1].data) == BODY
++    assert all(req.get_header("Authorization") == "DPoP bound" for req in requests)
++    assert is_h3_contract_path("POST", "/api/workbench/h3-authorization-waiting")
++    assert is_h3_contract_path("POST", "/api/workbench/h3-batches/batch-1/authorization/resume")
++    assert is_h3_contract_path("POST", "/api/workbench/h3-batches/batch-1/authorization/prepare")
++
++
++def test_real_app_installs_recovery_routes_without_initializing_device(tmp_path):
++    from test_device_local_execution import settings_for
++    from jyd_probe.web_api import create_app
++    settings = settings_for(tmp_path)
++    with patch("jyd_probe.auth_center.AuthCenterClient.verify", return_value={"user_id": "7", "username": "tester"}), \
++         patch("jyd_probe.auth_center.AuthCenterClient.list_h3_authorization_waiting", return_value={"batches": []}) as listing:
++        with TestClient(create_app(settings)) as client:
++            client.cookies.set(settings.site_cookie_name, "account")
++            response = client.get("/api/new/device-authorization/h3-waiting")
++            assert response.status_code == 200
++            listing.assert_called_once_with("account", after_id="")
++            page = client.get("/app/new/device-authorization")
++            assert "device-h3-recovery.js" in page.text and 'id="h3-recovery-confirm"' in page.text
++            asset = client.get("/app-static/new/device-h3-recovery.js")
++            assert asset.status_code == 200
+*** End Patch

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}任务详情{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><h1>任务详情</h1><p id="status-text" class="status">{% if task.enhancement and task.status in ["FAILED", "DOWNLOAD_FAILED"] %}视频清晰化失败{% elif task.enhancement and task.enhancement.status != "SUCCESS" and task.status != "CANCELLED" %}视频清晰化中（SeedVR2 48G）{% elif task.enhancement and task.enhancement.status == "SUCCESS" %}清晰视频已完成{% else %}{{ status_labels.get(task.status, task.status) }}{% endif %}</p></div>
+  <div class="button-row">
+    {% if task.status in ["PENDING", "SUBMITTED", "RUNNING"] %}
+      <form method="post" action="/tasks/{{ task.id }}/cancel" onsubmit="return confirm('确定取消这个生成任务吗？已提交的任务会同时请求 RunningHub 取消。');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="button danger" type="submit">取消生成</button>
+      </form>
+    {% endif %}
+    <a class="button secondary" href="{{ return_url }}">{{ return_label }}</a>
+  </div>
+</section>
+<div class="detail-grid">
+  <section class="panel">
+    {% if task.workflow_type == "digital_human" %}
+      <img class="detail-image" src="/api/tasks/{{ task.id }}/image" alt="参考图片">
+    {% else %}
+      <video class="video" controls preload="metadata" src="/api/tasks/{{ task.id }}/source-video"></video>
+    {% endif %}
+    <dl>
+      <dt>工作流</dt><dd>{{ workflow_names.get(task.workflow_type, task.workflow_type) }}</dd>
+      <dt>创建时间</dt><dd>{{ task.created_at|beijing_datetime("%Y-%m-%d %H:%M:%S") }}</dd>
+      {% if task.workflow_type == "digital_human" %}
+        <dt>音频文件</dt><dd>{{ task.audio_original_name }}</dd>
+        <dt>音频时长</dt><dd>{{ task.audio_duration_seconds|round(1) }} 秒</dd>
+        <dt>截取范围</dt><dd>{{ task.start_seconds|timecode }} — {{ task.end_seconds|timecode }}</dd>
+      {% else %}
+        <dt>源视频</dt><dd>{{ task.image_original_name }}</dd>
+        <dt>音频方式</dt><dd>{{ task.audio_original_name }}</dd>
+      {% endif %}
+      <dt>RunningHub Task ID</dt><dd id="runninghub-task-id">{{ task.runninghub_task_id or "尚未提交" }}</dd>
+      {% if task.enhancement %}<dt>SeedVR2 Task ID</dt><dd>{{ task.enhancement.remote_task_id or "等待提交" }}</dd>{% endif %}
+      <dt>自动重试</dt>
+      <dd>
+        已使用 <span id="auto-retry-count">{{ task.enhancement.auto_retry_count if task.enhancement and task.enhancement.status != "SUCCESS" else task.runninghub_auto_retry_count }}</span>/{{ auto_retry_limit }} 次
+        <span id="auto-retry-wait" class="{% if not ((task.enhancement.auto_retry_after if task.enhancement and task.enhancement.status != 'SUCCESS' else task.runninghub_auto_retry_after)) %}hidden{% endif %}">· 正在等待下一次重试</span>
+      </dd>
+      <dt>提示词</dt><dd class="pre-wrap">{{ task.prompt }}</dd>
+    </dl>
+  </section>
+  <section class="panel">
+    <h2>生成结果</h2>
+    <p id="error-message" class="error {% if not task.error_message %}hidden{% endif %}">{{ task.error_message or "" }}</p>
+    {% if failed_reason %}
+      <details class="failure-details">
+        <summary>查看 RunningHub 原始失败详情</summary>
+        <dl>
+          {% if failed_reason.get("exception_type") %}<dt>异常类型</dt><dd>{{ failed_reason.get("exception_type") }}</dd>{% endif %}
+          {% if failed_reason.get("node_name") %}<dt>失败节点</dt><dd>{{ failed_reason.get("node_name") }}</dd>{% endif %}
+          {% if failed_reason.get("node_id") %}<dt>节点 ID</dt><dd>{{ failed_reason.get("node_id") }}</dd>{% endif %}
+          {% if failed_reason.get("exception_message") %}<dt>详细说明</dt><dd class="pre-wrap">{{ failed_reason.get("exception_message") }}</dd>{% endif %}
+        </dl>
+        {% if failed_reason.get("traceback") %}
+          <details>
+            <summary>查看技术堆栈</summary>
+            <pre class="failure-traceback">{{ failed_reason.get("traceback") }}</pre>
+          </details>
+        {% endif %}
+      </details>
+    {% endif %}
+    {% if attempt_history %}
+      <details class="failure-details">
+        <summary>查看以前失败的 {{ attempt_history|length }} 次 RunningHub 运行</summary>
+        <ol>
+          {% for attempt in attempt_history %}
+            <li>
+              <strong>{{ attempt.get("taskId") or "未知任务 ID" }}</strong>
+              {% if attempt.get("errorCode") %} · 错误码 {{ attempt.get("errorCode") }}{% endif %}
+              {% if attempt.get("failedReason") and attempt.get("failedReason").get("node_name") %}
+                · 节点 {{ attempt.get("failedReason").get("node_name") }}
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ol>
+      </details>
+    {% endif %}
+    <div id="result-container">
+      {% if task.status == "SUCCESS" and task.result_path %}
+        <video class="video" controls src="/api/tasks/{{ task.id }}/preview"></video>
+        <p><a class="button" href="/api/tasks/{{ task.id }}/download">下载清晰视频</a>{% if task.enhancement %} <a class="button secondary" href="/api/tasks/{{ task.id }}/source-video">下载数字人源片段</a>{% endif %}</p>
+      {% else %}<p class="muted">任务完成后，视频会自动下载到本机并显示在这里。</p>{% endif %}
+    </div>
+  </section>
+</div>
+{% if task.status in ["PENDING", "UPLOADING", "SUBMITTED", "RUNNING"] %}
+<script>
+const labels = {{ status_labels|tojson }};
+const renderedAutoRetryCount = {{ task.enhancement.auto_retry_count if task.enhancement and task.enhancement.status != "SUCCESS" else task.runninghub_auto_retry_count }};
+async function refreshTask() {
+  const response = await fetch("/api/tasks/{{ task.id }}");
+  if (!response.ok) return;
+  const data = await response.json();
+  document.getElementById("status-text").textContent = data.statusText || labels[data.status] || data.status;
+  document.getElementById("runninghub-task-id").textContent = data.runninghubTaskId || "尚未提交";
+  document.getElementById("auto-retry-count").textContent = data.autoRetryCount || 0;
+  document.getElementById("auto-retry-wait").classList.toggle("hidden", !data.autoRetryAfter);
+  const error = document.getElementById("error-message");
+  error.textContent = data.errorMessage || ""; error.classList.toggle("hidden", !data.errorMessage);
+  if ((data.autoRetryCount || 0) !== renderedAutoRetryCount) {
+    location.reload();
+    return;
+  }
+  if (data.status === "SUCCESS" && data.downloadUrl) { location.reload(); return; }
+  if (["FAILED", "DOWNLOAD_FAILED", "CANCELLED"].includes(data.status)) {
+    location.reload();
+    return;
+  }
+  setTimeout(refreshTask, 5000);
+}
+setTimeout(refreshTask, 5000);
+</script>
+{% endif %}
+{% endblock %}

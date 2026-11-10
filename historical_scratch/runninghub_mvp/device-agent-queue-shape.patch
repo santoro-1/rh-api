@@ -1,0 +1,11 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_agent_queue.py
+@@
+ def matches_assignment(status, decision):
++    if not isinstance(status, dict):
++        return False
+     source = status.get("device_authorization") or {}
+     binding = status.get("agent_device_authorization") or {}
++    if not isinstance(source, dict) or not isinstance(binding, dict):
++        return False
+*** End Patch

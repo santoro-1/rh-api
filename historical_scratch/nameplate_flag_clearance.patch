@@ -1,0 +1,53 @@
+*** Begin Patch
+*** Update File: src/jyd_probe/semantic_visuals.py
+@@
+-FIXED_NAMEPLATE_SCALE = 0.7331057670319187
++# Keep the fixed nameplate clear of uniforms/logos on the upper right chest.
++# The horizontal center remains unchanged while the plate is narrower and lower.
++FIXED_NAMEPLATE_SCALE = 0.60
+ FIXED_NAMEPLATE_TRANSFORM_X = -0.26689423296808135
+-FIXED_NAMEPLATE_TRANSFORM_Y = -0.18
++FIXED_NAMEPLATE_TRANSFORM_Y = -0.26
+*** Update File: apps/processor/frontend/new/index.html
+@@
+-            const nameplateScale = 0.7331057670319187;
++            const nameplateScale = 0.60;
+             const transformX = -0.26689423296808135;
+-            const transformY = -0.18;
++            const transformY = -0.26;
+*** Update File: tests/test_new_frontend.py
+@@
+-        self.assertIn("const nameplateScale = 0.7331057670319187", html)
++        self.assertIn("const nameplateScale = 0.60", html)
+         self.assertIn("const transformX = -0.26689423296808135", html)
+-        self.assertIn("const transformY = -0.18", html)
++        self.assertIn("const transformY = -0.26", html)
+@@
+-        self.assertIn("const nameplateScale = 0.7331057670319187", workspace)
++        self.assertIn("const nameplateScale = 0.60", workspace)
+*** Update File: tests/test_semantic_visual_render.py
+@@
+-                    "scale": 0.7331057670319187,
++                    "scale": 0.60,
+                     "transform_x": -0.26689423296808135,
+-                    "transform_y": -0.18,
++                    "transform_y": -0.26,
+@@
+-    assert nameplate_segment["clip"]["transform"]["y"] == -0.18
+-    assert nameplate_segment["clip"]["scale"]["x"] == 0.7331057670319187
++    assert nameplate_segment["clip"]["transform"]["y"] == -0.26
++    assert nameplate_segment["clip"]["scale"]["x"] == 0.60
+@@
+-    assert overlay["scale"] == 0.7331057670319187
++    assert overlay["scale"] == 0.60
+     assert overlay["transform_x"] == -0.26689423296808135
+-    assert overlay["transform_y"] == -0.18
++    assert overlay["transform_y"] == -0.26
+*** Update File: docs/RENDER_JOB_SCHEMA.md
+@@
+-`jyd_eab56dad6e7e` 的实测尺寸与横向参数：`scale=0.7331057670319187`、
+-`transform_x=-0.26689423296808135`；参考新构图上移为 `transform_y=-0.18`（中心约 Y=1130）；
++`jyd_eab56dad6e7e` 的横向中心参数：`transform_x=-0.26689423296808135`。为避开人物右胸
++国旗/标识，当前统一缩小为 `scale=0.60`，并下移为 `transform_y=-0.26`（中心约 Y=1210）；
+ 应用封面偏移后从正文第 1 帧开始，因此封面 3 帧不显示。统一层级从下到上为
+*** End Patch

@@ -1,0 +1,72 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.html
+@@
+         <button id="apply" class="primary" type="submit" disabled>申请设备授权</button>
++        <details class="note" id="software-option"><summary>需要软件保护兼容模式？</summary><p>仅在管理员允许时使用，保护强度低于 TPM。不会因 TPM 故障自动切换；已有设备应先修复原密钥。初始化后仍需管理员批准设备。</p><label class="check"><input id="software-confirm" type="checkbox"><span>我确认申请软件兼容保护，接受较弱的保护等级。</span></label><button id="apply-software" type="button" disabled>申请软件兼容授权</button></details>
+@@
+ </html>
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.js
+@@
+-      if (action === '/apply') {
++      if (action === '/apply' || action === '/apply-software') {
+         options.headers['Content-Type'] = 'application/json';
+-        options.body = JSON.stringify({label:el('label').value.trim(), confirm_initialize:true});
++        const application = {label:el('label').value.trim(), confirm_initialize:true};
++        if (action === '/apply-software') application.confirm_software = true;
++        options.body = JSON.stringify(application);
+@@
+     if (data.code === 'DEVICE_TRUST_NOT_CONFIGURED') info = ['此程序尚未配置正式授权', '请使用包含正式验证公钥的工作台版本。重复申请设备不会解决程序配置问题。', 'warning'];
++    if (data.code === 'DEVICE_SOFTWARE_NOT_ALLOWED') info = ['尚未允许软件兼容保护', '请先由网站管理员为此账号允许软件保护，再重新校验并明确申请；本次没有创建或替换设备密钥。', 'warning'];
+@@
+     el('apply').disabled = true;
++    el('apply-software').disabled = true;
+@@
+       if (action === '/repair-key-access') el('repair-confirm').checked = false;
++      if (action === '/apply-software') el('software-confirm').checked = false;
+@@
+       el('apply').disabled = !el('confirm').checked;
++      el('apply-software').disabled = !el('confirm').checked || !el('software-confirm').checked;
+@@
+-  el('confirm').addEventListener('change', () => {el('apply').disabled = busy || !el('confirm').checked;});
++  function updateApplicationButtons() {
++    el('apply').disabled = busy || !el('confirm').checked;
++    el('apply-software').disabled = busy || !el('confirm').checked || !el('software-confirm').checked;
++  }
++  el('confirm').addEventListener('change', updateApplicationButtons);
++  el('software-confirm').addEventListener('change', updateApplicationButtons);
++  el('apply-software').addEventListener('click', () => {
++    if (state === 'UNREGISTERED' && el('confirm').checked && el('software-confirm').checked && !busy) run('/apply-software');
++  });
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization_routes.py
+@@
+-    def test_apply_rejects_private_key_id_and_approval_injection(self):
++    def test_software_apply_requires_both_literal_confirmations_and_same_origin(self):
++        path = "/api/new/device-authorization/apply-software"
++        body = {"confirm_initialize": True, "confirm_software": True}
++        self.assertEqual(self.client.post(path, json=body, headers=self.headers).status_code, 401)
++        self.login()
++        self.assertEqual(self.client.post(path, json=body).status_code, 403)
++        for invalid in ({}, {"confirm_initialize": True}, {"confirm_software": True},
++                        {"confirm_initialize": 1, "confirm_software": True},
++                        {**body, "software_approved": True}, {**body, "operator_sid": "injected"},
++                        {**body, "initialization_permit": "injected"}):
++            self.assertEqual(self.client.post(path, json=invalid, headers=self.headers).status_code, 422)
++        self.session.register_software.assert_not_called()
++        response = self.client.post(path, json={**body, "label": "250"}, headers=self.headers)
++        self.assertEqual(response.status_code, 200)
++        self.session.register_software.assert_called_once_with(label="250", client_version="")
++        self.assertNotIn("website-account-token", response.text)
++        self.assertEqual(response.headers["cache-control"], "no-store")
++
++    def test_software_policy_denial_does_not_clear_login_or_return_permit(self):
++        self.login()
++        self.session.register_software.side_effect = DeviceAuthorizationError("DEVICE_SOFTWARE_NOT_ALLOWED", "administrator must allow")
++        response = self.client.post("/api/new/device-authorization/apply-software", json={"confirm_initialize": True, "confirm_software": True}, headers=self.headers)
++        self.assertEqual(response.status_code, 403)
++        self.assertEqual(response.json()["code"], "DEVICE_SOFTWARE_NOT_ALLOWED")
++        self.assertNotEqual(response.json()["state"], "LOGIN_REQUIRED")
++        self.assertNotIn("initialization_permit", response.text)
++
++    def test_apply_rejects_private_key_id_and_approval_injection(self):
+         self.login()
+*** End Patch

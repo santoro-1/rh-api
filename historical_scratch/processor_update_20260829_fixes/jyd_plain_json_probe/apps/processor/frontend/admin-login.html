@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>管理员登录</title>
+    <link rel="stylesheet" href="/app-static/admin-login.css?v=20260714-1" />
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="login-panel">
+        <div class="brand-mark">剪映批量处理</div>
+        <h1>管理员登录</h1>
+        <p>素材库和高级设置仅供处理机管理员使用。</p>
+        <form id="loginForm">
+          <label>
+            <span>账号</span>
+            <input id="username" name="username" autocomplete="username" value="admin" required />
+          </label>
+          <label>
+            <span>密码</span>
+            <input id="password" name="password" type="password" autocomplete="current-password" required autofocus />
+          </label>
+          <div id="loginError" class="error hidden"></div>
+          <button id="loginButton" type="submit">登录后台</button>
+        </form>
+        <a class="back-link" href="/app">返回视频生成</a>
+      </section>
+    </main>
+    <script src="/app-static/admin-login.js?v=20260714-1"></script>
+  </body>
+</html>

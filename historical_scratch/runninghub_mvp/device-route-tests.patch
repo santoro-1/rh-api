@@ -1,0 +1,153 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization_routes.py
++from __future__ import annotations
++
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++from unittest.mock import Mock, patch
++
++from fastapi import FastAPI, HTTPException
++from fastapi.testclient import TestClient
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from jyd_probe.device_auth_protocol import DeviceAuthorizationError
++from jyd_probe.device_authorization_routes import DeviceSessionRegistry, install_device_authorization_routes
++
++
++class DeviceRoutesTest(unittest.TestCase):
++    def setUp(self):
++        self.session = Mock()
++        self.session.summary.return_value = {"state": "PENDING", "user_id": 7, "thumbprint": "public-device-id"}
++        self.session.refresh.return_value = {"state": "ACTIVE", "user_id": 7}
++        self.factory = Mock(return_value=self.session)
++        self.registry = DeviceSessionRegistry("https://license.example", session_factory=self.factory)
++        self.app = FastAPI()
++
++        def current_user(request):
++            if request.cookies.get("site") != "website-account-token":
++                raise HTTPException(status_code=401, detail="website login required")
++            return {"user_id": "7", "username": "tester"}
++
++        install_device_authorization_routes(self.app, base_url="https://license.example", cookie_name="site",
++                                            current_user=current_user, registry=self.registry)
++        self.client = TestClient(self.app)
++        self.client.__enter__()
++        self.headers = {"Origin": "http://testserver", "X-Device-Authorization-Action": "1"}
++
++    def tearDown(self):
++        self.client.__exit__(None, None, None)
++
++    def login(self):
++        self.client.cookies.set("site", "website-account-token")
++
++    def test_missing_website_identity_rejects_even_local_admin_cookie(self):
++        self.client.cookies.set("admin_session", "local-admin")
++        self.assertEqual(self.client.get("/api/new/device-authorization").status_code, 401)
++        self.factory.assert_not_called()
++
++    def test_status_never_creates_key_or_returns_tokens(self):
++        self.login()
++        response = self.client.get("/api/new/device-authorization")
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.json()["state"], "PENDING")
++        self.assertEqual(response.headers["cache-control"], "no-store")
++        self.assertNotIn("website-account-token", response.text)
++        self.session.register.assert_not_called()
++        self.factory.assert_called_once_with(user_id=7, login_token="website-account-token")
++
++    def test_missing_key_is_registration_state_not_an_automatic_application(self):
++        self.login()
++        self.session.status.side_effect = DeviceAuthorizationError("DEVICE_UNREGISTERED", "not initialized")
++        self.session.summary.return_value = {"state": "UNREGISTERED"}
++        response = self.client.get("/api/new/device-authorization")
++        self.assertEqual(response.json()["state"], "UNREGISTERED")
++        self.session.register.assert_not_called()
++
++    def test_explicit_apply_only_passes_label_and_version_to_local_key_owner(self):
++        self.login()
++        response = self.client.post("/api/new/device-authorization/apply", json={"label": "250", "client_version": "v4", "confirm_initialize": True}, headers=self.headers)
++        self.assertEqual(response.status_code, 200)
++        self.session.register.assert_called_once_with(label="250", client_version="v4")
++
++    def test_apply_rejects_private_key_id_and_approval_injection(self):
++        self.login()
++        for name in ("private_key", "device_id", "software_approved", "operator_sid", "public_jwk", "trust_root"):
++            response = self.client.post("/api/new/device-authorization/apply", json={"confirm_initialize": True, name: "injected"}, headers=self.headers)
++            self.assertEqual(response.status_code, 422)
++        self.session.register.assert_not_called()
++
++    def test_initialization_requires_literal_confirmation(self):
++        self.login()
++        for confirm in (None, False, "true", 1):
++            response = self.client.post("/api/new/device-authorization/apply", json={"confirm_initialize": confirm}, headers=self.headers)
++            self.assertEqual(response.status_code, 422)
++        self.session.register.assert_not_called()
++
++    def test_cross_origin_missing_origin_and_malformed_origin_are_rejected(self):
++        self.login()
++        for headers in ({}, {"Origin": "http://testserver"}, {"Origin": "https://evil.example", "X-Device-Authorization-Action": "1"},
++                        {"Origin": "http://[", "X-Device-Authorization-Action": "1"},
++                        {"Origin": "null", "X-Device-Authorization-Action": "1"}):
++            for action in ("apply", "refresh"):
++                response = self.client.post("/api/new/device-authorization/" + action, json={"confirm_initialize": True}, headers=headers)
++                self.assertEqual(response.status_code, 403)
++        self.factory.assert_not_called()
++
++    def test_refresh_does_not_register_and_returns_only_summary(self):
++        self.login()
++        response = self.client.post("/api/new/device-authorization/refresh", headers=self.headers)
++        self.assertEqual(response.json(), {"state": "ACTIVE", "user_id": 7})
++        self.session.refresh.assert_called_once_with(force=True)
++        self.session.register.assert_not_called()
++
++    def test_pending_is_not_mislabeled_as_new_machine(self):
++        self.login()
++        self.session.refresh.side_effect = DeviceAuthorizationError("DEVICE_PENDING", "waiting")
++        response = self.client.post("/api/new/device-authorization/refresh", headers=self.headers)
++        self.assertEqual(response.status_code, 403)
++        self.assertEqual(response.json()["state"], "PENDING")
++
++    def test_registry_reuses_session_but_never_shares_other_account_or_login(self):
++        registry = DeviceSessionRegistry("https://license.example", session_factory=lambda **_: Mock())
++        first = registry.get("7", "token-a")
++        self.assertIs(first, registry.get("7", "token-a"))
++        self.assertIsNot(first, registry.get("8", "token-a"))
++        self.assertIsNot(first, registry.get("7", "token-b"))
++        registry.forget("token-a")
++        first.close.assert_called_once()
++        self.assertIsNot(first, registry.get("7", "token-a"))
++        registry.close()
++
++    def test_unconfigured_trust_does_not_attempt_real_key_initialization(self):
++        registry = DeviceSessionRegistry("https://untrusted.example")
++        with patch("jyd_probe.device_authorization_routes.WindowsDeviceIdentity") as native:
++            with self.assertRaises(DeviceAuthorizationError):
++                registry.get("7", "token-a")
++        native.assert_not_called()
++
++    def test_existing_workbench_app_installs_routes_without_native_key_side_effect(self):
++        from jyd_probe.web_api import WebApiSettings, create_app
++        with tempfile.TemporaryDirectory(prefix="device-web-api-") as folder:
++            root = Path(folder)
++            settings = WebApiSettings(storage_root=root / "storage", template_library_root=root / "templates",
++                default_draft_root=root / "drafts", audio_library_root=root / "audio", admin_password="test-admin",
++                admin_session_secret="test-session", auth_authority=False, auth_server_url="https://license.example", execution_mode="agent")
++            for path in (settings.storage_root, settings.template_library_root, settings.default_draft_root, settings.audio_library_root):
++                path.mkdir(parents=True, exist_ok=True)
++            user = {"user_id": "7", "username": "tester", "enabled": True}
++            with patch("jyd_probe.auth_center.AuthCenterClient.verify", return_value=user), \
++                 patch("jyd_probe.device_authorization_routes.WindowsDeviceIdentity") as native:
++                with TestClient(create_app(settings)) as client:
++                    client.cookies.set(settings.site_cookie_name, "website-account-token")
++                    response = client.get("/api/new/device-authorization")
++                    self.assertEqual(response.status_code, 503)
++                    self.assertEqual(response.json()["code"], "DEVICE_TRUST_NOT_CONFIGURED")
++                    self.assertEqual(client.post("/api/auth/logout").status_code, 200)
++                native.assert_not_called()
++
++
++if __name__ == "__main__":
++    unittest.main()
+*** End Patch

@@ -1,0 +1,31 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_command_authorization.py
+@@
+-def test_processor_render_job_has_no_unlicensed_side_effect(
+-    command_session, monkeypatch, tmp_path
++@pytest.mark.parametrize("approved", [False, True])
++def test_processor_render_job_allows_approved_and_rejects_pending(
++    command_session, monkeypatch, tmp_path, approved
+@@
+-    command_session.transport.error = DeviceAuthorizationError(
+-        "DEVICE_PENDING", "pending"
+-    )
+-    assert entry.main(["--render-job", "job.json"]) == 1
+-    effects.assert_not_called()
++    if not approved:
++        command_session.transport.error = DeviceAuthorizationError(
++            "DEVICE_PENDING", "pending"
++        )
++    assert entry.main(["--render-job", "job.json"]) == (0 if approved else 1)
++    assert effects.call_count == (1 if approved else 0)
+     assert command_session.session._closed
++
++
++def test_command_draft_only_grant_does_not_allow_video_export(command_session):
++    command_session.issuer.overrides = {"scopes": ["local:draft"]}
++    with commands.command_authorization(SimpleNamespace()):
++        assert current_local_decision({"local:draft"}).user_id == 7
++        with pytest.raises(DeviceAuthorizationError) as error:
++            current_local_decision({"local:draft", "local:render"})
++        assert error.value.code == "DEVICE_SCOPE_DENIED"
+*** End Patch

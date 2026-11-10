@@ -1,0 +1,7 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tools/library/import_broll_20260814.py
+@@
+-    if len(planned) != len(RULES):
++    if planned and len(planned) != len(RULES):
+         raise ValueError(f"expected {len(RULES)} new videos, found {len(planned)}")
+*** End Patch

@@ -1,0 +1,27 @@
+188 处理机 v5 程序更新说明（2026-08-27）
+
+目标机器：192.168.10.188:8010
+完整工具根目录：F:\cxd\PublicVideo-x64
+本更新包覆盖目录：F:\cxd\PublicVideo-x64\digital-human
+统一启动程序：F:\cxd\PublicVideo-x64\PublicVideoWorkbenchLauncher.exe
+
+本包是纯程序更新，包含截至本包构建时的最新本地代码：
+- 音乐采集入口与中断状态恢复
+- 剪映账号模板浏览器动态预览
+- 模板字幕首句重复修复
+- 中文引号独立字幕修复
+- H3 生成确认弹窗精简
+
+更新步骤：
+1. 等待正在生成或导出的任务结束。
+2. 关闭工作台网页，并退出 PublicVideoWorkbenchLauncher。
+3. 备份 F:\cxd\PublicVideo-x64\digital-human\data。
+4. 把本 ZIP 解压后的全部文件复制到
+   F:\cxd\PublicVideo-x64\digital-human
+   并选择覆盖同名文件。
+5. 不要删除、替换或清空原 data 文件夹；本 ZIP 不包含 data。
+6. 回到 F:\cxd\PublicVideo-x64，双击 PublicVideoWorkbenchLauncher.exe 启动。
+7. 打开 http://127.0.0.1:8010/app/new，核对原项目、图片、声音、模板和 H3 状态。
+
+不要把本包解压到外层 F:\cxd\PublicVideo-x64，也不要解压到新建空目录运行。
+

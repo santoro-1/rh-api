@@ -1,0 +1,17 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.js
+@@
+     } finally {
+       busy = false;
++      if (action === '/repair-key-access') el('repair-confirm').checked = false;
+       el('refresh').disabled = false;
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_setup.py
+@@
+-import sys
+ import threading
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_windows.py
+@@
+-    # Local/domain users and Microsoft Entra users, never Everyone/groups/services.
++    # Account SID shapes (local/domain or Entra). Shape alone does not prove a
++    # user: the helper must obtain this value from the original process TokenUser.
+*** End Patch

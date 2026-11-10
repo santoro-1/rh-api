@@ -1,0 +1,12 @@
+{
+  "draft_root": "",
+  "deployment_mode": "standalone",
+  "host": "127.0.0.1",
+  "digital_human_server_url": "https://video.lanyingjk01.com",
+  "ltx_workbench_url": "http://127.0.0.1:8791",
+  "shared_processor_url": "",
+  "auth_authority": "false",
+  "asr_base_url": "http://127.0.0.1:18084",
+  "asr_required": "true",
+  "asr_runtime_root": "asr_runtime"
+}

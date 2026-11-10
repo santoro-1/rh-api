@@ -1,0 +1,103 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_execution.py
+@@
+     def authorize(self, scopes):
++        # All requested scopes must belong to one coherent credential revision.
++        # Session refreshes in another request cannot change grants mid-decision.
++        with self.session._lock:
++            return self._authorize_locked(scopes)
++
++    def _authorize_locked(self, scopes):
+         scopes = frozenset(scopes)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_queue.py
+@@
+ import json
++import logging
++import os
+ from pathlib import Path
++import tempfile
+@@
+-def device_guarded_queue_job(function):
++def sync_authorization_status(path, status):
++    """DB is authoritative. A transient file lock must not strand queue work."""
++    path, temporary = Path(path), None
++    try:
++        if not path.is_file():
++            return
++        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
++                                         prefix=".device-status-", suffix=".tmp", delete=False) as output:
++            temporary = Path(output.name)
++            json.dump(status, output, ensure_ascii=False, indent=2)
++            output.flush()
++            os.fsync(output.fileno())
++        os.replace(temporary, path)
++    except OSError:
++        logging.getLogger("jyd_probe.device_auth").warning("本地授权等待状态已保存到数据库，状态文件暂无法同步")
++    finally:
++        if temporary is not None:
++            try:
++                temporary.unlink(missing_ok=True)
++            except OSError:
++                pass
++
++
++def device_guarded_queue_job(function):
+@@
+-            if status_path.is_file():
+-                status_path.write_text(
+-                    json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8"
+-                )
++            sync_authorization_status(status_path, status)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+-from .device_local_queue import device_guarded_queue_job
++from .device_local_queue import device_guarded_queue_job, sync_authorization_status
+@@
+-        if previous.get("device_authorization"):
+-            running_status["device_authorization"] = previous["device_authorization"]
++        latest_device_status = self.store.get_status(job_id) if hasattr(self, "store") else previous
++        if (latest_device_status or {}).get("device_authorization"):
++            running_status["device_authorization"] = latest_device_status["device_authorization"]
+@@
+     def claim_agent_job(self, agent_id: str) -> dict[str, Any] | None:
++        from .device_local_execution import requires_device_authorization
++        if requires_device_authorization():
++            # Never let an old Agent token stand in for the executing machine's
++            # device proof. Its dedicated authorization protocol is still pending.
++            raise DeviceAuthorizationError("DEVICE_AGENT_PROTOCOL_REQUIRED",
++                                           "独立处理机尚未接入设备授权，请使用本机内置处理模式", status_code=409)
+         if self.execution_mode != "agent":
+@@
+             render_queue._device_authorizers[job_id] = current_local_authorizer()
+-            _write_json(_job_dir(settings, job_id) / "status.json", status)
++            sync_authorization_status(_job_dir(settings, job_id) / "status.json", status)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/device-authorization.html
+@@
+-    <footer>设备授权与账号登录分别管理。此页面不修改已有任务、素材或草稿。</footer>
++    <footer>设备授权与账号登录分别管理。授权申请不修改已有素材或草稿；只有点击“继续此任务”才恢复本地排队。</footer>
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_local_execution.py
+@@
+-def test_authorized_queue_completes_once_preserves_binding_and_releases_session(
++def test_old_agent_cannot_claim_work_with_only_its_shared_password(queue, licensed, enforced):
++    with local_authorization_context(licensed.authorizer):
++        created = queue.submit({"output": {"skip_export": True}})
++    with pytest.raises(DeviceAuthorizationError) as denied:
++        queue.claim_agent_job("embedded-local")
++    assert denied.value.code == "DEVICE_AGENT_PROTOCOL_REQUIRED"
++    assert queue.store.get_status(created["job_id"])["status"] == "pending"
++    assert queue.store.get_agent("embedded-local")["current_job_id"] is None
++
++
++def test_status_file_lock_does_not_lose_persistent_authorization_wait(queue, licensed, enforced):
++    with local_authorization_context(licensed.authorizer):
++        created = queue.submit({"output": {"skip_export": True}})
++    queue._device_authorizers.clear()
++    with patch("jyd_probe.device_local_queue.os.replace", side_effect=PermissionError("test locked file")):
++        queue._run_job(created["job_id"])
++    assert queue.store.get_status(created["job_id"])["device_authorization"]["waiting"]
++    status_path = queue.settings.storage_root / "jobs" / created["job_id"] / "status.json"
++    assert json.loads(status_path.read_text(encoding="utf-8"))["status"] == "pending"
++
++
++def test_authorized_queue_completes_once_preserves_binding_and_releases_session(
+*** End Patch

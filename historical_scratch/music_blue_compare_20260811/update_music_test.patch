@@ -1,0 +1,13 @@
+diff --git a/tests/test_music_matching.py b/tests/test_music_matching.py
+--- a/tests/test_music_matching.py
++++ b/tests/test_music_matching.py
+@@ -146,7 +146,8 @@ class MusicProfileMatcherTest(unittest.TestCase):
+         result = self.matcher.recommend(health_intent(), video_duration_us=451_000_000)
+         selected_asset = self.snapshot["assets_by_identity"][result["bgm_identity"]]
+         self.assertLess(selected_asset["duration_us"], 451_000_000)
+-        self.assertEqual(result["filtered_counts"]["auto_eligible"], 4)
++        self.assertEqual(result["filtered_counts"]["enabled_and_available"], 5)
++        self.assertEqual(result["filtered_counts"]["auto_eligible"], 0)
+         self.assertNotIn("duration_covers_video", result["filtered_counts"])
+ 
+     def test_tightened_daylily_profile_is_not_general_health_knowledge(self) -> None:

@@ -1,0 +1,105 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_agent_recovery_gui.py
++import queue
++import sys
++from pathlib import Path
++import threading
++import time
++from types import SimpleNamespace
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++from jyd_probe.device_agent_recovery_gui import run_recovery_dialog
++
++
++def test_dialog_requires_both_confirmations_and_keeps_io_off_ui_thread(monkeypatch):
++    import tkinter as tk
++    from tkinter import ttk, messagebox
++    main_thread = threading.get_ident()
++    events, buttons, variables, calls, notices = queue.Queue(), {}, [], [], []
++    stop = threading.Event()
++    class Variable:
++        def __init__(self, value=""):
++            assert threading.get_ident() == main_thread
++            self.value = value
++            variables.append(self)
++        def get(self): return self.value
++        def set(self, value): self.value = value
++    class Widget:
++        def __init__(self, *args, **kwargs):
++            assert threading.get_ident() == main_thread
++            self.items = {}
++            self.binding = None
++            if kwargs.get("command"):
++                buttons[kwargs["text"]] = kwargs["command"]
++        def pack(self, *args, **kwargs): pass
++        def configure(self, *args, **kwargs):
++            assert threading.get_ident() == main_thread
++        def title(self, *args): pass
++        def geometry(self, *args): pass
++        def minsize(self, *args): pass
++        def transient(self, *args): pass
++        def protocol(self, *args): pass
++        def destroy(self): pass
++        def heading(self, *args, **kwargs): pass
++        def column(self, *args, **kwargs): pass
++        def bind(self, *args): self.binding = args[1]
++        def selection(self): return list(self.items)[:1]
++        def item(self, key, *args): return self.items[key]
++        def get_children(self): return list(self.items)
++        def delete(self, key, *args): self.items.pop(key, None)
++        def insert(self, *args, **kwargs):
++            if "values" in kwargs:
++                self.items[str(len(self.items))] = kwargs["values"]
++    class Controller:
++        def records(self):
++            assert threading.get_ident() != main_thread
++            calls.append("records")
++            return [{"job_id": "job-1", "phase": "executing", "execution_id": "old-execution"}]
++        def prepare(self, job_id):
++            assert threading.get_ident() != main_thread and job_id == "job-1"
++            calls.append("prepare")
++            return {"job_id": job_id, "execution_id": "old-execution", "review_id": "r1", "status": "running",
++                    "can_resolve": True, "candidate": None, "notice": "人工核对"}
++        def resolve(self, review_id, choice, **kwargs):
++            assert threading.get_ident() != main_thread
++            assert (review_id, choice, kwargs) == ("r1", "close", {"confirm_stopped": True, "confirm_reviewed": True})
++            calls.append("resolve")
++            return {"acknowledged": True}
++    for name in ("Toplevel", "Text"):
++        monkeypatch.setattr(tk, name, Widget)
++    monkeypatch.setattr(tk, "BooleanVar", Variable)
++    monkeypatch.setattr(tk, "StringVar", Variable)
++    for name in ("Frame", "Label", "Treeview", "Button", "Checkbutton"):
++        monkeypatch.setattr(ttk, name, Widget)
++    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **kw: notices.append("confirmation-needed"))
++    monkeypatch.setattr(messagebox, "askyesno", lambda *a, **kw: True)
++    root = SimpleNamespace(after=lambda delay, callback: events.put(callback))
++    worker = threading.Thread(target=run_recovery_dialog, args=(root, Controller(), stop, lambda msg: None))
++    worker.start()
++    def until(predicate):
++        deadline = time.monotonic() + 5
++        while not predicate():
++            assert time.monotonic() < deadline, "mock GUI did not progress"
++            try: events.get(timeout=0.05)()
++            except queue.Empty: pass
++        while not events.empty(): events.get_nowait()()
++    try:
++        until(lambda: variables and "1 条" in str(variables[-1].get()))
++        buttons["查看选中任务"]()
++        until(lambda: "请核对上方" in str(variables[-1].get()))
++        buttons["结束原任务，保留文件"]()
++        assert notices == ["confirmation-needed"] and "resolve" not in calls
++        variables[0].set(True)
++        buttons["结束原任务，保留文件"]()
++        assert len(notices) == 2 and "resolve" not in calls
++        variables[1].set(True)
++        buttons["结束原任务，保留文件"]()
++        until(lambda: "可刷新记录" in str(variables[-1].get()))
++        assert calls == ["records", "prepare", "resolve"]
++        assert variables[0].get() is False and variables[1].get() is False
++    finally:
++        stop.set()
++        worker.join(timeout=5)
++        assert not worker.is_alive()
++        while not events.empty(): events.get_nowait()()
+*** End Patch

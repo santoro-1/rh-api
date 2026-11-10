@@ -1,0 +1,28 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/video_sequence_apply.py
+@@
+     segment_index = int(config.get("segment_index", 0))
++    if track_index < -1 or track_index >= len(video_tracks) or segment_index < 0:
++        raise ValueError("模板主视频槽下标无效")
+     placeholder = None
++    placeholder_material = {}
+@@
+         placeholder = track["segments"][segment_index]
++        placeholder_material = next(
++            (m for m in materials.get("videos", []) if m.get("id") == placeholder.get("material_id")), {}
++        )
+@@
+-        new_materials["videos"].append(material.export_json())
++        encoded_material = material.export_json()
++        for key in ("crop", "crop_ratio", "crop_scale"):
++            if key in placeholder_material:
++                encoded_material[key] = copy.deepcopy(placeholder_material[key])
++        new_materials["videos"].append(encoded_material)
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_h3_video_sequence.py
+@@
+             original["tracks"][0]["segments"][0]["clip"]["transform"]["x"] = 0.15
++            original["materials"]["videos"][0]["crop_ratio"] = "3:4"
+@@
+         if template_mode is True:
++            assert all(videos[s["material_id"]]["crop_ratio"] == "3:4" for s in main["segments"])
+*** End Patch

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>素材库管理</title>
+    <link rel="stylesheet" href="/app-static/assets.css?v=20260716-3" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-inner">
+        <div>
+          <h1>素材库管理</h1>
+          <p>管理处理机上的永久素材。移入回收站不会立即删除原文件。</p>
+        </div>
+        <nav>
+          <a href="/app">视频生成</a>
+          <a href="/app/advanced">高级设置</a>
+          <button id="adminLogoutBtn" type="button">退出后台</button>
+          <span id="apiStatus" class="status">连接中</span>
+        </nav>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="user-management">
+        <div class="user-management-heading">
+          <div>
+            <h2>内测账号管理</h2>
+            <p>只有已启用账号可以登录本机工作台；停用或改密码后，原登录会话立即失效。</p>
+          </div>
+          <strong id="userCount">0 个账号</strong>
+        </div>
+        <form id="createUserForm" class="user-create-form">
+          <label>
+            <span>登录账号</span>
+            <input id="newUsername" type="text" minlength="2" maxlength="40" autocomplete="off" placeholder="例如：zhangsan" required />
+          </label>
+          <label>
+            <span>姓名 / 备注</span>
+            <input id="newUserDisplayName" type="text" maxlength="80" autocomplete="off" placeholder="例如：张三" />
+          </label>
+          <label>
+            <span>初始密码</span>
+            <input id="newUserPassword" type="password" minlength="6" maxlength="128" autocomplete="new-password" required />
+          </label>
+          <button id="createUserBtn" type="submit">新增账号</button>
+        </form>
+        <div class="table-shell user-table-shell">
+          <table>
+            <thead>
+              <tr><th>账号</th><th>姓名 / 备注</th><th>状态</th><th>重置密码</th><th>操作</th></tr>
+            </thead>
+            <tbody id="userRows"></tbody>
+          </table>
+          <div id="userEmptyState" class="empty hidden">还没有内测账号</div>
+        </div>
+      </section>
+
+      <section class="summary-bar">
+        <strong id="assetTotal">0</strong>
+        <span>项永久素材</span>
+        <div id="kindCounts" class="kind-counts"></div>
+      </section>
+
+      <section class="toolbar" aria-label="素材筛选">
+        <label>
+          <span>搜索</span>
+          <input id="searchInput" type="search" placeholder="名称、原名称或素材 ID" />
+        </label>
+        <label>
+          <span>类型</span>
+          <select id="kindFilter">
+            <option value="">全部类型</option>
+            <option value="audio">音乐</option>
+            <option value="font">字体</option>
+            <option value="effect">视频特效</option>
+            <option value="sticker">全屏贴纸</option>
+            <option value="text_effect">花字</option>
+            <option value="text_style">字幕样式</option>
+            <option value="text_template">复合文字模板</option>
+            <option value="template">剪辑母版</option>
+          </select>
+        </label>
+        <label>
+          <span>状态</span>
+          <select id="statusFilter">
+            <option value="active">已启用</option>
+            <option value="disabled">已停用</option>
+            <option value="deleted">回收站</option>
+            <option value="all">全部状态</option>
+          </select>
+        </label>
+        <div class="category-create">
+          <label>
+            <span>新音乐分类</span>
+            <input id="newAudioCategory" type="text" placeholder="例如：鸡汤人设" />
+          </label>
+          <button id="createAudioCategoryBtn" type="button">新增分类</button>
+        </div>
+      </section>
+
+      <div id="message" class="message hidden"></div>
+
+      <section class="table-shell">
+        <table>
+          <thead>
+            <tr>
+              <th>素材名称</th>
+              <th>类型</th>
+              <th>分类 / 标签</th>
+              <th>启用</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="assetRows"></tbody>
+        </table>
+        <div id="emptyState" class="empty hidden">没有符合条件的素材</div>
+        <div id="pagination" class="pagination">
+          <span id="pageSummary">0 项</span>
+          <div>
+            <button id="previousPageBtn" type="button">上一页</button>
+            <strong id="pageNumber">1 / 1</strong>
+            <button id="nextPageBtn" type="button">下一页</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="previewDialog">
+      <div class="dialog-head">
+        <div>
+          <strong id="previewTitle">素材预览</strong>
+          <span id="previewMeta"></span>
+        </div>
+        <button id="closePreviewBtn" type="button" aria-label="关闭预览">关闭</button>
+      </div>
+      <div id="previewBody" class="preview-body"></div>
+    </dialog>
+
+    <script src="/app-static/admin-session.js?v=20260714-1"></script>
+    <script src="/app-static/assets.js?v=20260716-3"></script>
+  </body>
+</html>

@@ -1,0 +1,47 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_semantic_visuals.py
+@@
+ def test_untouched_auto_recipe_refreshes_current_asset_layout_and_resource() -> None:
+@@
+     assert Path(manual["bundle_path"]).name == "cucumber_salad_01"
++
++
++def test_untouched_auto_video_refreshes_current_clean_source_window(tmp_path: Path) -> None:
++    root = tmp_path / "library"
++    manifest = _write_v2_catalog(root)
++    payload = json.loads(manifest.read_text(encoding="utf-8"))
++    defaults = payload["assets"][1]["defaults"]
++    defaults.update(source_start_us=500_000, duration_us=1_000_000, loop=True)
++    manifest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
++    item = {
++        "visual_analysis": {
++            "recipe": {
++                "schema": RECIPE_SCHEMA_V2,
++                "catalog_version": "sha256:legacy",
++                "overlays": [
++                    {
++                        "overlay_id": "vo-beef",
++                        "asset_id": "beef.video.01",
++                        "enabled": True,
++                        "selection_mode": "auto",
++                        "manual": False,
++                        "locked": False,
++                        "media_type": "video",
++                        "renderer": "video_overlay",
++                        "resource_path": "videos/beef_cooking_01/video.mp4",
++                        "start_us": 0,
++                        "duration_us": 8_000_000,
++                        "source_start_us": 0,
++                    }
++                ],
++            }
++        }
++    }
++
++    refreshed = frozen_visual_overlays(item, library_root=root)[0]
++
++    assert refreshed["source_start_us"] == 500_000
++    assert refreshed["source_duration_us"] == 1_000_000
++    assert refreshed["duration_us"] == 8_000_000
++    assert refreshed["loop_to_target"] is True
+*** End Patch

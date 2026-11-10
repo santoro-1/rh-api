@@ -1,0 +1,1818 @@
+diff --git a/README.md b/README.md
+index 2addec9..12a357c 100644
+--- a/README.md
++++ b/README.md
+@@ -100,6 +100,8 @@ H3 成功后会回填发起任务的原 `ProjectItem`，而不是新建孤立项
+ 把同一母版拆成从 0 秒开始的静音 `base_video` 和一条 H3 权威音频，再让当前 H3 批次所选行
+ 进入已有 FunASR 字幕、4B/BGM、变体和成果库。段级重试、主动重生成、取消、结果下载、账号池
+ 和状态轮询均沿用云端 H3 执行合同；一个待确认或运行中的批次不能通过更换幂等键重复提交。
++浏览器动态预览读取与当前静音底片同一分段签名的 H3 有声母版；剪映草稿和导出仍使用静音
++`base_video` 加独立权威音频，避免预览修复改变后期轨道合同或把人声重复铺设两次。
+ 
+ MiniMax H3 独立工作台通过 `h3.jyd_handoff.v2` 把同一 H3 母版拆出的静音 `base_video`、一条从
+ 0 秒开始的 H3 权威音频和 H3 实际分段字幕窗口导入统一项目。最终播放音频必须来自 H3 成片；
+diff --git a/apps/processor/frontend/new/index.html b/apps/processor/frontend/new/index.html
+index bd8caab..da29d2c 100644
+--- a/apps/processor/frontend/new/index.html
++++ b/apps/processor/frontend/new/index.html
+@@ -1093,6 +1093,7 @@
+         let uploadedImages = [];
+         let currentMappingImageIds = [];
+         let h3StatusPollTimer = null;
++        const h3FailureToastSignatures = new Map();
+         let isGeneratingH3 = false;
+         let ltxEngineState = { items: [], active: false };
+         let ltxStatusPollTimer = null;
+@@ -1811,7 +1812,7 @@
+                 });
+                 if (completedTargets.length) {
+                     showToast('对口型画面已回填', '正在自动生成字幕、BGM 和可编辑剪映预览。', 'success');
+-                    await startGlobalPostprocess(completedTargets.map(item => item.id));
++                    await startGlobalPostprocess(completedTargets.map((item) => item.id));
+                 }
+                 if (failed.length && !quiet) showToast('部分视频任务失败', '错误原因已显示在对应人物视频卡片，可逐行重试。', 'warning');
+             } catch (error) {
+@@ -1978,20 +1979,39 @@
+             return String(project?.settings?.h3?.remote_status || '').trim().toUpperCase();
+         }
+ 
++        function h3BatchRecords(project = activeProject) {
++            const h3 = project?.settings?.h3 || {};
++            const records = Array.isArray(h3.batches)
++                ? h3.batches.filter((value) => value && value.batch_id).map((value) => ({ ...value }))
++                : [];
++            const legacyBatchId = String(h3.remote_batch_id || '');
++            if (legacyBatchId && !records.some((value) => String(value.batch_id || '') === legacyBatchId)) {
++                records.push({
++                    batch_id: legacyBatchId,
++                    status: h3.remote_status,
++                    prepare_key: h3.prepare_key,
++                    fee_snapshot: h3.fee_snapshot
++                });
++            }
++            return records;
++        }
++
++        function h3ItemIsActive(item, { includeQuote = false } = {}) {
++            const h3 = item?.settings?.h3 || item?.h3Settings || {};
++            const itemStatus = String(h3.remote_status || '').toUpperCase();
++            const localStatus = String(item?.status || item?.compositionStatus || '').toUpperCase();
++            if (includeQuote && (itemStatus === 'AWAITING_COST_CONFIRMATION' || localStatus === 'H3_COST_PENDING')) return true;
++            if (H3_ACTIVE_ITEM_STATUSES.has(itemStatus) || ['H3_QUEUED', 'H3_RUNNING'].includes(localStatus)) return true;
++            return (h3.segments || []).some((segment) =>
++                H3_ACTIVE_ITEM_STATUSES.has(String(segment?.status || '').toUpperCase())
++            );
++        }
++
+         function h3StateIsActive(project = activeProject) {
+-            const projectStatus = h3RemoteStatus(project);
+-            if (H3_RUNNING_REMOTE_STATUSES.has(projectStatus)) return true;
+-            const batchId = String(project?.settings?.h3?.remote_batch_id || '');
+-            return (project?.items || []).some((item) => {
+-                const h3 = item?.settings?.h3 || {};
+-                if (batchId && String(h3.remote_batch_id || '') !== batchId) return false;
+-                const itemStatus = String(h3.remote_status || '').toUpperCase();
+-                if (H3_ACTIVE_ITEM_STATUSES.has(itemStatus)) return true;
+-                if (H3_TERMINAL_REMOTE_STATUSES.has(projectStatus) || H3_TERMINAL_REMOTE_STATUSES.has(itemStatus)) return false;
+-                return (h3.segments || []).some((segment) =>
+-                    H3_ACTIVE_ITEM_STATUSES.has(String(segment?.status || '').toUpperCase())
+-                );
+-            });
++            if (h3BatchRecords(project).some((batch) =>
++                H3_RUNNING_REMOTE_STATUSES.has(String(batch?.status || '').toUpperCase())
++            )) return true;
++            return (project?.items || []).some((item) => h3ItemIsActive(item));
+         }
+ 
+         function h3FailedSegments(project = activeProject) {
+@@ -2003,17 +2023,41 @@
+         }
+ 
+         function h3HasPendingPostprocess(project = activeProject) {
+-            const batchId = String(project?.settings?.h3?.remote_batch_id || '');
+-            if (!batchId) return false;
+             return (project?.items || []).some((item) => {
+-                const sameBatch = String(item?.settings?.h3?.remote_batch_id || '') === batchId;
+                 const actions = item?.allowed_actions || {};
+-                return sameBatch
+-                    && Boolean(item?.outputs?.base_video)
++                return Boolean(item?.settings?.h3?.remote_batch_id)
++                    && h3OutputFileAvailable(item?.outputs?.base_video)
+                     && Boolean(actions.start_postprocess || actions.retry_postprocess);
+             });
+         }
+ 
++        function h3OutputFileAvailable(asset) {
++            return Boolean(asset) && asset.file_exists !== false;
++        }
++
++        function h3NeedsLocalMaterialization(project = activeProject) {
++            return (project?.items || []).some((item) => {
++                const h3 = item?.settings?.h3 || {};
++                const remoteStatus = String(h3.remote_status || '').toUpperCase();
++                return Boolean(h3.remote_batch_id)
++                    && remoteStatus === 'SUCCESS'
++                    && (!h3OutputFileAvailable(item?.outputs?.audio)
++                        || !h3OutputFileAvailable(item?.outputs?.base_video));
++            });
++        }
++
++        function h3FailureToastSignature(failedSegments) {
++            return failedSegments
++                .map((segment) => [
++                    String(segment.segment_id || ''),
++                    String(segment.status || ''),
++                    String(segment.error_code || ''),
++                    String(segment.error_message || '')
++                ].join(':'))
++                .sort()
++                .join('|');
++        }
++
+         async function confirmPreparedH3Batch(prepared, { resumed = false } = {}) {
+             const fee = prepared?.h3_batch?.fee_snapshot || prepared?.project?.settings?.h3?.fee_snapshot || {};
+             const resumeNote = resumed ? '正在恢复上一次已冻结的费用预览，不会重新计算或重复创建批次。\n\n' : '';
+@@ -2023,17 +2067,23 @@
+                 return false;
+             }
+             let confirmed;
++            const batchId = String(prepared?.h3_batch?.batch_id || '');
+             try {
+                 confirmed = await workspaceApi(`/api/new/projects/${activeProject.project_id}/h3/confirm`, {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/json' },
+-                    body: JSON.stringify({ cost_confirmed: true })
++                    body: JSON.stringify({ cost_confirmed: true, batch_id: batchId })
+                 });
+             } catch (error) {
+                 try {
+                     const recovered = await workspaceApi(`/api/new/projects/${activeProject.project_id}/h3/status`);
+                     syncProjectInputs(recovered.project);
+-                    if (h3StateIsActive(recovered.project)) {
++                    const recoveredBatch = (recovered.h3_batches || []).find((value) =>
++                        String(value?.batch_id || '') === batchId
++                    ) || h3BatchRecords(recovered.project).find((value) =>
++                        String(value?.batch_id || '') === batchId
++                    );
++                    if (H3_RUNNING_REMOTE_STATUSES.has(String(recoveredBatch?.status || '').toUpperCase())) {
+                         confirmed = recovered;
+                     }
+                 } catch (_) {
+@@ -2047,19 +2097,27 @@
+             return true;
+         }
+ 
+-        async function resumeExistingH3Batch() {
+-            if (!H3_OPEN_REMOTE_STATUSES.has(h3RemoteStatus()) && !h3StateIsActive()) return false;
++        async function resumeExistingH3Batch(targets) {
++            const targetRows = (targets || []).map((item) => String(item.row_key || '')).filter(Boolean).sort();
++            if (!targetRows.length) return false;
+             const existing = await workspaceApi(`/api/new/projects/${activeProject.project_id}/h3/status`);
+             syncProjectInputs(existing.project);
+-            const status = h3RemoteStatus(existing.project);
+-            if (status === 'AWAITING_COST_CONFIRMATION') {
+-                await confirmPreparedH3Batch(existing, { resumed: true });
++            const snapshots = Array.isArray(existing.h3_batches) ? existing.h3_batches : [];
++            const pending = snapshots.find((batch) => {
++                if (String(batch?.status || '').toUpperCase() !== 'AWAITING_COST_CONFIRMATION') return false;
++                const rows = (batch?.items || []).map((item) => String(item?.row_id || '')).filter(Boolean).sort();
++                return rows.length === targetRows.length && rows.every((row, index) => row === targetRows[index]);
++            });
++            if (pending) {
++                await confirmPreparedH3Batch({ project: existing.project, h3_batch: pending }, { resumed: true });
+                 return true;
+             }
+-            if (h3StateIsActive(existing.project)) {
+-                showToast('多参考任务正在生成', '已恢复现有批次的状态刷新，不会重复提交或重复付费。', 'info');
++            if (h3NeedsLocalMaterialization(existing.project)) {
++                showToast('正在恢复本地画面', '云端 H3 已完成，正在重新下载并合并已有结果，不会重复提交或付费。', 'info');
++                scheduleH3StatusPoll(10000);
++            }
++            if (h3HasPendingPostprocess(existing.project)) {
+                 scheduleH3StatusPoll(1000);
+-                return true;
+             }
+             return false;
+         }
+@@ -2070,15 +2128,17 @@
+             isGeneratingH3 = true;
+             refreshAudioStageActions();
+             try {
+-                if (await resumeExistingH3Batch()) return;
+-                const targets = Array.isArray(explicitTargets) ? explicitTargets : h3TargetItems();
++                const requestedTargets = Array.isArray(explicitTargets) ? explicitTargets : h3TargetItems();
++                const targets = requestedTargets.filter((item) => !item.baseVideo && !h3ItemIsActive(item));
++                const occupiedCount = requestedTargets.filter((item) => !item.baseVideo && h3ItemIsActive(item)).length;
+                 const missingAudio = targets.filter(item => !latestMinimaxAudio(item));
+                 const missingImage = targets.filter(item => !item.image);
+                 const missingReference = targets.filter(item => !item.h3ReferenceVideo);
+                 if (!targets.length || missingAudio.length || missingImage.length || missingReference.length) {
+-                    showToast('多参考输入还不完整', `${!targets.length ? '没有选中脚本；' : ''}${missingAudio.length ? `${missingAudio.length} 条没有 MiniMax 完整音频；` : ''}${missingImage.length ? `${missingImage.length} 条没有分配人物图；` : ''}${missingReference.length ? `${missingReference.length} 条没有参考视频。` : ''}`, 'warning');
++                    showToast('多参考输入还不完整', `${!targets.length ? (occupiedCount ? '选中的脚本都已有生成中的任务；' : '没有可生成的脚本；') : ''}${missingAudio.length ? `${missingAudio.length} 条没有 MiniMax 完整音频；` : ''}${missingImage.length ? `${missingImage.length} 条没有分配人物图；` : ''}${missingReference.length ? `${missingReference.length} 条没有参考视频。` : ''}`, 'warning');
+                     return;
+                 }
++                if (await resumeExistingH3Batch(targets)) return;
+                 syncProjectInputs(await saveH3Settings(false));
+                 const accounts = await workspaceApi('/api/new/h3/accounts');
+                 const selected = await selectH3Accounts(accounts);
+@@ -2103,7 +2163,7 @@
+ 
+         function scheduleH3StatusPoll(delay = 5000) {
+             clearTimeout(h3StatusPollTimer);
+-            if (!h3StateIsActive() && !h3HasPendingPostprocess()) return;
++            if (!h3StateIsActive() && !h3HasPendingPostprocess() && !h3NeedsLocalMaterialization()) return;
+             h3StatusPollTimer = setTimeout(refreshH3Status, delay);
+         }
+ 
+@@ -2114,30 +2174,38 @@
+                 const result = await workspaceApi(`/api/new/projects/${projectId}/h3/status`);
+                 if (activeProject?.project_id !== projectId) return;
+                 syncProjectInputs(result.project);
+-                const remoteBatchId = result.project?.settings?.h3?.remote_batch_id;
+                 const completedTargets = uploadedScripts.filter(item => (
+-                    remoteBatchId
+-                    && item.h3Settings?.remote_batch_id === remoteBatchId
++                    item.h3Settings?.remote_batch_id
+                     && item.baseVideo
+                     && (item.allowedActions?.start_postprocess || item.allowedActions?.retry_postprocess)
+                 ));
++                if (completedTargets.length) {
++                    showToast('画面已回填', '正在继续生成字幕、BGM 和可编辑剪映预览。', 'success');
++                    await startGlobalPostprocess(completedTargets.map((item) => item.id));
++                }
+                 if (h3StateIsActive(result.project)) {
+                     scheduleH3StatusPoll();
+                     return;
+                 }
+-                if (completedTargets.length) {
+-                    showToast('画面已回填', '正在继续生成字幕、BGM 和可编辑剪映预览。', 'success');
+-                    await startGlobalPostprocess(completedTargets.map(item => item.id));
++                if (h3NeedsLocalMaterialization(result.project)) {
++                    scheduleH3StatusPoll(10000);
++                    return;
+                 }
+                 const failedSegments = h3FailedSegments(result.project);
+                 if (failedSegments.length) {
+-                    const first = failedSegments[0];
+-                    const reason = publicGenerationMessage(first.error_message || first.error_code || '分段生成失败').trim();
+-                    showToast(
+-                        completedTargets.length ? '部分分段失败' : '分段生成失败',
+-                        `任务 ${first.rowKey || '-'}：${reason}${failedSegments.length > 1 ? `；另有 ${failedSegments.length - 1} 个失败分段` : ''}。${completedTargets.length ? '成功行已保留并继续生成预览。' : '可在批次详情中逐段重试。'}`,
+-                        'warning'
+-                    );
++                    const signature = h3FailureToastSignature(failedSegments);
++                    if (h3FailureToastSignatures.get(projectId) !== signature) {
++                        h3FailureToastSignatures.set(projectId, signature);
++                        const first = failedSegments[0];
++                        const reason = publicGenerationMessage(first.error_message || first.error_code || '分段生成失败').trim();
++                        showToast(
++                            completedTargets.length ? '部分分段失败' : '分段生成失败',
++                            `任务 ${first.rowKey || '-'}：${reason}${failedSegments.length > 1 ? `；另有 ${failedSegments.length - 1} 个失败分段` : ''}。${completedTargets.length ? '成功行已保留并继续生成预览。' : '可在批次详情中逐段重试。'}`,
++                            'warning'
++                        );
++                    }
++                } else {
++                    h3FailureToastSignatures.delete(projectId);
+                 }
+             } catch (error) {
+                 if (activeProject?.project_id !== projectId) return;
+@@ -2152,6 +2220,7 @@
+                 const paid = Number(quote.estimated_paid_calls || 0) > 0;
+                 if (!window.confirm(paid ? `重试会产生 ${quote.estimated_paid_calls} 次付费调用，继续？` : '本次只重新下载已有云端结果，不产生新的生成调用，继续？')) return false;
+                 const result = await workspaceApi(`/api/new/projects/${activeProject.project_id}/h3/segments/${segmentId}/retry/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_key: globalThis.crypto?.randomUUID?.() || `retry-${Date.now()}`, quote_token: quote.quote_token, cost_confirmed: paid }) });
++                h3FailureToastSignatures.delete(activeProject.project_id);
+                 syncProjectInputs(result.project); scheduleH3StatusPoll(1000);
+                 return true;
+             } catch (error) {
+@@ -2613,8 +2682,9 @@
+                 const variantGenerationOperation = [...variantOperations].reverse().find(operation => operation.item_id === item.item_id && operation.operation_type === 'VARIANT_GENERATE') || null;
+                 const compositionOperation = [...compositionOperations].reverse().find(operation => operation.item_id === item.item_id) || null;
+                 const audioHistory = Array.isArray(item.asset_history?.audio) ? item.asset_history.audio : [];
+-                const sharedMinimaxAudio = item.outputs?.minimax_audio
+-                    || [...audioHistory].reverse().find(asset => asset?.source_type === 'minimax' && asset?.status === 'READY')
++                const recordedMinimaxAudio = item.outputs?.minimax_audio;
++                const sharedMinimaxAudio = (recordedMinimaxAudio?.file_exists !== false ? recordedMinimaxAudio : null)
++                    || [...audioHistory].reverse().find(asset => asset?.source_type === 'minimax' && asset?.status === 'READY' && asset?.file_exists !== false)
+                     || null;
+                 return ({
+                 id: item.item_id,
+@@ -2632,9 +2702,9 @@
+                 voiceStatus: sharedMinimaxAudio ? 'AUDIO_READY' : item.status,
+                 compositionStatus: item.status,
+                 audio: sharedMinimaxAudio,
+-                authoritativeAudio: item.outputs?.audio || null,
+-                baseVideo: item.outputs?.base_video || null,
+-                compositionVideo: item.outputs?.composition_video || null,
++                authoritativeAudio: h3OutputFileAvailable(item.outputs?.audio) ? item.outputs.audio : null,
++                baseVideo: h3OutputFileAvailable(item.outputs?.base_video) ? item.outputs.base_video : null,
++                compositionVideo: h3OutputFileAvailable(item.outputs?.composition_video) ? item.outputs.composition_video : null,
+                 originalVideoSegments: item.outputs?.original_video_segments || [],
+                 variants: item.outputs?.variants || [],
+                 compositionOperation,
+@@ -3492,7 +3562,7 @@
+                 } else if (browserPreviewReady) {
+                     tr.setAttribute('data-preview-mode', 'browser');
+                     const previewAssetId = encodeURIComponent(script.baseVideo?.asset_id || 'current');
+-                    tr.setAttribute('data-preview-video-url', `/api/new/projects/${activeProject.project_id}/items/${script.id}/base-video?asset_id=${previewAssetId}`);
++                    tr.setAttribute('data-preview-video-url', `/api/new/projects/${activeProject.project_id}/items/${script.id}/preview-video?asset_id=${previewAssetId}`);
+                     tr.setAttribute('data-final-video-name', `${script.rowKey}-动态效果预览（以剪映草稿为准）`);
+                 }
+                 const variantStatus = ['VARIANT_QUEUED', 'VARIANT_RUNNING'].includes(script.compositionStatus)
+@@ -4674,22 +4744,23 @@
+             const h3Mode = isH3GenerationMode();
+             const h3Active = h3StateIsActive();
+             const h3Targets = h3Mode ? h3TargetItems() : [];
+-            const h3InputsReady = h3Targets.length > 0 && h3Targets.every(item => latestMinimaxAudio(item) && item.image && item.h3ReferenceVideo);
++            const h3EligibleTargets = h3Targets.filter((item) => !item.baseVideo && !h3ItemIsActive(item));
++            const h3InputsReady = h3EligibleTargets.length > 0 && h3EligibleTargets.every(item => latestMinimaxAudio(item) && item.image && item.h3ReferenceVideo);
+             const canCompose4B = Boolean(
+                 activeProject?.allowed_actions?.start_postprocess
+                 || activeProject?.allowed_actions?.retry_postprocess
+             )
+                 && fontPresets.length > 0
+                 && !isGeneratingPostprocess;
+-            const canStartH3 = h3Mode && h3InputsReady && !h3Active && !isGeneratingH3 && h3Targets.some(item => !item.baseVideo);
++            const canStartH3 = h3Mode && h3InputsReady && !isGeneratingH3;
+             const canCompose = canStartH3 || canCompose4B;
+             btnCompose.disabled = !canCompose;
+-            if (h3Mode && h3Active) {
+-                btnCompose.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>视频生成中...</span>';
+-            } else if (h3Mode && isGeneratingH3) {
++            if (h3Mode && isGeneratingH3) {
+                 btnCompose.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>正在计算生成费用...</span>';
+             } else if (h3Mode && canStartH3) {
+                 btnCompose.innerHTML = '<i class="fa-solid fa-film"></i><span>生成视频</span>';
++            } else if (h3Mode && h3Active) {
++                btnCompose.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>所选视频生成中...</span>';
+             } else if (isGeneratingComposition || isGeneratingPostprocess) {
+                 btnCompose.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>完整成片生成中...</span>';
+             } else if (canCompose4B) {
+@@ -4698,7 +4769,7 @@
+                 btnCompose.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i><span>生成完整成片</span>';
+             }
+             stageHint.textContent = h3Active
+-                ? '分段正在云端运行；完成后自动回填并进入字幕/BGM 后期'
++                ? '已有分段正在云端运行；仍可选择其他空闲脚本继续挂生成任务'
+                 : '多参考会自动使用每行已分配图片作为人物图，无需额外勾选';
+             btnCompose.className = canCompose
+                 ? "w-full md:w-auto px-8 py-3 rounded-xl bg-gradient-to-r from-brand-primary via-brand-secondary to-brand-accent hover:brightness-110 text-white font-bold text-xs tracking-wider uppercase flex items-center justify-center gap-2 shadow-lg shadow-brand-primary/25 cursor-pointer transition-all active:scale-[0.98]"
+diff --git a/docs/WEB_API.md b/docs/WEB_API.md
+index 54bf4ce..5d68ab2 100644
+--- a/docs/WEB_API.md
++++ b/docs/WEB_API.md
+@@ -293,9 +293,15 @@ POST /api/new/projects/{project_id}/composition/generate
+ GET  /api/new/projects/{project_id}/composition/status
+ POST /api/new/projects/{project_id}/items/{item_id}/composition/retry
+ GET  /api/new/projects/{project_id}/items/{item_id}/base-video
++GET  /api/new/projects/{project_id}/items/{item_id}/preview-video
+ GET  /api/new/runninghub-execution-accounts
+ ```
+ 
++`base-video` 保持返回后期时间线使用的当前基础画面；H3 项目中的该文件按合同不含声音。
++`preview-video` 专供浏览器动态预览：当前基础画面来自 H3 时，返回与其
++`h3_segment_signature` 一致的有声 H3 母版；其他画面模式回退到当前基础画面。这样浏览器可以
++直接试听 H3 原声，同时不改变剪映草稿和导出的“静音底片 + 独立权威音频”轨道结构。
++
+ `digital-human-settings` 当前保存项目级 `resolution`，含义为数字人画面的最长边像素。
+ 新版页面允许直接输入任意正整数，默认值为 `1024`。修改时会保留历史视频文件，但解除旧分辨率
+ 基础视频的当前绑定；已生成的 MiniMax 声音继续复用。`audio/generate` 与
+diff --git a/src/jyd_probe/project_diagnostics.py b/src/jyd_probe/project_diagnostics.py
+index 999e17a..5bb1045 100644
+--- a/src/jyd_probe/project_diagnostics.py
++++ b/src/jyd_probe/project_diagnostics.py
+@@ -76,7 +76,17 @@ def _safe_project_summary(project: dict[str, Any]) -> dict[str, Any]:
+             "revision": project.get("revision"),
+             "created_at": project.get("created_at"),
+             "updated_at": project.get("updated_at"),
++            "h3": _safe_h3_state((project.get("settings") or {}).get("h3")),
+         },
++        "input_images": [
++            {
++                "image_id": image.get("image_id"),
++                "position": image.get("position"),
++                "file": _safe_asset_file_state(image),
++            }
++            for image in project.get("input_images", [])
++            if isinstance(image, dict)
++        ],
+         "items": [
+             {
+                 "item_id": item.get("item_id"),
+@@ -92,6 +102,11 @@ def _safe_project_summary(project: dict[str, Any]) -> dict[str, Any]:
+                         "variants",
+                     )
+                 },
++                "output_files": {
++                    key: _safe_asset_file_state((item.get("outputs") or {}).get(key))
++                    for key in ("audio", "base_video", "composition_video")
++                },
++                "h3": _safe_h3_state((item.get("settings") or {}).get("h3")),
+                 "created_at": item.get("created_at"),
+                 "updated_at": item.get("updated_at"),
+             }
+@@ -136,6 +151,55 @@ def _safe_project_summary(project: dict[str, Any]) -> dict[str, Any]:
+     }
+ 
+ 
++def _safe_asset_file_state(asset: object) -> dict[str, Any]:
++    value = asset if isinstance(asset, dict) else {}
++    managed_path = str(value.get("managed_path") or "").strip()
++    path = Path(managed_path) if managed_path else None
++    exists = False
++    size_bytes = 0
++    if path is not None:
++        try:
++            exists = path.is_file()
++            size_bytes = path.stat().st_size if exists else 0
++        except OSError:
++            exists = False
++            size_bytes = 0
++    return {
++        "recorded": bool(value),
++        "file_exists": exists,
++        "size_bytes": size_bytes,
++    }
++
++
++def _safe_h3_state(value: object) -> dict[str, Any]:
++    h3 = value if isinstance(value, dict) else {}
++    segments = h3.get("segments") if isinstance(h3.get("segments"), list) else []
++    return {
++        "remote_batch_id": h3.get("remote_batch_id"),
++        "remote_item_id": h3.get("remote_item_id"),
++        "remote_status": h3.get("remote_status"),
++        "last_synced_at": h3.get("last_synced_at"),
++        "invalidated_reason": h3.get("invalidated_reason"),
++        "segments": [
++            {
++                "segment_id": segment.get("segment_id"),
++                "index": segment.get("index"),
++                "status": segment.get("status"),
++                "can_retry": segment.get("can_retry") is True,
++                "has_normalized_video_download": bool(
++                    str(segment.get("normalized_video_download_url") or "").strip()
++                ),
++                "error_code": segment.get("error_code"),
++                "error_message": redact_text(
++                    str(segment.get("error_message") or "")[:500]
++                ) or None,
++            }
++            for segment in segments
++            if isinstance(segment, dict)
++        ],
++    }
++
++
+ def _matching_project_logs(project: dict[str, Any], logs_root: Path) -> str:
+     reference_fields: list[tuple[str, str]] = []
+     project_id = str(project.get("project_id") or "").strip()
+diff --git a/src/jyd_probe/project_h3.py b/src/jyd_probe/project_h3.py
+index f4ba74a..de0ea30 100644
+--- a/src/jyd_probe/project_h3.py
++++ b/src/jyd_probe/project_h3.py
+@@ -13,6 +13,22 @@ from .project_store import ProjectStore
+ 
+ H3_MODE = "minimax_h3_ref2va"
+ H3_SAFE_CUT_ALIGNMENT_SCHEMA = "jyd.h3-safe-cut-alignment.v1"
++H3_OPEN_BATCH_STATUSES = {
++    "AWAITING_COST_CONFIRMATION",
++    "ACTIVE",
++    "QUEUED",
++    "RUNNING",
++}
++H3_ACTIVE_ITEM_STATUSES = {
++    "ACTIVE",
++    "QUEUED",
++    "RUNNING",
++    "PENDING",
++    "UPLOADING",
++    "SUBMITTED",
++    "WAITING_DEPENDENCY",
++    "WAITING_REGENERATION_DEPENDENCY",
++}
+ 
+ 
+ class ProjectH3Coordinator:
+@@ -54,6 +70,86 @@ class ProjectH3Coordinator:
+             raise ValueError("请先把项目生成方式切换为 MiniMax H3")
+         return h3
+ 
++    @staticmethod
++    def _batch_records(h3: dict[str, Any]) -> list[dict[str, Any]]:
++        """Return stored batches plus the legacy latest-batch fields."""
++
++        records = [
++            dict(value)
++            for value in h3.get("batches", [])
++            if isinstance(value, dict) and str(value.get("batch_id") or "").strip()
++        ]
++        legacy_batch_id = str(h3.get("remote_batch_id") or "").strip()
++        if legacy_batch_id and not any(
++            str(value.get("batch_id") or "") == legacy_batch_id for value in records
++        ):
++            records.append(
++                {
++                    "batch_id": legacy_batch_id,
++                    "prepare_key": str(h3.get("prepare_key") or ""),
++                    "status": str(h3.get("remote_status") or "").upper(),
++                    "fee_snapshot": h3.get("fee_snapshot"),
++                    "last_synced_at": h3.get("last_synced_at"),
++                }
++            )
++        return records
++
++    @classmethod
++    def _batch_record(
++        cls,
++        h3: dict[str, Any],
++        *,
++        batch_id: str = "",
++        prepare_key: str = "",
++    ) -> dict[str, Any] | None:
++        clean_batch_id = str(batch_id or "").strip()
++        clean_prepare_key = str(prepare_key or "").strip()
++        for record in reversed(cls._batch_records(h3)):
++            if clean_batch_id and str(record.get("batch_id") or "") == clean_batch_id:
++                return record
++            if clean_prepare_key and str(record.get("prepare_key") or "") == clean_prepare_key:
++                return record
++        return None
++
++    @classmethod
++    def _prepare_key_for_snapshot(
++        cls, h3: dict[str, Any], snapshot: dict[str, Any]
++    ) -> str:
++        record = cls._batch_record(
++            h3, batch_id=str(snapshot.get("batch_id") or "")
++        )
++        return str(
++            (record or {}).get("prepare_key") or h3.get("prepare_key") or ""
++        )
++
++    @staticmethod
++    def _local_h3_files_ready(item: dict[str, Any]) -> bool:
++        outputs = item.get("outputs") if isinstance(item.get("outputs"), dict) else {}
++        for asset_type in ("audio", "base_video"):
++            asset = outputs.get(asset_type)
++            if not isinstance(asset, dict):
++                return False
++            path = Path(str(asset.get("managed_path") or ""))
++            try:
++                if not path.is_file() or path.stat().st_size <= 0:
++                    return False
++            except OSError:
++                return False
++        return True
++
++    @classmethod
++    def _h3_item_needs_materialization(cls, item: dict[str, Any]) -> bool:
++        h3 = (
++            item.get("settings", {}).get("h3", {})
++            if isinstance(item.get("settings"), dict)
++            else {}
++        )
++        return (
++            bool(str(h3.get("remote_batch_id") or "").strip())
++            and str(h3.get("remote_status") or "").upper() == "SUCCESS"
++            and not cls._local_h3_files_ready(item)
++        )
++
+     @staticmethod
+     def _target_items(
+         project: dict[str, Any], item_ids: list[str] | None
+@@ -287,9 +383,10 @@ class ProjectH3Coordinator:
+         project = self.store.get_project(owner_user_id, project_id)
+         h3 = self._h3_settings(project)
+         target_items = self._target_items(project, item_ids)
+-        if h3.get("prepare_key") == clean_key and h3.get("remote_batch_id"):
++        existing_batch = self._batch_record(h3, prepare_key=clean_key)
++        if existing_batch is not None:
+             snapshot = self.client.get_h3_batch(
+-                token, str(h3["remote_batch_id"])
++                token, str(existing_batch["batch_id"])
+             )
+             project = self.store.set_h3_batch_snapshot(
+                 owner_user_id,
+@@ -298,14 +395,32 @@ class ProjectH3Coordinator:
+                 snapshot=snapshot,
+             )
+             return {"project": project, "h3_batch": snapshot}
+-        if str(h3.get("remote_status") or "").upper() in {
+-            "AWAITING_COST_CONFIRMATION",
+-            "ACTIVE",
+-            "QUEUED",
+-            "RUNNING",
+-        }:
++
++        blocked_rows: list[str] = []
++        for item in target_items:
++            item_h3 = (
++                item.get("settings", {}).get("h3", {})
++                if isinstance(item.get("settings"), dict)
++                else {}
++            )
++            item_remote_status = str(item_h3.get("remote_status") or "").upper()
++            item_status = str(item.get("status") or "").upper()
++            segments = item_h3.get("segments")
++            segment_active = isinstance(segments, list) and any(
++                isinstance(segment, dict)
++                and str(segment.get("status") or "").upper()
++                in H3_ACTIVE_ITEM_STATUSES
++                for segment in segments
++            )
++            if (
++                item_remote_status in H3_OPEN_BATCH_STATUSES
++                or item_status in {"H3_COST_PENDING", "H3_QUEUED", "H3_RUNNING"}
++                or segment_active
++            ):
++                blocked_rows.append(str(item.get("row_key") or item.get("item_id")))
++        if blocked_rows:
+             raise ValueError(
+-                "当前 H3 批次尚未结束，不能用新的幂等键重复计算或提交"
++                f"第 {', '.join(blocked_rows)} 行已有未结束的 H3 任务或费用预览"
+             )
+ 
+         pending_audio_item_ids: list[str] = []
+@@ -492,18 +607,26 @@ class ProjectH3Coordinator:
+         return {"project": project, "h3_batch": snapshot}
+ 
+     def confirm(
+-        self, owner_user_id: str, project_id: str, token: str
++        self,
++        owner_user_id: str,
++        project_id: str,
++        token: str,
++        *,
++        batch_id: str = "",
+     ) -> dict[str, Any]:
+         project = self.store.get_project(owner_user_id, project_id)
+         h3 = self._h3_settings(project)
+-        batch_id = str(h3.get("remote_batch_id") or "")
+-        if not batch_id:
++        clean_batch_id = str(batch_id or h3.get("remote_batch_id") or "").strip()
++        if not clean_batch_id:
+             raise ValueError("请先计算 H3 分段与费用")
+-        snapshot = self.client.confirm_h3_batch(token, batch_id)
++        record = self._batch_record(h3, batch_id=clean_batch_id)
++        if record is None:
++            raise ValueError("H3 费用预览不属于当前项目或已失效")
++        snapshot = self.client.confirm_h3_batch(token, clean_batch_id)
+         project = self.store.set_h3_batch_snapshot(
+             owner_user_id,
+             project_id,
+-            prepare_key=str(h3.get("prepare_key") or ""),
++            prepare_key=str(record.get("prepare_key") or ""),
+             snapshot=snapshot,
+         )
+         return {"project": project, "h3_batch": snapshot}
+@@ -559,7 +682,7 @@ class ProjectH3Coordinator:
+         project = self.store.set_h3_batch_snapshot(
+             owner_user_id,
+             project_id,
+-            prepare_key=str(h3.get("prepare_key") or ""),
++            prepare_key=self._prepare_key_for_snapshot(h3, snapshot),
+             snapshot=snapshot,
+         )
+         return {"project": project, "h3_batch": snapshot}
+@@ -600,7 +723,7 @@ class ProjectH3Coordinator:
+         project = self.store.set_h3_batch_snapshot(
+             owner_user_id,
+             project_id,
+-            prepare_key=str(h3.get("prepare_key") or ""),
++            prepare_key=self._prepare_key_for_snapshot(h3, snapshot),
+             snapshot=snapshot,
+         )
+         return {"project": project, "h3_batch": snapshot}
+@@ -623,7 +746,7 @@ class ProjectH3Coordinator:
+         project = self.store.set_h3_batch_snapshot(
+             owner_user_id,
+             project_id,
+-            prepare_key=str(h3.get("prepare_key") or ""),
++            prepare_key=self._prepare_key_for_snapshot(h3, snapshot),
+             snapshot=snapshot,
+         )
+         return {"project": project, "h3_batch": snapshot}
+@@ -633,25 +756,56 @@ class ProjectH3Coordinator:
+     ) -> dict[str, Any]:
+         project = self.store.get_project(owner_user_id, project_id)
+         h3 = self._h3_settings(project)
+-        batch_id = str(h3.get("remote_batch_id") or "")
+-        if not batch_id:
+-            return {"project": project, "h3_batch": None}
+-        snapshot = self.client.get_h3_batch(token, batch_id)
+-        project = self.store.set_h3_batch_snapshot(
+-            owner_user_id,
+-            project_id,
+-            prepare_key=str(h3.get("prepare_key") or ""),
+-            snapshot=snapshot,
+-        )
+-        if self.storage_root is not None:
+-            project = self._materialize_ready_items(
++        records = self._batch_records(h3)
++        if not records:
++            return {"project": project, "h3_batch": None, "h3_batches": []}
++
++        latest_batch_id = str(h3.get("remote_batch_id") or "")
++        materialization_batch_ids = {
++            str(item.get("settings", {}).get("h3", {}).get("remote_batch_id") or "")
++            for item in project.get("items", [])
++            if isinstance(item, dict)
++            and self._h3_item_needs_materialization(item)
++        }
++        records_to_sync = [
++            record
++            for record in records
++            if str(record.get("status") or "").upper() in H3_OPEN_BATCH_STATUSES
++            or str(record.get("batch_id") or "") == latest_batch_id
++            or str(record.get("batch_id") or "") in materialization_batch_ids
++        ]
++        snapshots: list[dict[str, Any]] = []
++        for record in records_to_sync:
++            remote_batch_id = str(record.get("batch_id") or "")
++            snapshot = self.client.get_h3_batch(token, remote_batch_id)
++            snapshots.append(snapshot)
++            project = self.store.set_h3_batch_snapshot(
+                 owner_user_id,
+                 project_id,
+-                token,
+-                project=project,
++                prepare_key=str(record.get("prepare_key") or ""),
+                 snapshot=snapshot,
+             )
+-        return {"project": project, "h3_batch": snapshot}
++            if self.storage_root is not None:
++                project = self._materialize_ready_items(
++                    owner_user_id,
++                    project_id,
++                    token,
++                    project=project,
++                    snapshot=snapshot,
++                )
++        latest_snapshot = next(
++            (
++                value
++                for value in reversed(snapshots)
++                if str(value.get("batch_id") or "") == latest_batch_id
++            ),
++            snapshots[-1] if snapshots else None,
++        )
++        return {
++            "project": project,
++            "h3_batch": latest_snapshot,
++            "h3_batches": snapshots,
++        }
+ 
+     @staticmethod
+     def _segment_signature(segments: list[dict[str, Any]]) -> str:
+diff --git a/src/jyd_probe/project_h3_media.py b/src/jyd_probe/project_h3_media.py
+index a4136c4..9ca08eb 100644
+--- a/src/jyd_probe/project_h3_media.py
++++ b/src/jyd_probe/project_h3_media.py
+@@ -4,9 +4,12 @@ from dataclasses import dataclass
+ import json
+ import os
+ from pathlib import Path
++import shutil
+ import subprocess
+ from typing import Iterable
+ 
++from .bgm_loudness import _ffmpeg_path
++
+ 
+ class H3MediaError(RuntimeError):
+     pass
+@@ -22,9 +25,15 @@ class H3MediaAssets:
+ 
+ 
+ def _run(command: list[str], message: str) -> None:
++    resolved_command = list(command)
++    if resolved_command and resolved_command[0].lower() == "ffmpeg":
++        ffmpeg = _ffmpeg_path()
++        if not ffmpeg:
++            raise H3MediaError("本机未安装 FFmpeg")
++        resolved_command[0] = ffmpeg
+     try:
+         completed = subprocess.run(
+-            command,
++            resolved_command,
+             capture_output=True,
+             text=True,
+             encoding="utf-8",
+@@ -42,6 +51,22 @@ def _run(command: list[str], message: str) -> None:
+         raise H3MediaError(f"{message}：{detail or '未知错误'}")
+ 
+ 
++def _ffprobe_path() -> str | None:
++    configured = str(os.environ.get("JYD_FFPROBE") or "").strip()
++    if configured and Path(configured).expanduser().is_file():
++        return str(Path(configured).expanduser().resolve())
++    discovered = shutil.which("ffprobe")
++    if discovered:
++        return str(Path(discovered).resolve())
++    ffmpeg = _ffmpeg_path()
++    if not ffmpeg:
++        return None
++    candidate = Path(ffmpeg).with_name(
++        "ffprobe.exe" if Path(ffmpeg).suffix.lower() == ".exe" else "ffprobe"
++    )
++    return str(candidate.resolve()) if candidate.is_file() else None
++
++
+ def _atomic_media(command: list[str], target: Path, message: str) -> Path:
+     target.parent.mkdir(parents=True, exist_ok=True)
+     temporary = target.with_name(f"{target.stem}.part{target.suffix}")
+@@ -67,8 +92,11 @@ def _concat_manifest(segment_paths: Iterable[Path], target: Path) -> Path:
+ 
+ 
+ def _probe_av_starts(path: Path) -> tuple[float, float]:
++    ffprobe = _ffprobe_path()
++    if not ffprobe:
++        raise H3MediaError("本机未安装 FFprobe")
+     command = [
+-        "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,start_time",
++        ffprobe, "-v", "error", "-show_entries", "stream=codec_type,start_time",
+         "-of", "json", str(path),
+     ]
+     try:
+@@ -129,8 +157,11 @@ def _merge_segments(segment_paths: list[Path], target: Path) -> Path:
+ 
+ 
+ def _probe_duration(path: Path) -> float:
++    ffprobe = _ffprobe_path()
++    if not ffprobe:
++        raise H3MediaError("本机未安装 FFprobe")
+     command = [
+-        "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
++        ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=duration", "-of", "json", str(path),
+     ]
+     try:
+diff --git a/src/jyd_probe/project_store.py b/src/jyd_probe/project_store.py
+index f6561c8..4e288e2 100644
+--- a/src/jyd_probe/project_store.py
++++ b/src/jyd_probe/project_store.py
+@@ -3302,12 +3302,13 @@ class ProjectStore:
+                 return self._project_payload(connection, project_id)
+             project_settings = _object(project["settings_json"], {})
+             project_h3 = project_settings.get("h3") if isinstance(project_settings.get("h3"), dict) else {}
+-            if str(project_h3.get("remote_status") or "").upper() in {
+-                "ACTIVE", "QUEUED", "RUNNING"
+-            }:
+-                raise ValueError("H3 批次正在生成，完成后才能修改行级参数")
+             if str(item["status"]) in ACTIVE_ITEM_STATUSES:
+                 raise ValueError("当前脚本行正在生成，不能修改 H3 行级参数")
++            if str(h3.get("remote_status") or "").upper() in {
++                "ACTIVE", "QUEUED", "RUNNING", "PENDING", "UPLOADING", "SUBMITTED",
++                "WAITING_DEPENDENCY", "WAITING_REGENERATION_DEPENDENCY",
++            }:
++                raise ValueError("当前脚本行正在生成，不能修改 H3 行级参数")
+             item_settings["h3"] = {
+                 **h3,
+                 "overrides": normalized,
+@@ -3331,13 +3332,11 @@ class ProjectStore:
+                 (_json(subtitles), _json(item_settings), next_status, now, item_id),
+             )
+             project_settings["generation_mode"] = "minimax_h3_ref2va"
++            # Other rows may belong to active H3 batches. Row-level edits must
++            # not erase their project-level batch registry or polling state.
+             project_settings["h3"] = {
+                 "schema": "jyd.project-h3.v1",
+                 **project_h3,
+-                "remote_batch_id": None,
+-                "remote_status": None,
+-                "fee_snapshot": None,
+-                "prepare_key": None,
+             }
+             connection.execute(
+                 "UPDATE projects SET settings_json=?, revision=revision+1, updated_at=? WHERE project_id=?",
+@@ -3485,10 +3484,6 @@ class ProjectStore:
+             item = self._owned_item(connection, project_id, item_id)
+             project_settings = _object(project["settings_json"], {})
+             project_h3 = project_settings.get("h3") if isinstance(project_settings.get("h3"), dict) else {}
+-            if str(project_h3.get("remote_status") or "").upper() in {
+-                "ACTIVE", "QUEUED", "RUNNING"
+-            }:
+-                raise ValueError("H3 批次正在生成，完成后才能替换参考视频")
+             if str(item["status"]) in ACTIVE_ITEM_STATUSES:
+                 raise ValueError("当前脚本行正在生成，不能替换 H3 参考视频")
+             version = int(
+@@ -3527,6 +3522,11 @@ class ProjectStore:
+                 if isinstance(item_settings.get("h3"), dict)
+                 else {}
+             )
++            if str(h3.get("remote_status") or "").upper() in {
++                "ACTIVE", "QUEUED", "RUNNING", "PENDING", "UPLOADING", "SUBMITTED",
++                "WAITING_DEPENDENCY", "WAITING_REGENERATION_DEPENDENCY",
++            }:
++                raise ValueError("当前脚本行正在生成，不能替换 H3 参考视频")
+             item_settings["h3"] = {
+                 **h3,
+                 "reference_video_asset_id": asset_id,
+@@ -3554,13 +3554,11 @@ class ProjectStore:
+             settings = project_settings
+             h3_project = project_h3
+             settings["generation_mode"] = "minimax_h3_ref2va"
++            # Preserve batches owned by other rows while invalidating only the
++            # edited row's H3 input/output binding.
+             settings["h3"] = {
+                 "schema": "jyd.project-h3.v1",
+                 **h3_project,
+-                "remote_batch_id": None,
+-                "remote_status": None,
+-                "fee_snapshot": None,
+-                "prepare_key": None,
+             }
+             connection.execute(
+                 "UPDATE projects SET settings_json=?, revision=revision+1, "
+@@ -3738,6 +3736,84 @@ class ProjectStore:
+             project = self._owned_project(connection, owner_user_id, project_id)
+             settings = _object(project["settings_json"], {})
+             h3 = settings.get("h3") if isinstance(settings.get("h3"), dict) else {}
++            batches = [
++                dict(value)
++                for value in h3.get("batches", [])
++                if isinstance(value, dict)
++                and str(value.get("batch_id") or "").strip()
++            ]
++            legacy_batch_id = str(h3.get("remote_batch_id") or "").strip()
++            if legacy_batch_id and not any(
++                str(value.get("batch_id") or "") == legacy_batch_id
++                for value in batches
++            ):
++                batches.append(
++                    {
++                        "batch_id": legacy_batch_id,
++                        "prepare_key": str(h3.get("prepare_key") or ""),
++                        "status": str(h3.get("remote_status") or "").upper(),
++                        "fee_snapshot": h3.get("fee_snapshot"),
++                        "last_synced_at": h3.get("last_synced_at"),
++                    }
++                )
++            existing = next(
++                (
++                    value
++                    for value in batches
++                    if str(value.get("batch_id") or "") == remote_batch_id
++                ),
++                {},
++            )
++            resolved_prepare_key = str(
++                prepare_key
++                or existing.get("prepare_key")
++                or (
++                    h3.get("prepare_key")
++                    if legacy_batch_id == remote_batch_id
++                    else ""
++                )
++                or ""
++            )
++            now = _now()
++            batch_record = {
++                **existing,
++                "batch_id": remote_batch_id,
++                "prepare_key": resolved_prepare_key,
++                "status": remote_status,
++                "fee_snapshot": snapshot.get("fee_snapshot"),
++                "row_ids": list(remote_items),
++                "last_synced_at": now,
++            }
++            batches = [
++                value
++                for value in batches
++                if str(value.get("batch_id") or "") != remote_batch_id
++            ]
++            batches.append(batch_record)
++            # Keep enough terminal history for diagnosis while preventing an
++            # unbounded settings payload. Open batches are never discarded.
++            if len(batches) > 100:
++                open_batches = [
++                    value
++                    for value in batches
++                    if str(value.get("status") or "").upper()
++                    in {"AWAITING_COST_CONFIRMATION", "ACTIVE", "QUEUED", "RUNNING"}
++                ]
++                open_ids = {
++                    str(value.get("batch_id") or "") for value in open_batches
++                }
++                terminal_candidates = [
++                    value
++                    for value in batches
++                    if str(value.get("batch_id") or "") not in open_ids
++                ]
++                terminal_limit = max(0, 100 - len(open_batches))
++                terminal_batches = (
++                    terminal_candidates[-terminal_limit:]
++                    if terminal_limit
++                    else []
++                )
++                batches = terminal_batches + open_batches
+             settings["generation_mode"] = "minimax_h3_ref2va"
+             settings["h3"] = {
+                 "schema": "jyd.project-h3.v1",
+@@ -3745,10 +3821,10 @@ class ProjectStore:
+                 "remote_batch_id": remote_batch_id,
+                 "remote_status": remote_status,
+                 "fee_snapshot": snapshot.get("fee_snapshot"),
+-                "prepare_key": str(prepare_key or h3.get("prepare_key") or ""),
+-                "last_synced_at": _now(),
++                "prepare_key": resolved_prepare_key,
++                "last_synced_at": now,
++                "batches": batches,
+             }
+-            now = _now()
+             connection.execute(
+                 "UPDATE projects SET settings_json=?, updated_at=? WHERE project_id=?",
+                 (_json(settings), now, project_id),
+@@ -6100,6 +6176,14 @@ class ProjectStore:
+ 
+     @staticmethod
+     def _asset_payload(row: sqlite3.Row) -> dict[str, Any]:
++        managed_path = str(row["managed_path"] or "")
++        path = Path(managed_path) if managed_path else None
++        try:
++            file_exists = bool(path and path.is_file())
++            actual_size_bytes = path.stat().st_size if file_exists and path else 0
++        except OSError:
++            file_exists = False
++            actual_size_bytes = 0
+         return {
+             "asset_id": row["asset_id"],
+             "asset_type": row["asset_type"],
+@@ -6108,6 +6192,8 @@ class ProjectStore:
+             "source_type": row["source_type"],
+             "filename": row["filename"],
+             "managed_path": row["managed_path"],
++            "file_exists": file_exists,
++            "actual_size_bytes": actual_size_bytes,
+             "external_ref": _object(row["external_ref_json"], {}),
+             "metadata": _object(row["metadata_json"], {}),
+             "created_at": row["created_at"],
+@@ -6116,6 +6202,14 @@ class ProjectStore:
+ 
+     @staticmethod
+     def _input_image_payload(row: sqlite3.Row) -> dict[str, Any]:
++        managed_path = str(row["managed_path"] or "")
++        path = Path(managed_path) if managed_path else None
++        try:
++            file_exists = bool(path and path.is_file())
++            actual_size_bytes = path.stat().st_size if file_exists and path else 0
++        except OSError:
++            file_exists = False
++            actual_size_bytes = 0
+         return {
+             "image_id": row["image_id"],
+             "position": int(row["position"]),
+@@ -6124,6 +6218,8 @@ class ProjectStore:
+             "size_bytes": int(row["size_bytes"]),
+             "sha256": row["sha256"],
+             "managed_path": row["managed_path"],
++            "file_exists": file_exists,
++            "actual_size_bytes": actual_size_bytes,
+             "url": f"/api/new/projects/{row['project_id']}/images/{row['image_id']}",
+             "created_at": row["created_at"],
+         }
+diff --git a/src/jyd_probe/web_api.py b/src/jyd_probe/web_api.py
+index 72bd7ef..641f1e5 100644
+--- a/src/jyd_probe/web_api.py
++++ b/src/jyd_probe/web_api.py
+@@ -3634,7 +3634,10 @@ def create_app(settings: WebApiSettings | None = None) -> FastAPI:
+         client, token = digital_human_access(request)
+         try:
+             return project_h3_coordinator(client).confirm(
+-                user["user_id"], project_id, token
++                user["user_id"],
++                project_id,
++                token,
++                batch_id=str(payload.get("batch_id") or ""),
+             )
+         except KeyError as exc:
+             raise HTTPException(status_code=404, detail=str(exc)) from exc
+@@ -4599,6 +4602,78 @@ def create_app(settings: WebApiSettings | None = None) -> FastAPI:
+             },
+         )
+ 
++    @app.get("/api/new/projects/{project_id}/items/{item_id}/preview-video")
++    def preview_new_project_video(
++        project_id: str, item_id: str, request: Request
++    ) -> FileResponse:
++        """Serve the audible H3 master while keeping the editable base silent."""
++
++        user = current_project_user(request)
++        try:
++            project = project_store.get_project(user["user_id"], project_id)
++        except KeyError as exc:
++            raise HTTPException(status_code=404, detail="项目不存在") from exc
++        item = next(
++            (value for value in project["items"] if value["item_id"] == item_id),
++            None,
++        )
++        base_video = item.get("outputs", {}).get("base_video") if item else None
++        if not isinstance(base_video, dict):
++            raise HTTPException(status_code=404, detail="预览视频尚未准备完成")
++
++        preview_asset = base_video
++        base_metadata = (
++            base_video.get("metadata")
++            if isinstance(base_video.get("metadata"), dict)
++            else {}
++        )
++        segment_signature = str(
++            base_metadata.get("h3_segment_signature") or ""
++        ).strip()
++        if base_video.get("source_type") == "h3" and segment_signature:
++            masters = (item or {}).get("asset_history", {}).get("h3_master_av", [])
++            preview_asset = next(
++                (
++                    value
++                    for value in reversed(masters)
++                    if isinstance(value, dict)
++                    and value.get("source_type") == "h3"
++                    and value.get("status") == "READY"
++                    and str(
++                        (value.get("metadata") or {}).get("h3_segment_signature")
++                        or ""
++                    ).strip()
++                    == segment_signature
++                ),
++                base_video,
++            )
++
++        path = Path(str(preview_asset.get("managed_path") or "")).resolve()
++        try:
++            path.relative_to(settings.storage_root.resolve())
++        except ValueError as exc:
++            raise HTTPException(status_code=404, detail="预览视频文件不存在") from exc
++        if not path.is_file():
++            raise HTTPException(status_code=404, detail="预览视频文件不存在")
++        try:
++            preview_path = browser_preview_path(
++                path,
++                settings.storage_root
++                / "browser_previews"
++                / str(project_id)
++                / str(item_id),
++            )
++        except BrowserPreviewError as exc:
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
++        return FileResponse(
++            preview_path,
++            media_type="video/mp4",
++            headers={
++                "Cache-Control": "private, max-age=86400",
++                "Content-Disposition": "inline",
++            },
++        )
++
+     @app.get("/api/new/postprocess/options")
+     def get_new_postprocess_options(request: Request) -> dict[str, Any]:
+         current_project_user(request)
+diff --git a/tests/test_new_frontend.py b/tests/test_new_frontend.py
+index 93ed73a..6820583 100644
+--- a/tests/test_new_frontend.py
++++ b/tests/test_new_frontend.py
+@@ -46,7 +46,7 @@ class NewFrontendTest(unittest.TestCase):
+         self.assertNotIn("function reviewH3TargetAudio", page)
+         self.assertIn("await startGlobalH3Generation([script])", page)
+         self.assertIn(
+-            "h3Targets.every(item => latestMinimaxAudio(item) && item.image && item.h3ReferenceVideo)",
++            "h3EligibleTargets.every(item => latestMinimaxAudio(item) && item.image && item.h3ReferenceVideo)",
+             page,
+         )
+         self.assertIn("点击“生成视频”后会自动锁定当前声音", page)
+@@ -152,20 +152,27 @@ class NewFrontendTest(unittest.TestCase):
+         self.assertNotIn('id="workbench-environment"', page)
+         self.assertNotIn("session.workbench_environment_label", page)
+ 
+-    def test_h3_generation_resumes_an_existing_quote_before_preparing_again(self) -> None:
++    def test_h3_generation_resumes_matching_quote_without_blocking_other_rows(self) -> None:
+         page = (FRONTEND_ROOT / "index.html").read_text(encoding="utf-8")
+ 
+-        self.assertIn("async function resumeExistingH3Batch()", page)
++        self.assertIn("async function resumeExistingH3Batch(targets)", page)
+         self.assertIn("费用预览已保留", page)
+         self.assertIn("正在恢复上一次已冻结的费用预览", page)
+-        self.assertIn("if (await resumeExistingH3Batch()) return;", page)
+-        self.assertIn("h3StateIsActive(recovered.project)", page)
+-        self.assertIn("const sharedMinimaxAudio = item.outputs?.minimax_audio", page)
++        self.assertIn("if (await resumeExistingH3Batch(targets)) return;", page)
++        self.assertIn("const recoveredBatch = (recovered.h3_batches || []).find", page)
++        self.assertIn("body: JSON.stringify({ cost_confirmed: true, batch_id: batchId })", page)
++        self.assertIn("const targets = requestedTargets.filter((item) => !item.baseVideo && !h3ItemIsActive(item));", page)
++        self.assertNotIn("if (await resumeExistingH3Batch()) return;", page)
++        self.assertIn("const recordedMinimaxAudio = item.outputs?.minimax_audio", page)
++        self.assertIn("recordedMinimaxAudio?.file_exists !== false", page)
+         self.assertIn("audio: sharedMinimaxAudio", page)
+-        self.assertIn("authoritativeAudio: item.outputs?.audio || null", page)
++        self.assertIn(
++            "authoritativeAudio: h3OutputFileAvailable(item.outputs?.audio) ? item.outputs.audio : null",
++            page,
++        )
+         self.assertIn("scheduleH3StatusPoll();", page)
+         self.assertLess(
+-            page.index("if (await resumeExistingH3Batch()) return;"),
++            page.index("if (await resumeExistingH3Batch(targets)) return;"),
+             page.index("syncProjectInputs(await saveH3Settings(false));"),
+         )
+ 
+@@ -175,19 +182,43 @@ class NewFrontendTest(unittest.TestCase):
+         self.assertIn("function h3StateIsActive(project = activeProject)", page)
+         self.assertIn("H3_ACTIVE_ITEM_STATUSES", page)
+         self.assertIn("H3_TERMINAL_REMOTE_STATUSES", page)
+-        self.assertIn(
+-            "if (!h3StateIsActive() && !h3HasPendingPostprocess()) return;", page
+-        )
+         self.assertIn("if (h3StateIsActive(result.project))", page)
+         self.assertIn("function h3FailedSegments(project = activeProject)", page)
+         self.assertIn("function h3HasPendingPostprocess(project = activeProject)", page)
+-        self.assertIn("!h3StateIsActive() && !h3HasPendingPostprocess()", page)
++        self.assertIn("function h3NeedsLocalMaterialization(project = activeProject)", page)
++        self.assertIn("remoteStatus === 'SUCCESS'", page)
++        self.assertIn("function h3OutputFileAvailable(asset)", page)
++        self.assertIn("asset.file_exists !== false", page)
++        self.assertIn("!h3OutputFileAvailable(item?.outputs?.audio)", page)
++        self.assertIn("!h3OutputFileAvailable(item?.outputs?.base_video)", page)
++        self.assertIn(
++            "!h3StateIsActive() && !h3HasPendingPostprocess() && !h3NeedsLocalMaterialization()",
++            page,
++        )
++        self.assertIn("h3NeedsLocalMaterialization(existing.project)", page)
++        self.assertIn("云端 H3 已完成，正在重新下载并合并已有结果，不会重复提交或付费", page)
+         self.assertIn("成功行已保留并继续生成预览", page)
++        self.assertIn("const h3FailureToastSignatures = new Map()", page)
++        self.assertIn("function h3FailureToastSignature(failedSegments)", page)
++        self.assertIn("h3FailureToastSignatures.get(projectId) !== signature", page)
++        self.assertIn("h3FailureToastSignatures.delete(activeProject.project_id)", page)
+         self.assertIn("segment.error_message || segment.error_code", page)
+         self.assertIn(
+             "await startGlobalPostprocess(completedTargets.map((item) => item.id));",
+             page,
+         )
++        self.assertIn(
++            "baseVideo: h3OutputFileAvailable(item.outputs?.base_video) ? item.outputs.base_video : null",
++            page,
++        )
++        refresh = page[
++            page.index("async function refreshH3Status()") :
++            page.index("async function h3RetrySegment")
++        ]
++        self.assertLess(
++            refresh.index("await startGlobalPostprocess(completedTargets.map((item) => item.id));"),
++            refresh.index("if (h3StateIsActive(result.project))"),
++        )
+         self.assertIn("function h3RetryableSegmentsForScript(script)", page)
+         self.assertIn("retryH3FailedSegmentsForRow(script)", page)
+         self.assertIn(
+@@ -651,7 +682,7 @@ class NewFrontendTest(unittest.TestCase):
+         self.assertIn("/composition/status", workspace)
+         self.assertIn("const canBackfillSeedvr2 = false", workspace)
+         self.assertIn("data-preview-video-url", workspace)
+-        self.assertIn("/base-video", workspace)
++        self.assertIn("/preview-video", workspace)
+         self.assertIn("以剪映草稿为准", workspace)
+         self.assertIn("生成完整成片", workspace)
+         self.assertIn("/postprocess/generate", workspace)
+@@ -659,7 +690,7 @@ class NewFrontendTest(unittest.TestCase):
+         self.assertIn("startGlobalPostprocess()", workspace)
+         self.assertIn("/h3/overrides", workspace)
+         self.assertIn("高级覆盖（可选）", workspace)
+-        self.assertIn("completedTargets.map(item => item.id)", workspace)
++        self.assertIn("completedTargets.map((item) => item.id)", workspace)
+         final_flow = workspace[
+             workspace.index("async function startGlobalFinalVideoGeneration()") :
+             workspace.index("async function retryFailedCompositionItems()")
+@@ -860,8 +891,8 @@ class NewFrontendTest(unittest.TestCase):
+         self.assertIn("compositionStatusRequestProjectId === activeProject?.project_id", workspace)
+         self.assertNotIn("if (ltxMode && ltxActive)", workspace)
+         self.assertNotIn("else if (ltxMode && isGeneratingLtx)", workspace)
+-        self.assertIn("if (h3Mode && h3Active)", workspace)
+-        self.assertIn("else if (h3Mode && isGeneratingH3)", workspace)
++        self.assertIn("if (h3Mode && isGeneratingH3)", workspace)
++        self.assertIn("else if (h3Mode && h3Active)", workspace)
+ 
+     def test_module_6_uses_real_variant_api_and_inherited_ai_cover(self) -> None:
+         workspace = (FRONTEND_ROOT / "index.html").read_text(encoding="utf-8")
+diff --git a/tests/test_project_api.py b/tests/test_project_api.py
+index 8f11be3..47f0d55 100644
+--- a/tests/test_project_api.py
++++ b/tests/test_project_api.py
+@@ -225,6 +225,18 @@ class ProjectApiTest(unittest.TestCase):
+                         "items": [{"row_key": "001", "script_text": "不可导出的脚本文本"}],
+                     },
+                 ).json()
++                image_path = self.settings.storage_root / "diagnostic-image.png"
++                image_path.parent.mkdir(parents=True, exist_ok=True)
++                image_path.write_bytes(b"diagnostic-image")
++                app.state.project_store.register_input_image(
++                    owner_user_id=first_user["user_id"],
++                    project_id=project["project_id"],
++                    filename="diagnostic-image.png",
++                    content_type="image/png",
++                    size_bytes=image_path.stat().st_size,
++                    sha256="d" * 64,
++                    managed_path=str(image_path),
++                )
+                 operation = app.state.project_store.create_operation(
+                     owner_user_id=first_user["user_id"],
+                     project_id=project["project_id"],
+@@ -265,6 +277,19 @@ class ProjectApiTest(unittest.TestCase):
+                     summary["operations"][0]["correlation_id"],
+                     operation["correlation_id"],
+                 )
++                self.assertEqual(
++                    summary["items"][0]["output_files"]["base_video"],
++                    {"recorded": False, "file_exists": False, "size_bytes": 0},
++                )
++                self.assertEqual(summary["items"][0]["h3"]["segments"], [])
++                self.assertEqual(
++                    summary["input_images"][0]["file"],
++                    {
++                        "recorded": True,
++                        "file_exists": True,
++                        "size_bytes": len(b"diagnostic-image"),
++                    },
++                )
+                 self.assertNotIn("script_text", summary_text)
+                 self.assertNotIn("不可导出的脚本文本", summary_text)
+                 self.assertIn(project["project_id"], log_text)
+diff --git a/tests/test_project_h3.py b/tests/test_project_h3.py
+index 95d6efa..0a0052f 100644
+--- a/tests/test_project_h3.py
++++ b/tests/test_project_h3.py
+@@ -97,6 +97,51 @@ class FakeH3Client:
+         return target.stat().st_size
+ 
+ 
++class MultiBatchFakeH3Client(FakeH3Client):
++    def __init__(self) -> None:
++        super().__init__()
++        self.snapshots: dict[str, dict] = {}
++        self.fetched_batch_ids: list[str] = []
++
++    def prepare_h3_batch(self, token: str, payload: dict) -> dict:
++        row_id = str(payload["rows"][0]["row_id"])
++        batch_id = f"h3-batch-row-{row_id}"
++        snapshot = {
++            "batch_id": batch_id,
++            "status": "AWAITING_COST_CONFIRMATION",
++            "fee_snapshot": {"segment_count": 1, "estimated_paid_calls": 1},
++            "items": [
++                {
++                    "item_id": f"remote-row-{row_id}",
++                    "row_id": row_id,
++                    "status": "AWAITING_COST_CONFIRMATION",
++                    "segments": [],
++                }
++            ],
++        }
++        self.snapshots[batch_id] = snapshot
++        return dict(snapshot)
++
++    def confirm_h3_batch(self, token: str, batch_id: str) -> dict:
++        snapshot = self.snapshots[batch_id]
++        active = {
++            **snapshot,
++            "status": "ACTIVE",
++            "items": [
++                {
++                    **snapshot["items"][0],
++                    "status": "PENDING",
++                }
++            ],
++        }
++        self.snapshots[batch_id] = active
++        return dict(active)
++
++    def get_h3_batch(self, token: str, batch_id: str) -> dict:
++        self.fetched_batch_ids.append(batch_id)
++        return dict(self.snapshots[batch_id])
++
++
+ class FakeCaptionAligner:
+     def align(self, audio_path: Path, **kwargs: object) -> dict:
+         assert audio_path.is_file()
+@@ -132,7 +177,7 @@ def fake_media_preparer(
+     script_text: str,
+     target_dir: Path,
+ ) -> H3MediaAssets:
+-    assert len(segment_paths) == len(segment_texts) == 2
++    assert segment_paths and len(segment_paths) == len(segment_texts)
+     assert "".join(segment_texts) == script_text
+     target_dir.mkdir(parents=True, exist_ok=True)
+     master = target_dir / "h3-master-av.mp4"
+@@ -145,25 +190,290 @@ def fake_media_preparer(
+         master_av_path=master,
+         silent_base_video_path=base,
+         authoritative_audio_path=audio,
+-        raw_cues=(
+-            {
+-                "text": segment_texts[0],
+-                "start_us": 0,
+-                "duration_us": 1_000_000,
+-                "end_us": 1_000_000,
+-                "segment_index": 0,
+-            },
++        raw_cues=tuple(
+             {
+-                "text": segment_texts[1],
+-                "start_us": 1_000_000,
++                "text": text,
++                "start_us": index * 1_000_000,
+                 "duration_us": 1_000_000,
+-                "end_us": 2_000_000,
+-                "segment_index": 1,
+-            },
++                "end_us": (index + 1) * 1_000_000,
++                "segment_index": index,
++            }
++            for index, text in enumerate(segment_texts)
+         ),
+-        segment_durations_seconds=(1.0, 1.0),
++        segment_durations_seconds=tuple(1.0 for _ in segment_texts),
++    )
++
++
++def test_h3_batch_registry_keeps_multiple_rows_independent(tmp_path: Path) -> None:
++    store = ProjectStore(tmp_path / "control.db")
++    project = store.create_project(
++        owner_user_id="user-1",
++        owner_username="tester",
++        name="H3 多批次项目",
++        items=[
++            {"row_key": "1", "script_text": "第一条"},
++            {"row_key": "2", "script_text": "第二条"},
++        ],
++    )
++    project_id = project["project_id"]
++    store.set_h3_configuration(
++        "user-1",
++        project_id,
++        identity_image_ids=[],
++        defaults={
++            "continuity_mode": "loop_anchor",
++            "aspect_ratio": "9:16 (Portrait Widescreen)",
++            "megapixels": 1,
++            "generation_tail_seconds": 0.1,
++        },
++    )
++
++    first = store.set_h3_batch_snapshot(
++        "user-1",
++        project_id,
++        prepare_key="quote-row-1",
++        snapshot={
++            "batch_id": "h3-batch-row-1",
++            "status": "ACTIVE",
++            "fee_snapshot": {"segment_count": 1},
++            "items": [
++                {
++                    "item_id": "remote-row-1",
++                    "row_id": "1",
++                    "status": "RUNNING",
++                    "segments": [],
++                }
++            ],
++        },
++    )
++    assert first["items"][0]["status"] == "H3_RUNNING"
++    assert first["items"][1]["status"] == "DRAFT"
++
++    second = store.set_h3_batch_snapshot(
++        "user-1",
++        project_id,
++        prepare_key="quote-row-2",
++        snapshot={
++            "batch_id": "h3-batch-row-2",
++            "status": "AWAITING_COST_CONFIRMATION",
++            "fee_snapshot": {"segment_count": 1},
++            "items": [
++                {
++                    "item_id": "remote-row-2",
++                    "row_id": "2",
++                    "status": "AWAITING_COST_CONFIRMATION",
++                    "segments": [],
++                }
++            ],
++        },
++    )
++
++    batches = second["settings"]["h3"]["batches"]
++    assert [value["batch_id"] for value in batches] == [
++        "h3-batch-row-1",
++        "h3-batch-row-2",
++    ]
++    assert batches[0]["status"] == "ACTIVE"
++    assert batches[0]["row_ids"] == ["1"]
++    assert batches[1]["status"] == "AWAITING_COST_CONFIRMATION"
++    assert batches[1]["row_ids"] == ["2"]
++    assert second["items"][0]["status"] == "H3_RUNNING"
++    assert second["items"][0]["settings"]["h3"]["remote_batch_id"] == "h3-batch-row-1"
++    assert second["items"][1]["status"] == "H3_COST_PENDING"
++    assert second["items"][1]["settings"]["h3"]["remote_batch_id"] == "h3-batch-row-2"
++
++
++def test_h3_coordinator_can_prepare_an_idle_row_while_another_row_runs(
++    tmp_path: Path,
++) -> None:
++    store = ProjectStore(tmp_path / "control.db")
++    project = store.create_project(
++        owner_user_id="user-1",
++        owner_username="tester",
++        name="H3 连续挂任务",
++        items=[
++            {"row_key": "1", "script_text": "第一条。"},
++            {"row_key": "2", "script_text": "第二条。"},
++        ],
++    )
++    project_id = project["project_id"]
++    image_path = tmp_path / "identity.png"
++    image_path.write_bytes(b"identity")
++    image = store.register_input_image(
++        owner_user_id="user-1",
++        project_id=project_id,
++        filename="identity.png",
++        content_type="image/png",
++        size_bytes=image_path.stat().st_size,
++        sha256="a" * 64,
++        managed_path=str(image_path),
++    )
++    store.apply_image_strategy("user-1", project_id, strategy="loop", reuse_count=1)
++    for item in project["items"]:
++        row_key = str(item["row_key"])
++        audio_path = tmp_path / f"voice-{row_key}.mp3"
++        audio_path.write_bytes(f"audio-{row_key}".encode())
++        store.add_asset(
++            owner_user_id="user-1",
++            project_id=project_id,
++            item_id=item["item_id"],
++            asset_type="audio",
++            source_type="minimax",
++            status="READY",
++            filename=audio_path.name,
++            managed_path=str(audio_path),
++            external_ref={
++                "batch_id": f"audio-batch-{row_key}",
++                "remote_item_id": f"audio-item-{row_key}",
++                "generation_version": 1,
++            },
++            metadata={"provider_status": "SUCCESS"},
++            make_current=True,
++        )
++        reference_path = tmp_path / f"reference-{row_key}.mp4"
++        reference_path.write_bytes(f"video-{row_key}".encode())
++        store.add_h3_reference_video(
++            owner_user_id="user-1",
++            project_id=project_id,
++            item_id=item["item_id"],
++            filename=reference_path.name,
++            managed_path=str(reference_path),
++            metadata={"sha256": row_key * 64},
++        )
++    store.set_h3_configuration(
++        "user-1",
++        project_id,
++        identity_image_ids=[image["image_id"]],
++        defaults={
++            "continuity_mode": "loop_anchor",
++            "aspect_ratio": "9:16 (Portrait Widescreen)",
++            "megapixels": 1,
++            "generation_tail_seconds": 0.1,
++        },
++    )
++    client = MultiBatchFakeH3Client()
++    coordinator = ProjectH3Coordinator(store, client)  # type: ignore[arg-type]
++    item_ids = [str(value["item_id"]) for value in project["items"]]
++
++    first = coordinator.prepare(
++        "user-1",
++        project_id,
++        "token",
++        idempotency_key="quote-row-1",
++        selected_account_ids=[7],
++        item_ids=[item_ids[0]],
++    )
++    coordinator.confirm(
++        "user-1",
++        project_id,
++        "token",
++        batch_id=first["h3_batch"]["batch_id"],
++    )
++    second = coordinator.prepare(
++        "user-1",
++        project_id,
++        "token",
++        idempotency_key="quote-row-2",
++        selected_account_ids=[7],
++        item_ids=[item_ids[1]],
+     )
+ 
++    assert second["h3_batch"]["batch_id"] == "h3-batch-row-2"
++    assert [
++        value["batch_id"] for value in second["project"]["settings"]["h3"]["batches"]
++    ] == ["h3-batch-row-1", "h3-batch-row-2"]
++    assert second["project"]["items"][0]["status"] == "H3_RUNNING"
++    assert second["project"]["items"][1]["status"] == "H3_COST_PENDING"
++
++
++def test_h3_sync_recovers_missing_files_from_a_non_latest_successful_batch(
++    tmp_path: Path,
++) -> None:
++    store = ProjectStore(tmp_path / "control.db")
++    project = store.create_project(
++        owner_user_id="user-1",
++        owner_username="tester",
++        name="H3 旧批次本地恢复",
++        items=[
++            {"row_key": "1", "script_text": "第一条。"},
++            {"row_key": "2", "script_text": "第二条。"},
++        ],
++    )
++    project_id = project["project_id"]
++    store.set_h3_configuration(
++        "user-1",
++        project_id,
++        identity_image_ids=[],
++        defaults={
++            "continuity_mode": "loop_anchor",
++            "aspect_ratio": "9:16 (Portrait Widescreen)",
++            "megapixels": 1,
++            "generation_tail_seconds": 0.1,
++        },
++    )
++    client = MultiBatchFakeH3Client()
++    item_by_row = {str(item["row_key"]): item for item in project["items"]}
++    for row_key in ("1", "2"):
++        batch_id = f"h3-success-{row_key}"
++        snapshot = {
++            "batch_id": batch_id,
++            "status": "SUCCESS",
++            "items": [
++                {
++                    "item_id": f"remote-{row_key}",
++                    "row_id": row_key,
++                    "status": "SUCCESS",
++                    "segments": [
++                        {
++                            "segment_id": f"segment-{row_key}",
++                            "index": 0,
++                            "script_text": f"第{'一' if row_key == '1' else '二'}条。",
++                            "status": "SUCCESS",
++                            "normalized_video_download_url": f"/{row_key}.mp4",
++                        }
++                    ],
++                }
++            ],
++        }
++        client.snapshots[batch_id] = snapshot
++        store.set_h3_batch_snapshot(
++            "user-1",
++            project_id,
++            prepare_key=f"quote-{row_key}",
++            snapshot=snapshot,
++        )
++        item_id = str(item_by_row[row_key]["item_id"])
++        for asset_type, suffix in (("audio", ".wav"), ("base_video", ".mp4")):
++            path = tmp_path / f"recorded-{row_key}-{asset_type}{suffix}"
++            if row_key == "2":
++                path.write_bytes(f"existing-{asset_type}".encode())
++            store.add_asset(
++                owner_user_id="user-1",
++                project_id=project_id,
++                item_id=item_id,
++                asset_type=asset_type,
++                source_type="h3",
++                status="READY",
++                filename=path.name,
++                managed_path=str(path),
++                make_current=True,
++            )
++
++    coordinator = ProjectH3Coordinator(
++        store,
++        client,  # type: ignore[arg-type]
++        storage_root=tmp_path / "storage",
++        media_preparer=fake_media_preparer,
++    )
++    synced = coordinator.sync("user-1", project_id, "token")["project"]
++    first = next(item for item in synced["items"] if item["row_key"] == "1")
++
++    assert client.fetched_batch_ids == ["h3-success-1", "h3-success-2"]
++    assert Path(first["outputs"]["audio"]["managed_path"]).is_file()
++    assert Path(first["outputs"]["base_video"]["managed_path"]).is_file()
++    assert first["outputs"]["audio"]["metadata"]["h3_segment_signature"]
++    assert first["outputs"]["base_video"]["metadata"]["h3_segment_signature"]
++
+ 
+ def test_h3_project_contract_reuses_existing_audio_and_original_project(
+     tmp_path: Path,
+@@ -321,7 +631,7 @@ def test_h3_project_contract_reuses_existing_audio_and_original_project(
+         ("image", "identity.png"),
+         ("video", "reference.mp4"),
+     ]
+-    with pytest.raises(ValueError, match="尚未结束"):
++    with pytest.raises(ValueError, match="未结束"):
+         coordinator.prepare(
+             "user-1",
+             project_id,
+diff --git a/tests/test_project_h3_api.py b/tests/test_project_h3_api.py
+index 354f6e2..b977aa7 100644
+--- a/tests/test_project_h3_api.py
++++ b/tests/test_project_h3_api.py
+@@ -236,7 +236,7 @@ def test_h3_routes_use_existing_login_and_original_project(tmp_path: Path) -> No
+                 assert rejected.status_code == 409
+                 confirmed = client.post(
+                     f"/api/new/projects/{project_id}/h3/confirm",
+-                    json={"cost_confirmed": True},
++                    json={"cost_confirmed": True, "batch_id": "remote-h3-batch"},
+                 )
+                 assert confirmed.status_code == 200, confirmed.text
+                 assert confirmed.json()["project"]["items"][0]["status"] == "H3_RUNNING"
+@@ -258,6 +258,44 @@ def test_h3_routes_use_existing_login_and_original_project(tmp_path: Path) -> No
+                 detail_item = detail.json()["items"][0]
+                 assert detail_item["outputs"]["audio"]["source_type"] == "h3"
+                 assert detail_item["outputs"]["minimax_audio"]["source_type"] == "minimax"
++                signature = "f" * 64
++                h3_master_path = settings.storage_root / "h3-master-av.mp4"
++                h3_master_path.write_bytes(b"h3-master-with-audio")
++                store.add_asset(
++                    owner_user_id=user["user_id"],
++                    project_id=project_id,
++                    item_id=item_id,
++                    asset_type="h3_master_av",
++                    source_type="h3",
++                    status="READY",
++                    filename="h3-master-av.mp4",
++                    managed_path=str(h3_master_path),
++                    metadata={"h3_segment_signature": signature},
++                )
++                silent_base_path = settings.storage_root / "h3-base-video-silent.mp4"
++                silent_base_path.write_bytes(b"silent-base-video")
++                store.add_asset(
++                    owner_user_id=user["user_id"],
++                    project_id=project_id,
++                    item_id=item_id,
++                    asset_type="base_video",
++                    source_type="h3",
++                    status="READY",
++                    filename="h3-base-video-silent.mp4",
++                    managed_path=str(silent_base_path),
++                    metadata={"h3_segment_signature": signature},
++                    make_current=True,
++                )
++                audible_preview = client.get(
++                    f"/api/new/projects/{project_id}/items/{item_id}/preview-video"
++                )
++                assert audible_preview.status_code == 200, audible_preview.text
++                assert audible_preview.content == b"h3-master-with-audio"
++                editable_base = client.get(
++                    f"/api/new/projects/{project_id}/items/{item_id}/base-video"
++                )
++                assert editable_base.status_code == 200, editable_base.text
++                assert editable_base.content == b"silent-base-video"
+                 shared_preview = client.get(
+                     f"/api/new/projects/{project_id}/items/{item_id}/audio"
+                 )
+diff --git a/tests/test_project_h3_media.py b/tests/test_project_h3_media.py
+new file mode 100644
+index 0000000..05b84ab
+--- /dev/null
++++ b/tests/test_project_h3_media.py
+@@ -0,0 +1,39 @@
++from __future__ import annotations
++
++from pathlib import Path
++from subprocess import CompletedProcess
++import sys
++from unittest.mock import patch
++
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(PROJECT_ROOT / "src"))
++
++from jyd_probe.project_h3_media import _ffprobe_path, _run  # noqa: E402
++
++
++def test_h3_media_uses_bundled_ffmpeg_when_path_has_no_ffmpeg() -> None:
++    completed = CompletedProcess(["unused"], 0, stdout="", stderr="")
++    with patch(
++        "jyd_probe.project_h3_media._ffmpeg_path",
++        return_value=r"F:\PublicVideo-x64\digital-human\ffmpeg\bin\ffmpeg.exe",
++    ), patch(
++        "jyd_probe.project_h3_media.subprocess.run", return_value=completed
++    ) as run:
++        _run(["ffmpeg", "-version"], "FFmpeg 检查失败")
++
++    assert run.call_args.args[0][0] == (
++        r"F:\PublicVideo-x64\digital-human\ffmpeg\bin\ffmpeg.exe"
++    )
++
++
++def test_h3_media_finds_ffprobe_next_to_bundled_ffmpeg(tmp_path: Path) -> None:
++    ffmpeg = tmp_path / "ffmpeg.exe"
++    ffprobe = tmp_path / "ffprobe.exe"
++    ffmpeg.write_bytes(b"ffmpeg")
++    ffprobe.write_bytes(b"ffprobe")
++
++    with patch("jyd_probe.project_h3_media.shutil.which", return_value=None), patch(
++        "jyd_probe.project_h3_media._ffmpeg_path", return_value=str(ffmpeg)
++    ):
++        assert _ffprobe_path() == str(ffprobe.resolve())

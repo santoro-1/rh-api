@@ -1,0 +1,40 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_h3.py
+@@
+-from .project_store import ProjectStore
++from .project_store import ACTIVE_ITEM_STATUSES, ProjectStore
+@@
+     def _h3_item_needs_materialization(self, item: dict[str, Any]) -> bool:
++        if (item.get("outputs", {}).get("composition_video") or {}).get("source_type") == "user_upload":
++            return False
+@@
+             and current_files_ready
+         ):
++            if (item.get("status") in ACTIVE_ITEM_STATUSES
++                    or (outputs.get("composition_video") or {}).get("source_type") == "user_upload"):
++                return
+@@
+-        existing = (item.get("outputs") or {}).get("original_video_segments", [])
++        existing = (item.get("asset_history") or {}).get("original_video_segment", [])
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_store.py
+@@
+             original_segments = [
+                 asset
+                 for asset in assets
+                 if asset["asset_type"] == "original_video_segment"
+             ]
++            if current_base_video and current_base_video.get("source_type") == "h3":
++                # Downloads and draft planning consume the exact current H3
++                # manifest. Older/regenerating versions remain in asset_history.
++                bound_ids = set(current_base_video.get("metadata", {}).get("source_segment_asset_ids") or [])
++                original_segments = [asset for asset in original_segments if asset["asset_id"] in bound_ids]
+@@
+             "backfill_seedvr2": bool(latest_segments_by_index)
++            and (outputs["base_video"] or {}).get("source_type") != "h3"
+             and not seedvr2_ready
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/apps/processor/frontend/new/index.html
+@@
+                 const needsAssembly = !h3.materialization_error?.requires_input_change
++                    && item?.outputs?.composition_video?.source_type !== 'user_upload'
+                     && !cleanupFailed
+*** End Patch

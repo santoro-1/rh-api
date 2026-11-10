@@ -1,0 +1,325 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_windows.py
++"""Machine-level CNG identity. No private-key file, deletion or automatic fallback.
++
++Only initialize_for_activation may create a key. Updates and cache recovery must
++use open_existing. Native APIs are injectable: unit tests do not create TPM keys.
++"""
++from __future__ import annotations
++
++import base64
++import ctypes
++from ctypes import wintypes
++import hashlib
++import json
++import os
++import re
++import struct
++from typing import Protocol
++
++KEY_NAME = "PublicVideoWorkbench.DeviceIdentity"
++TPM_PROVIDER = "Microsoft Platform Crypto Provider"
++SOFTWARE_PROVIDER = "Microsoft Software Key Storage Provider"
++MACHINE_KEY = 0x20
++SILENT = 0x40
++ALLOW_SIGNING = 2
++NTE_BAD_KEYSET = 0x80090016
++NTE_NOT_FOUND = 0x80090011
++NTE_EXISTS = 0x8009000F
++NTE_NO_MORE_ITEMS = 0x8009002A
++ECDSA_P256_PUBLIC_MAGIC = 0x31534345
++
++
++class DeviceIdentityError(RuntimeError):
++    def __init__(self, code: str, message: str, *, native_status: int | None = None):
++        super().__init__(message)
++        self.code = code
++        self.native_status = native_status
++
++
++class _KeyAlreadyExists(Exception):
++    pass
++
++
++class IdentityApi(Protocol):
++    def open_provider(self, protection: str) -> int: ...
++    def open_key(self, provider: int) -> int | None: ...
++    def create_key(self, provider: int, operator_sid: str | None) -> int: ...
++    def property_dword(self, handle: int, name: str) -> int: ...
++    def public_blob(self, key: int) -> bytes: ...
++    def sign_hash(self, key: int, digest: bytes) -> bytes: ...
++    def free(self, handle: int) -> None: ...
++
++
++def _b64(value: bytes) -> str:
++    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
++
++
++def public_jwk_from_blob(blob: bytes) -> dict[str, str]:
++    if len(blob) != 72 or struct.unpack("<II", blob[:8]) != (ECDSA_P256_PUBLIC_MAGIC, 32):
++        raise DeviceIdentityError("KEY_FORMAT_INVALID", "设备密钥不是受支持的 P-256 公钥")
++    return {"kty": "EC", "crv": "P-256", "x": _b64(blob[8:40]), "y": _b64(blob[40:72])}
++
++
++class DeviceKey:
++    """Live key handle, not an exportable credential or a web signing service."""
++
++    def __init__(self, api: IdentityApi, provider: int, key: int, protection: str):
++        self._api, self._provider, self._key = api, provider, key
++        self.protection = protection
++        try:
++            if not api.property_dword(key, "Key Type") & MACHINE_KEY:
++                raise DeviceIdentityError("KEY_POLICY_INVALID", "设备密钥不是机器级密钥")
++            if api.property_dword(key, "Export Policy") != 0:
++                raise DeviceIdentityError("KEY_POLICY_INVALID", "设备私钥的导出策略不安全")
++            if api.property_dword(key, "Key Usage") != ALLOW_SIGNING:
++                raise DeviceIdentityError("KEY_POLICY_INVALID", "设备密钥用途与登记要求不一致")
++            if protection == "tpm" and not api.property_dword(provider, "Impl Type") & 1:
++                raise DeviceIdentityError("KEY_POLICY_INVALID", "提供程序没有报告硬件保护能力")
++            self.public_jwk = public_jwk_from_blob(api.public_blob(key))
++            canonical = json.dumps(self.public_jwk, sort_keys=True, separators=(",", ":"))
++            self.thumbprint = _b64(hashlib.sha256(canonical.encode("ascii")).digest())
++        except BaseException:
++            self.close()
++            raise
++
++    def sign(self, message: bytes) -> bytes:
++        if not self._key:
++            raise DeviceIdentityError("KEY_CLOSED", "设备密钥句柄已关闭")
++        if not isinstance(message, bytes) or not 1 <= len(message) <= 16384:
++            raise DeviceIdentityError("KEY_INPUT_INVALID", "设备验证消息无效")
++        signature = self._api.sign_hash(self._key, hashlib.sha256(message).digest())
++        if len(signature) != 64:
++            raise DeviceIdentityError("KEY_SIGNATURE_INVALID", "设备签名格式异常")
++        return signature
++
++    def close(self) -> None:
++        if self._key:
++            self._api.free(self._key)
++            self._key = 0
++        if self._provider:
++            self._api.free(self._provider)
++            self._provider = 0
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *_):
++        self.close()
++
++
++class WindowsDeviceIdentity:
++    def __init__(self, *, protection: str = "tpm", api: IdentityApi | None = None):
++        if protection not in {"tpm", "software"}:
++            raise DeviceIdentityError("KEY_PROVIDER_INVALID", "不支持的设备保护方式")
++        self.protection = protection
++        self._api = api if api is not None else NativeCngApi()
++
++    def open_existing(self) -> DeviceKey | None:
++        provider = self._api.open_provider(self.protection)
++        try:
++            key = self._api.open_key(provider)
++        except BaseException:
++            self._api.free(provider)
++            raise
++        if key is None:
++            self._api.free(provider)
++            return None
++        return DeviceKey(self._api, provider, key, self.protection)
++
++    def initialize_for_activation(self, *, operator_sid: str | None = None, software_approved: bool = False) -> DeviceKey:
++        if self.protection == "software" and not software_approved:
++            raise DeviceIdentityError("SOFTWARE_APPROVAL_REQUIRED", "软件保护必须先经管理员明确允许")
++        existing = self.open_existing()
++        if existing is not None:
++            return existing
++        provider = self._api.open_provider(self.protection)
++        try:
++            try:
++                key = self._api.create_key(provider, operator_sid)
++            except _KeyAlreadyExists:
++                # Another initializer won. Never use OVERWRITE_KEY_FLAG.
++                key = self._api.open_key(provider)
++                if key is None:
++                    raise DeviceIdentityError("KEY_INITIALIZATION_CONFLICT", "设备初始化尚未完成，请稍后重试")
++        except BaseException:
++            self._api.free(provider)
++            raise
++        return DeviceKey(self._api, provider, key, self.protection)
++
++
++class _NativeKeyName(ctypes.Structure):
++    _fields_ = [("name", wintypes.LPWSTR), ("algorithm", wintypes.LPWSTR),
++                ("legacy_spec", wintypes.DWORD), ("flags", wintypes.DWORD)]
++
++
++class NativeCngApi:
++    """System32-only CNG binding. Public export only; private export is absent."""
++
++    def __init__(self):
++        if os.name != "nt":
++            raise DeviceIdentityError("WINDOWS_REQUIRED", "设备授权密钥需要 Windows")
++        self._ncrypt = ctypes.WinDLL("ncrypt.dll", winmode=0x800, use_last_error=True)
++        self._advapi = ctypes.WinDLL("advapi32.dll", winmode=0x800, use_last_error=True)
++        self._kernel = ctypes.WinDLL("kernel32.dll", winmode=0x800, use_last_error=True)
++        handle, pointer, dword = ctypes.c_size_t, ctypes.c_void_p, wintypes.DWORD
++        signatures = {
++            "NCryptOpenStorageProvider": [ctypes.POINTER(handle), wintypes.LPCWSTR, dword],
++            "NCryptOpenKey": [handle, ctypes.POINTER(handle), wintypes.LPCWSTR, dword, dword],
++            "NCryptCreatePersistedKey": [handle, ctypes.POINTER(handle), wintypes.LPCWSTR, wintypes.LPCWSTR, dword, dword],
++            "NCryptFinalizeKey": [handle, dword],
++            "NCryptGetProperty": [handle, wintypes.LPCWSTR, pointer, dword, ctypes.POINTER(dword), dword],
++            "NCryptSetProperty": [handle, wintypes.LPCWSTR, pointer, dword, dword],
++            "NCryptExportKey": [handle, handle, wintypes.LPCWSTR, pointer, pointer, dword, ctypes.POINTER(dword), dword],
++            "NCryptSignHash": [handle, pointer, pointer, dword, pointer, dword, ctypes.POINTER(dword), dword],
++            "NCryptEnumKeys": [handle, wintypes.LPCWSTR, ctypes.POINTER(ctypes.POINTER(_NativeKeyName)), ctypes.POINTER(pointer), dword],
++            "NCryptFreeObject": [handle], "NCryptFreeBuffer": [pointer],
++        }
++        for name, arguments in signatures.items():
++            function = getattr(self._ncrypt, name)
++            function.argtypes, function.restype = arguments, wintypes.LONG
++        self._kernel.LocalFree.argtypes = [pointer]
++        self._kernel.LocalFree.restype = pointer
++        self._kernel.CloseHandle.argtypes = [wintypes.HANDLE]
++        self._kernel.CloseHandle.restype = wintypes.BOOL
++        self._advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, dword, ctypes.POINTER(wintypes.HANDLE)]
++        self._advapi.OpenProcessToken.restype = wintypes.BOOL
++        self._advapi.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, pointer, dword, ctypes.POINTER(dword)]
++        self._advapi.GetTokenInformation.restype = wintypes.BOOL
++        self._advapi.ConvertSidToStringSidW.argtypes = [pointer, ctypes.POINTER(wintypes.LPWSTR)]
++        self._advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
++        self._advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [wintypes.LPCWSTR, dword, ctypes.POINTER(pointer), ctypes.POINTER(dword)]
++        self._advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
++
++    @staticmethod
++    def _check(status: int) -> None:
++        status &= 0xFFFFFFFF
++        if status:
++            code = "KEY_ACCESS_DENIED" if status in {5, 0x80090010} else "KEY_UNAVAILABLE"
++            raise DeviceIdentityError(code, "无法访问设备密钥，请检查 Windows 权限与 TPM 状态；不要重新生成密钥", native_status=status)
++
++    def open_provider(self, protection: str) -> int:
++        handle = ctypes.c_size_t()
++        self._check(self._ncrypt.NCryptOpenStorageProvider(ctypes.byref(handle), TPM_PROVIDER if protection == "tpm" else SOFTWARE_PROVIDER, 0))
++        return handle.value
++
++    def _name_exists(self, provider: int) -> bool:
++        state = ctypes.c_void_p()
++        try:
++            for _ in range(4096):
++                record = ctypes.POINTER(_NativeKeyName)()
++                status = self._ncrypt.NCryptEnumKeys(provider, None, ctypes.byref(record), ctypes.byref(state), MACHINE_KEY | SILENT) & 0xFFFFFFFF
++                if status == NTE_NO_MORE_ITEMS:
++                    return False
++                self._check(status)
++                try:
++                    if not record:
++                        raise DeviceIdentityError("KEY_ENUMERATION_INVALID", "设备密钥目录读取异常")
++                    if record.contents.name == KEY_NAME:
++                        return True
++                finally:
++                    if record:
++                        self._ncrypt.NCryptFreeBuffer(record)
++            raise DeviceIdentityError("KEY_ENUMERATION_LIMIT", "设备密钥目录无法完整核对")
++        finally:
++            if state:
++                self._ncrypt.NCryptFreeBuffer(state)
++
++    def open_key(self, provider: int) -> int | None:
++        handle = ctypes.c_size_t()
++        status = self._ncrypt.NCryptOpenKey(provider, ctypes.byref(handle), KEY_NAME, 0, MACHINE_KEY | SILENT) & 0xFFFFFFFF
++        if status in {NTE_BAD_KEYSET, NTE_NOT_FOUND}:
++            # Do not mistake a named but corrupt/unreadable key for absence.
++            if self._name_exists(provider):
++                raise DeviceIdentityError("KEY_UNAVAILABLE", "设备密钥已存在但无法读取，请先修复权限或 TPM 状态", native_status=status)
++            return None
++        self._check(status)
++        return handle.value
++
++    def property_dword(self, handle: int, name: str) -> int:
++        value, size = wintypes.DWORD(), wintypes.DWORD()
++        self._check(self._ncrypt.NCryptGetProperty(handle, name, ctypes.byref(value), ctypes.sizeof(value), ctypes.byref(size), SILENT))
++        if size.value != 4:
++            raise DeviceIdentityError("KEY_POLICY_INVALID", "设备密钥属性格式异常")
++        return value.value
++
++    def _set_dword(self, handle: int, name: str, value: int) -> None:
++        data = wintypes.DWORD(value)
++        self._check(self._ncrypt.NCryptSetProperty(handle, name, ctypes.byref(data), ctypes.sizeof(data), 0))
++
++    def current_user_sid(self) -> str:
++        token, needed = wintypes.HANDLE(), wintypes.DWORD()
++        if not self._advapi.OpenProcessToken(wintypes.HANDLE(-1), 8, ctypes.byref(token)):
++            self._check(ctypes.get_last_error() or 5)
++        try:
++            self._advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
++            if not 8 <= needed.value <= 65536:
++                raise DeviceIdentityError("KEY_ACCESS_DENIED", "无法读取 Windows 登录身份")
++            buffer = ctypes.create_string_buffer(needed.value)
++            if not self._advapi.GetTokenInformation(token, 1, buffer, len(buffer), ctypes.byref(needed)):
++                self._check(ctypes.get_last_error() or 5)
++            sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
++            text = wintypes.LPWSTR()
++            if not self._advapi.ConvertSidToStringSidW(sid, ctypes.byref(text)):
++                self._check(ctypes.get_last_error() or 5)
++            try:
++                return text.value
++            finally:
++                self._kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
++        finally:
++            self._kernel.CloseHandle(token)
++
++    def _set_initial_acl(self, key: int, operator_sid: str) -> None:
++        if not re.fullmatch(r"S-1-5-21-\d+-\d+-\d+-\d+", operator_sid):
++            raise DeviceIdentityError("KEY_OPERATOR_INVALID", "设备初始化必须指定实际 Windows 操作用户")
++        sddl = f"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;{operator_sid})"
++        descriptor, size = ctypes.c_void_p(), wintypes.DWORD()
++        if not self._advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), ctypes.byref(size)):
++            self._check(ctypes.get_last_error() or 5)
++        try:
++            self._check(self._ncrypt.NCryptSetProperty(key, "Security Descr", descriptor, size.value, 4))
++        finally:
++            self._kernel.LocalFree(descriptor)
++
++    def create_key(self, provider: int, operator_sid: str | None) -> int:
++        sid = operator_sid or self.current_user_sid()
++        if not re.fullmatch(r"S-1-5-21-\d+-\d+-\d+-\d+", sid):
++            raise DeviceIdentityError("KEY_OPERATOR_INVALID", "设备初始化必须指定实际 Windows 操作用户")
++        handle = ctypes.c_size_t()
++        status = self._ncrypt.NCryptCreatePersistedKey(provider, ctypes.byref(handle), "ECDSA_P256", KEY_NAME, 0, MACHINE_KEY) & 0xFFFFFFFF
++        if status == NTE_EXISTS:
++            raise _KeyAlreadyExists()
++        self._check(status)
++        try:
++            self._set_dword(handle.value, "Export Policy", 0)
++            self._set_dword(handle.value, "Key Usage", ALLOW_SIGNING)
++            self._check(self._ncrypt.NCryptFinalizeKey(handle.value, SILENT))
++            self._set_initial_acl(handle.value, sid)
++            return handle.value
++        except BaseException:
++            # A finalized key survives ACL errors and is never silently replaced.
++            self.free(handle.value)
++            raise
++
++    def public_blob(self, key: int) -> bytes:
++        size = wintypes.DWORD()
++        self._check(self._ncrypt.NCryptExportKey(key, 0, "ECCPUBLICBLOB", None, None, 0, ctypes.byref(size), SILENT))
++        if size.value != 72:
++            raise DeviceIdentityError("KEY_FORMAT_INVALID", "设备公钥格式不受支持")
++        buffer = ctypes.create_string_buffer(size.value)
++        self._check(self._ncrypt.NCryptExportKey(key, 0, "ECCPUBLICBLOB", None, buffer, len(buffer), ctypes.byref(size), SILENT))
++        return buffer.raw[:size.value]
++
++    def sign_hash(self, key: int, digest: bytes) -> bytes:
++        if len(digest) != 32:
++            raise DeviceIdentityError("KEY_INPUT_INVALID", "签名摘要长度无效")
++        hashed, output, size = ctypes.create_string_buffer(digest), ctypes.create_string_buffer(64), wintypes.DWORD()
++        self._check(self._ncrypt.NCryptSignHash(key, None, hashed, 32, output, len(output), ctypes.byref(size), SILENT))
++        if size.value != 64:
++            raise DeviceIdentityError("KEY_SIGNATURE_INVALID", "设备签名格式异常")
++        return output.raw[:size.value]
++
++    def free(self, handle: int) -> None:
++        if handle:
++            self._ncrypt.NCryptFreeObject(handle)
+*** End Patch

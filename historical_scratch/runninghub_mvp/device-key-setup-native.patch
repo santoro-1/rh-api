@@ -1,0 +1,257 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_setup_windows.py
++"""Fixed-purpose elevated helper transport; no shell or file-based IPC."""
++
++from __future__ import annotations
++
++from contextlib import contextmanager
++import ctypes
++from ctypes import wintypes
++import os
++import re
++import subprocess
++import sys
++
++from .device_identity_windows import DeviceIdentityError, NativeCngApi, validate_operator_sid
++
++
++def parse_operator_process(value):
++    if not isinstance(value, str) or not re.fullmatch(r"[1-9]\d{0,9}:[1-9]\d{0,19}", value):
++        raise DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "初始化进程标识无效")
++    pid, created = map(int, value.split(":"))
++    if pid > 0xFFFFFFFF or created > 0xFFFFFFFFFFFFFFFF:
++        raise DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "初始化进程标识无效")
++    return pid, created
++
++
++class _ShellExecuteInfo(ctypes.Structure):
++    _fields_ = [
++        ("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG),
++        ("hwnd", wintypes.HWND), ("lpVerb", wintypes.LPCWSTR),
++        ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
++        ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int),
++        ("hInstApp", wintypes.HINSTANCE), ("lpIDList", ctypes.c_void_p),
++        ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
++        ("dwHotKey", wintypes.DWORD), ("hIcon", wintypes.HANDLE),
++        ("hProcess", wintypes.HANDLE),
++    ]
++
++
++class NativeSetupApi:
++    def __init__(self):
++        if os.name != "nt" or not getattr(sys, "frozen", False):
++            raise DeviceIdentityError(
++                "KEY_SETUP_RELEASE_REQUIRED", "首次提权初始化需要正式处理机 EXE；源码测试不创建机器密钥"
++            )
++        self._kernel = ctypes.WinDLL("kernel32.dll", winmode=0x800, use_last_error=True)
++        self._shell = ctypes.WinDLL("shell32.dll", winmode=0x800, use_last_error=True)
++        self._ole = ctypes.WinDLL("ole32.dll", winmode=0x800, use_last_error=True)
++        self._cng = NativeCngApi()
++        pointer, dword, handle = ctypes.c_void_p, wintypes.DWORD, wintypes.HANDLE
++        definitions = {
++            "OpenProcess": ([dword, wintypes.BOOL, dword], handle),
++            "GetProcessTimes": ([handle] + [ctypes.POINTER(wintypes.FILETIME)] * 4, wintypes.BOOL),
++            "GetExitCodeProcess": ([handle, ctypes.POINTER(dword)], wintypes.BOOL),
++            "QueryFullProcessImageNameW": ([handle, dword, wintypes.LPWSTR, ctypes.POINTER(dword)], wintypes.BOOL),
++            "ProcessIdToSessionId": ([dword, ctypes.POINTER(dword)], wintypes.BOOL),
++            "WaitForSingleObject": ([handle, dword], dword),
++            "CloseHandle": ([handle], wintypes.BOOL),
++        }
++        for name, (args, result) in definitions.items():
++            function = getattr(self._kernel, name)
++            function.argtypes, function.restype = args, result
++        self._shell.ShellExecuteExW.argtypes = [ctypes.POINTER(_ShellExecuteInfo)]
++        self._shell.ShellExecuteExW.restype = wintypes.BOOL
++        self._shell.IsUserAnAdmin.argtypes = []
++        self._shell.IsUserAnAdmin.restype = wintypes.BOOL
++        self._ole.CoInitializeEx.argtypes = [pointer, dword]
++        self._ole.CoInitializeEx.restype = wintypes.LONG
++        self._ole.CoUninitialize.argtypes = []
++        self._ole.CoUninitialize.restype = None
++
++    @staticmethod
++    def _require(value):
++        if not value:
++            raise DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "无法验证设备初始化的本机进程")
++
++    def _creation(self, handle):
++        values = [wintypes.FILETIME() for _ in range(4)]
++        self._require(self._kernel.GetProcessTimes(handle, *(ctypes.byref(item) for item in values)))
++        return (values[0].dwHighDateTime << 32) | values[0].dwLowDateTime
++
++    def _image(self, handle):
++        buffer, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
++        self._require(self._kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)))
++        return os.path.normcase(os.path.realpath(buffer.value))
++
++    def _session(self, pid):
++        session = wintypes.DWORD()
++        self._require(self._kernel.ProcessIdToSessionId(pid, ctypes.byref(session)))
++        return session.value
++
++    @contextmanager
++    def verified_operator(self, pid, creation_time):
++        self._require(self._shell.IsUserAnAdmin())
++        # QUERY_LIMITED_INFORMATION | SYNCHRONIZE; never request process mutation.
++        process = self._kernel.OpenProcess(0x00101000, False, pid)
++        self._require(process)
++        try:
++            self._require(pid != os.getpid())
++            self._require(self._creation(process) == creation_time)
++            self._require(self._kernel.WaitForSingleObject(process, 0) == 258)
++            self._require(self._image(process) == self._image(wintypes.HANDLE(-1)))
++            operator_session = self._session(pid)
++            self._require(operator_session != 0 and operator_session == self._session(os.getpid()))
++            sid = validate_operator_sid(self._cng.user_sid_for_process(process))
++            yield sid
++        finally:
++            self.close(process)
++
++    def launch(self, mode):
++        from .device_identity_setup import HELPER_FLAG, MODES
++
++        self._require(mode in MODES)
++        executable = self._image(wintypes.HANDLE(-1))
++        self._require(executable == os.path.normcase(os.path.realpath(sys.executable)))
++        self._require(not executable.startswith("\\\\"))
++        self._require(self._session(os.getpid()) != 0)
++        marker = f"{os.getpid()}:{self._creation(wintypes.HANDLE(-1))}"
++        parse_operator_process(marker)
++        info = _ShellExecuteInfo()
++        info.cbSize = ctypes.sizeof(info)
++        # NOCLOSEPROCESS | NOASYNC | FLAG_NO_UI. UAC security prompts remain visible.
++        info.fMask = 0x40 | 0x100 | 0x400
++        info.lpVerb = "runas"
++        info.lpFile = executable
++        info.lpParameters = subprocess.list2cmdline([HELPER_FLAG, mode, marker])
++        info.lpDirectory = os.path.dirname(executable)
++        info.nShow = 0  # no second visible console; never auto-accept UAC
++        com = self._ole.CoInitializeEx(None, 2 | 4) & 0xFFFFFFFF
++        self._require(com in {0, 1})
++        try:
++            if not self._shell.ShellExecuteExW(ctypes.byref(info)):
++                status = ctypes.get_last_error()
++                if status == 1223:
++                    raise DeviceIdentityError("KEY_SETUP_CANCELLED", "已取消 Windows 权限确认，未重新生成或替换设备身份")
++                raise DeviceIdentityError("KEY_SETUP_START_FAILED", "无法启动初始化，请在实际处理机上检查 Windows 权限")
++            self._require(info.hProcess)
++            return info.hProcess
++        finally:
++            self._ole.CoUninitialize()
++
++    def wait(self, handle, timeout_ms):
++        status = self._kernel.WaitForSingleObject(handle, timeout_ms)
++        if status == 258:
++            return None
++        self._require(status == 0)
++        result = wintypes.DWORD()
++        self._require(self._kernel.GetExitCodeProcess(handle, ctypes.byref(result)))
++        return result.value
++
++    def close(self, handle):
++        self._kernel.CloseHandle(handle)
++
++    def grant_operator_read(self, key, sid):
++        from .device_identity_acl import grant_operator_read_access
++
++        grant_operator_read_access(key._api, key._key, sid)
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_identity_acl.py
++"""Add read/sign access for ONE verified operator, retaining the existing DACL.
++
++Only used by the explicitly elevated helper on the fixed existing product key.
++No filesystem key paths, ownership takeover, key creation or private export.
++"""
++
++from __future__ import annotations
++
++import ctypes
++from ctypes import wintypes
++
++from .device_identity_windows import DeviceIdentityError, SILENT, validate_operator_sid
++
++
++class _Trustee(ctypes.Structure):
++    _fields_ = [
++        ("multiple", ctypes.c_void_p), ("operation", ctypes.c_int),
++        ("form", ctypes.c_int), ("kind", ctypes.c_int), ("name", ctypes.c_void_p),
++    ]
++
++
++class _ExplicitAccess(ctypes.Structure):
++    _fields_ = [
++        ("permissions", wintypes.DWORD), ("mode", ctypes.c_int),
++        ("inheritance", wintypes.DWORD), ("trustee", _Trustee),
++    ]
++
++
++class _Descriptor(ctypes.Structure):
++    _fields_ = [
++        ("revision", wintypes.BYTE), ("reserved", wintypes.BYTE),
++        ("control", wintypes.WORD), ("owner", ctypes.c_void_p),
++        ("group", ctypes.c_void_p), ("sacl", ctypes.c_void_p), ("dacl", ctypes.c_void_p),
++    ]
++
++
++def grant_operator_read_access(api, key_handle, operator_sid):
++    validate_operator_sid(operator_sid)
++    advapi, pointer, dword = api._advapi, ctypes.c_void_p, wintypes.DWORD
++    definitions = {
++        "ConvertStringSidToSidW": ([wintypes.LPCWSTR, ctypes.POINTER(pointer)], wintypes.BOOL),
++        "GetSecurityDescriptorDacl": ([pointer, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(pointer), ctypes.POINTER(wintypes.BOOL)], wintypes.BOOL),
++        "GetSecurityDescriptorControl": ([pointer, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(dword)], wintypes.BOOL),
++        "SetEntriesInAclW": ([dword, ctypes.POINTER(_ExplicitAccess), pointer, ctypes.POINTER(pointer)], dword),
++        "InitializeSecurityDescriptor": ([pointer, dword], wintypes.BOOL),
++        "SetSecurityDescriptorDacl": ([pointer, wintypes.BOOL, pointer, wintypes.BOOL], wintypes.BOOL),
++        "SetSecurityDescriptorControl": ([pointer, wintypes.WORD, wintypes.WORD], wintypes.BOOL),
++        "MakeSelfRelativeSD": ([pointer, pointer, ctypes.POINTER(dword)], wintypes.BOOL),
++    }
++    for name, (arguments, result) in definitions.items():
++        function = getattr(advapi, name)
++        function.argtypes, function.restype = arguments, result
++
++    def checked(result):
++        if not result:
++            api._check(ctypes.get_last_error() or 5)
++
++    size = dword()
++    api._check(api._ncrypt.NCryptGetProperty(key_handle, "Security Descr", None, 0, ctypes.byref(size), 4 | SILENT))
++    if not 20 <= size.value <= 65536:
++        raise DeviceIdentityError("KEY_POLICY_INVALID", "现有密钥访问权限描述无效")
++    original = ctypes.create_string_buffer(size.value)
++    api._check(api._ncrypt.NCryptGetProperty(key_handle, "Security Descr", original, len(original), ctypes.byref(size), 4 | SILENT))
++    old_acl, present, defaulted = pointer(), wintypes.BOOL(), wintypes.BOOL()
++    checked(advapi.GetSecurityDescriptorDacl(original, ctypes.byref(present), ctypes.byref(old_acl), ctypes.byref(defaulted)))
++    if not present.value or not old_acl:
++        raise DeviceIdentityError("KEY_POLICY_INVALID", "现有密钥缺少受限访问列表，请联系管理员核对")
++    control, revision = wintypes.WORD(), dword()
++    checked(advapi.GetSecurityDescriptorControl(original, ctypes.byref(control), ctypes.byref(revision)))
++    sid, new_acl = pointer(), pointer()
++    try:
++        checked(advapi.ConvertStringSidToSidW(operator_sid, ctypes.byref(sid)))
++        entry = _ExplicitAccess()
++        entry.permissions = 0x80000000  # GENERIC_READ only, not change/delete/export
++        entry.mode = 1  # GRANT_ACCESS merges, not SET_ACCESS or a DACL replacement
++        entry.trustee.form = 0  # TRUSTEE_IS_SID (binary, no name lookup)
++        entry.trustee.kind = 1  # TRUSTEE_IS_USER
++        entry.trustee.name = sid.value
++        api._check(advapi.SetEntriesInAclW(1, ctypes.byref(entry), old_acl, ctypes.byref(new_acl)))
++        descriptor = _Descriptor()
++        checked(advapi.InitializeSecurityDescriptor(ctypes.byref(descriptor), 1))
++        checked(advapi.SetSecurityDescriptorDacl(ctypes.byref(descriptor), True, new_acl, False))
++        checked(advapi.SetSecurityDescriptorControl(ctypes.byref(descriptor), 0x1000, control.value & 0x1000))
++        length = dword()
++        first = advapi.MakeSelfRelativeSD(ctypes.byref(descriptor), None, ctypes.byref(length))
++        if not first and ctypes.get_last_error() != 122:
++            checked(first)
++        if not 20 <= length.value <= 65536:
++            raise DeviceIdentityError("KEY_POLICY_INVALID", "设备访问权限描述长度异常")
++        relative = ctypes.create_string_buffer(length.value)
++        checked(advapi.MakeSelfRelativeSD(ctypes.byref(descriptor), relative, ctypes.byref(length)))
++        # Update only DACL and persist it, leaving owner/group and the key unchanged.
++        api._check(api._ncrypt.NCryptSetProperty(key_handle, "Security Descr", relative, length.value, 0x80000004 | SILENT))
++    finally:
++        if new_acl:
++            api._kernel.LocalFree(new_acl)
++        if sid:
++            api._kernel.LocalFree(sid)
+*** End Patch

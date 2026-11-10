@@ -1,0 +1,44 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/content_replace.py
+@@
+     template_timeline_duration_us: int = 0
++    main_video_sequence: dict[str, Any] = field(default_factory=dict)
+@@
+         or job.video_segment_replacements
++        or job.main_video_sequence
+@@
+-    if changed:
+-        log(f"JSON 级共执行 {changed} 项修改")
++    if job.main_video_sequence:
++        from .video_sequence_apply import apply_main_video_sequence
++        changed += apply_main_video_sequence(draft, data, job.main_video_sequence)
++
++    if changed:
++        log(f"JSON 级共执行 {changed} 项修改")
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/render_job.py
+@@
+         template_timeline_duration_us=source_timeline_duration_us,
++        main_video_sequence=_dict_value(config.get("main_video_sequence")),
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/project_postprocess.py
+@@
+-            if main_video:
++            if source.get("type") == "video_sequence":
++                job["main_video_sequence"] = {
++                    "items": source["items"],
++                    "track_index": int(main_video.get("typed_track_index", 0)) if main_video else -1,
++                    "segment_index": int(main_video.get("segment_index", 0)),
++                }
++            elif main_video:
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_h3_audio_cleanup_coordinator.py
+@@
+-    assert calls[0]["segment_paths"][0] == raw
++    assert calls[0]["segment_paths"][0] != raw
++    assert calls[0]["segment_paths"][0].read_bytes() == raw.read_bytes()
+@@
+-    assert not coordinator._h3_item_needs_materialization(item)
++    # Clean audio alone is not sufficient: legacy rows still need their
++    # independent picture manifest. Isolate the audio gate in this test.
++    assert coordinator._h3_item_needs_materialization(item)
++    monkeypatch.setattr(h3, "h3_video_sequence_ready", lambda _item: True)
++    assert not coordinator._h3_item_needs_materialization(item)
+*** End Patch

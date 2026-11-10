@@ -1,0 +1,292 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_command_authorization.py
++from __future__ import annotations
++
++import argparse
++from contextlib import contextmanager
++import importlib.util
++import io
++import json
++from pathlib import Path
++import sys
++from types import SimpleNamespace
++from unittest.mock import Mock
++from urllib.error import HTTPError, URLError
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "src"))
++sys.path.insert(0, str(ROOT))
++from test_device_local_execution import licensed, enforced
++from jyd_probe import device_command_authorization as commands
++from jyd_probe.device_auth_protocol import DeviceAuthorizationError
++from jyd_probe.device_local_execution import current_local_decision, protected_local_work, current_local_authorizer
++
++
++class Response(io.BytesIO):
++    def __init__(self, raw, uri, status=200):
++        super().__init__(raw)
++        self.uri, self.status = uri, status
++
++    def geturl(self):
++        return self.uri
++
++
++def account_client(licensed, result=None, *, raw=None, status=200, final_uri=None):
++    uri = licensed.issuer.trust.origin + "/api/auth/center/login"
++    raw = raw if raw is not None else json.dumps(result or {"access_token": "account-token", "user": {"user_id": "7"}}).encode()
++    opener = Mock()
++    opener.open.return_value = Response(raw, final_uri or uri, status)
++    return commands.CommandAccountClient(licensed.issuer.trust, opener=opener), opener
++
++
++def test_account_login_fixed_authority_and_no_secret_repr(licensed):
++    client, opener = account_client(licensed)
++    result = client.login(" tester ", "private-password")
++    assert result.user_id == 7 and result.token == "account-token"
++    assert "account-token" not in repr(result)
++    request = opener.open.call_args.args[0]
++    assert request.full_url == licensed.issuer.trust.origin + "/api/auth/center/login"
++    assert json.loads(request.data) == {"username": "tester", "password": "private-password"}
++    assert request.get_method() == "POST" and opener.open.call_count == 1
++
++
++@pytest.mark.parametrize("user_id", [True, False, 0, -1, 7.0, "07", "+7", " 7", "", None, [], {}])
++def test_account_result_requires_stable_strict_user_id(licensed, user_id):
++    client, _ = account_client(licensed, {"access_token": "secret-value", "user": {"user_id": user_id}})
++    with pytest.raises(DeviceAuthorizationError) as error:
++        client.login("tester", "password")
++    assert error.value.code == "INVALID_ACCOUNT_RESPONSE"
++    assert "secret-value" not in str(error.value)
++
++
++@pytest.mark.parametrize("raw", [b"[]", b"null", b"{", b"\xff", b'{"user":{},"user":{}}', b" " * 65537])
++def test_account_result_rejects_malformed_oversized_or_duplicate_json(licensed, raw):
++    client, _ = account_client(licensed, raw=raw)
++    with pytest.raises(DeviceAuthorizationError):
++        client.login("tester", "password")
++
++
++@pytest.mark.parametrize("status", [302, 307, 401, 403, 429, 500, 503])
++def test_http_errors_never_echo_server_secret_or_retry(licensed, status):
++    client, opener = account_client(licensed)
++    body = io.BytesIO(b'{"detail":"private-password secret-token"}')
++    opener.open.side_effect = HTTPError("https://license.example", status, "private-message", {}, body)
++    with pytest.raises(DeviceAuthorizationError) as error:
++        client.login("tester", "password")
++    assert "private" not in str(error.value) and "secret" not in str(error.value)
++    assert opener.open.call_count == 1 and body.closed
++
++
++def test_redirected_response_and_network_failure_are_safe(licensed):
++    client, opener = account_client(licensed, final_uri="https://other.example/login")
++    with pytest.raises(DeviceAuthorizationError) as error:
++        client.login("tester", "password")
++    assert error.value.code == "DEVICE_AUTH_REDIRECT_REJECTED"
++    opener.open.side_effect = URLError("secret-token")
++    with pytest.raises(DeviceAuthorizationError) as error:
++        client.login("tester", "password")
++    assert error.value.transient and "secret-token" not in str(error.value)
++
++
++def test_default_transport_blocks_even_same_origin_redirects(licensed):
++    client = commands.CommandAccountClient(licensed.issuer.trust)
++    blocker = next(handler for handler in client._opener.handlers if isinstance(handler, commands._NoRedirect))
++    assert blocker.redirect_request(None, None, 307, "redirect", {}, "https://license.example/other") is None
++
++
++@pytest.mark.parametrize("valid", [False, 1, "true", None])
++def test_existing_token_requires_explicit_valid_account(licensed, valid):
++    uri = licensed.issuer.trust.origin + "/api/auth/center/verify"
++    client, _ = account_client(licensed, {"valid": valid, "user": {"user_id": "7"}}, final_uri=uri)
++    with pytest.raises(DeviceAuthorizationError):
++        client.verify("account-token")
++
++
++@pytest.mark.parametrize("value", ["", "contains space", "line\nbreak", "nonascii中", "x" * 8193])
++def test_stdin_token_is_bounded_and_never_sent_if_invalid(licensed, value):
++    client, opener = account_client(licensed)
++    with pytest.raises(DeviceAuthorizationError):
++        client.verify(value)
++    opener.open.assert_not_called()
++
++
++def test_interactive_password_not_saved_and_stdin_mode_is_explicit(monkeypatch):
++    client = Mock()
++    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
++    password = Mock(return_value="test-password")
++    monkeypatch.setattr(commands.getpass, "getpass", password)
++    args = SimpleNamespace(device_user="tester", device_token_stdin=False)
++    commands._read_account(args, client)
++    client.login.assert_called_once_with("tester", "test-password")
++    assert vars(args) == {"device_user": "tester", "device_token_stdin": False}
++    client.reset_mock()
++    monkeypatch.setattr(sys, "stdin", io.StringIO("account-token\r\n"))
++    commands._read_account(SimpleNamespace(device_token_stdin=True), client)
++    client.verify.assert_called_once_with("account-token")
++
++
++@pytest.mark.parametrize("stdin", [None, io.StringIO("would-be-password")])
++def test_no_echo_fallback_or_implicit_token_read(monkeypatch, stdin):
++    monkeypatch.setattr(sys, "stdin", stdin)
++    client = Mock()
++    with pytest.raises(DeviceAuthorizationError):
++        commands._read_account(SimpleNamespace(device_user="tester"), client)
++    client.login.assert_not_called()
++    client.verify.assert_not_called()
++
++
++def test_getpass_warning_aborts_instead_of_echoing(monkeypatch):
++    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
++    monkeypatch.setattr(commands.getpass, "getpass", Mock(side_effect=commands.getpass.GetPassWarning()))
++    client = Mock()
++    with pytest.raises(DeviceAuthorizationError):
++        commands._read_account(SimpleNamespace(device_user="tester"), client)
++    client.login.assert_not_called()
++
++
++def test_flags_reject_plaintext_password_and_conflicting_modes():
++    parser = argparse.ArgumentParser()
++    commands.add_command_authorization_arguments(parser)
++    for argv in (["--device-password", "secret"], ["--device-user", "a", "--device-token-stdin"]):
++        with pytest.raises(SystemExit):
++            parser.parse_args(argv)
++
++
++@pytest.fixture
++def command_session(licensed, enforced, monkeypatch):
++    monkeypatch.setattr(commands, "bundled_trust", lambda url: licensed.issuer.trust)
++    monkeypatch.setattr(commands, "_read_account", lambda args, client: commands.CommandAccount(7, "account-token"))
++    monkeypatch.setattr(commands, "MachineDeviceIdentity", lambda: licensed.identity)
++    monkeypatch.setattr(commands.DeviceLeaseCache, "for_machine", lambda: None)
++    monkeypatch.setattr(commands, "DeviceAuthorizationSession", lambda **kw: licensed.session)
++    return licensed
++
++
++@pytest.mark.parametrize("mode", ["OFF", "OBSERVE", "ENFORCE"])
++def test_command_core_uses_server_policy_and_existing_identity(command_session, mode):
++    state = command_session
++    state.transport.mode = mode
++    with commands.command_authorization(SimpleNamespace(), server_url="https://license.example"):
++        decision = current_local_decision({"local:draft"})
++        assert decision.mode == mode and decision.user_id == 7
++        if mode == "ENFORCE":
++            assert decision.thumbprint == state.signer.thumbprint
++    assert state.identity.created == 0 and state.session._closed
++    assert current_local_authorizer() is None
++    assert not any(call["path"].endswith("/register") for call in state.transport.calls)
++
++
++@pytest.mark.parametrize("mode", ["OFF", "OBSERVE"])
++def test_observation_mode_never_automatically_creates_a_key(command_session, mode):
++    command_session.transport.mode = mode
++    command_session.identity.signer = None
++    with commands.command_authorization(SimpleNamespace()):
++        assert current_local_decision({"local:draft"}).mode == mode
++    assert command_session.identity.created == 0
++
++
++def test_command_revocation_cannot_use_forged_task_authorization(command_session):
++    command_session.transport.error = DeviceAuthorizationError("DEVICE_REVOKED", "revoked")
++    effects = Mock()
++
++    @protected_local_work({"local:draft"})
++    def work(payload):
++        effects(payload)
++
++    with pytest.raises(DeviceAuthorizationError):
++        with commands.command_authorization(SimpleNamespace()):
++            work({"device_authorization": {"mode": "OFF", "user_id": 7}})
++    effects.assert_not_called()
++    assert command_session.session._closed and current_local_authorizer() is None
++
++
++def test_command_failure_closes_session_and_never_deletes_key(command_session):
++    with pytest.raises(RuntimeError, match="render failed"):
++        with commands.command_authorization(SimpleNamespace()):
++            current_local_decision({"local:draft"})
++            raise RuntimeError("render failed")
++    assert command_session.signer.closed and command_session.identity.created == 0
++    assert current_local_authorizer() is None
++
++
++def test_frozen_missing_release_trust_fails_before_prompt(monkeypatch):
++    from jyd_probe import device_trust_roots
++    monkeypatch.setattr(sys, "frozen", True, raising=False)
++    monkeypatch.setattr(device_trust_roots, "TRUSTED_ISSUERS", ())
++    prompt = Mock()
++    monkeypatch.setattr(commands, "_read_account", prompt)
++    with pytest.raises(DeviceAuthorizationError) as error:
++        with commands.command_authorization(SimpleNamespace(), server_url="https://license.example"):
++            pytest.fail("unconfigured executable must not run")
++    assert error.value.code == "DEVICE_TRUST_NOT_CONFIGURED"
++    prompt.assert_not_called()
++
++
++def test_unconfigured_source_inspection_has_no_login_or_cng(monkeypatch):
++    from jyd_probe import device_trust_roots
++    monkeypatch.setattr(sys, "frozen", False, raising=False)
++    monkeypatch.setattr(device_trust_roots, "TRUSTED_ISSUERS", ())
++    prompt = Mock()
++    monkeypatch.setattr(commands, "_read_account", prompt)
++    with commands.command_authorization(SimpleNamespace()) as session:
++        assert session is None and current_local_decision({"local:draft"}) is None
++    prompt.assert_not_called()
++
++
++def test_probe_copy_is_guarded_but_read_only_inspection_is_not(command_session, monkeypatch):
++    from jyd_probe import cli
++    runner = Mock(return_value=0)
++    monkeypatch.setattr(cli, "_run_probe", runner)
++    command_session.transport.error = DeviceAuthorizationError("DEVICE_PENDING", "pending")
++    assert cli.main(["--template-draft-dir", "sample", "--output-root", "output"]) == 1
++    runner.assert_not_called()
++    assert cli.main(["--template-draft-dir", "sample", "--dump-effects"]) == 0
++    runner.assert_called_once()
++
++
++def test_probe_approved_copy_gets_draft_scope(command_session, monkeypatch):
++    from jyd_probe import cli
++
++    def runner(args):
++        assert current_local_decision({"local:draft"}).user_id == 7
++        return 0
++    monkeypatch.setattr(cli, "_run_probe", runner)
++    assert cli.main(["--template-draft-dir", "sample", "--output-root", "output"]) == 0
++    assert command_session.identity.created == 0
++
++
++def test_render_script_enters_actual_guard_and_leaves_no_context(command_session, monkeypatch):
++    from tools.jobs import run_render_job as entry
++
++    @protected_local_work({"local:draft", "local:render"})
++    def render(job):
++        assert current_local_decision({"local:draft", "local:render"}).user_id == 7
++        return SimpleNamespace(as_dict=lambda: {"success": True})
++    monkeypatch.setattr(entry, "run_render_job_file", render)
++    assert entry.main(["--job", "job.json"]) == 0
++    assert command_session.session._closed and current_local_authorizer() is None
++
++
++def test_processor_render_job_has_no_unlicensed_side_effect(command_session, monkeypatch, tmp_path):
++    from apps.processor import processor_windows as entry
++    from jyd_probe import render_job
++    monkeypatch.setattr(entry, "_application_root", lambda: tmp_path)
++    monkeypatch.setattr(entry, "_load_processor_config", lambda path: {})
++    monkeypatch.setattr(entry, "_configure_environment", lambda: (tmp_path, tmp_path / "data"))
++    monkeypatch.setattr(entry, "_append_startup_log", Mock())
++    monkeypatch.setattr("jyd_probe.logging_config.configure_file_logging", Mock())
++    effects = Mock()
++
++    @protected_local_work({"local:draft", "local:render"})
++    def render(job):
++        effects()
++        return SimpleNamespace(as_dict=lambda: {"success": True})
++    monkeypatch.setattr(render_job, "run_render_job_file", render)
++    command_session.transport.error = DeviceAuthorizationError("DEVICE_PENDING", "pending")
++    assert entry.main(["--render-job", "job.json"]) == 1
++    effects.assert_not_called()
++    assert command_session.session._closed
++
+*** End Patch

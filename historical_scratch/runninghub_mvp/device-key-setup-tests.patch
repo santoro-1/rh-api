@@ -1,0 +1,420 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_identity_setup.py
++from __future__ import annotations
++
++from contextlib import contextmanager
++import ctypes
++import os
++from pathlib import Path
++import sys
++import threading
++import unittest
++from unittest.mock import Mock, patch
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(PROJECT_ROOT / "src"))
++sys.path.insert(0, str(PROJECT_ROOT))
++
++from jyd_probe.device_identity_windows import DeviceIdentityError, NativeCngApi, validate_operator_sid
++from jyd_probe.device_identity_setup import (
++    HELPER_FLAG, DeviceSetupCoordinator, InteractiveWindowsDeviceIdentity, dispatch_setup_helper,
++)
++from jyd_probe.device_identity_setup_windows import NativeSetupApi, _ShellExecuteInfo, parse_operator_process
++from jyd_probe.device_identity_acl import _Descriptor, _ExplicitAccess, _Trustee, grant_operator_read_access
++
++SID = "S-1-5-21-1-2-3-1001"
++
++
++class Key:
++    def __init__(self):
++        self.thumbprint = "original-key"
++        self.protection = "tpm"
++        self._api, self._key = Mock(), 9
++        self.sign = Mock(return_value=b"s" * 64)
++        self.close = Mock()
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, *_):
++        self.close()
++
++
++class CoordinatorTest(unittest.TestCase):
++    def setUp(self):
++        self.api = Mock()
++        self.api.launch.return_value = 77
++        self.api.wait.return_value = 0
++        self.factory = Mock(return_value=self.api)
++        self.coordinator = DeviceSetupCoordinator(api_factory=self.factory)
++
++    def test_status_with_no_helper_never_loads_or_launches_native(self):
++        self.coordinator.check_pending()
++        self.factory.assert_not_called()
++
++    def test_success_closes_only_process_handle_and_no_keys(self):
++        self.coordinator.run("initialize")
++        self.api.launch.assert_called_once_with("initialize")
++        self.api.wait.assert_called_once_with(77, 45000)
++        self.api.close.assert_called_once_with(77)
++        self.coordinator.check_pending()
++        self.assertIsNone(self.coordinator._handle)
++
++    def test_timeout_retains_handle_poll_and_retry_never_start_second_helper(self):
++        self.api.wait.side_effect = [None, None, 0]
++        for action in (lambda: self.coordinator.run("initialize"), self.coordinator.check_pending):
++            with self.assertRaises(DeviceIdentityError) as caught:
++                action()
++            self.assertEqual(caught.exception.code, "KEY_SETUP_IN_PROGRESS")
++            self.assertEqual(self.coordinator._handle, 77)
++            self.api.close.assert_not_called()
++        self.coordinator.run("initialize")
++        self.api.launch.assert_called_once()
++        self.api.close.assert_called_once_with(77)
++
++    def test_unknown_wait_result_keeps_handle_until_terminal_is_known(self):
++        self.api.wait.side_effect = DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "poll failed")
++        for _ in range(2):
++            with self.assertRaises(DeviceIdentityError):
++                self.coordinator.run("initialize")
++        self.api.launch.assert_called_once()
++        self.api.close.assert_not_called()
++
++    def test_terminal_failure_is_not_success_and_is_not_relaunched_by_poll(self):
++        for result, code in ((20, "KEY_SETUP_CONTEXT_INVALID"), (21, "KEY_NOT_FOUND"), (22, "KEY_ACCESS_DENIED"), (24, "KEY_POLICY_INVALID"), (999, "KEY_UNAVAILABLE")):
++            self.api.wait.return_value = result
++            with self.assertRaises(DeviceIdentityError) as caught:
++                self.coordinator.run("repair-access")
++            self.assertEqual(caught.exception.code, code)
++            self.coordinator.check_pending()
++        self.assertEqual(self.api.launch.call_count, 5)
++
++    def test_cancel_keeps_no_pending_handle_and_never_retries_implicitly(self):
++        self.api.launch.side_effect = DeviceIdentityError("KEY_SETUP_CANCELLED", "cancelled")
++        with self.assertRaises(DeviceIdentityError):
++            self.coordinator.run("initialize")
++        self.coordinator.check_pending()
++        self.api.launch.assert_called_once()
++        self.api.wait.assert_not_called()
++
++    def test_parallel_accounts_cannot_open_two_uac_prompts(self):
++        entered, leave = threading.Event(), threading.Event()
++        self.api.wait.side_effect = lambda *_: (entered.set(), leave.wait(3), 0)[2]
++        thread = threading.Thread(target=self.coordinator.run, args=("initialize",))
++        thread.start()
++        try:
++            self.assertTrue(entered.wait(1))
++            for action in (self.coordinator.check_pending, lambda: self.coordinator.run("repair-access")):
++                with self.assertRaises(DeviceIdentityError) as caught:
++                    action()
++                self.assertEqual(caught.exception.code, "KEY_SETUP_IN_PROGRESS")
++        finally:
++            leave.set()
++            thread.join(2)
++        self.assertFalse(thread.is_alive())
++        self.api.launch.assert_called_once()
++
++    def test_unknown_mode_never_loads_native(self):
++        with self.assertRaises(DeviceIdentityError):
++            self.coordinator.run("powershell; delete-key")
++        self.factory.assert_not_called()
++
++
++class ActivationAdapterTest(unittest.TestCase):
++    def setUp(self):
++        self.native, self.coordinator, self.key = Mock(), Mock(), Key()
++        self.adapter = InteractiveWindowsDeviceIdentity(identity=self.native, coordinator=self.coordinator)
++
++    def test_normal_read_and_repeated_activation_reuse_original_key(self):
++        self.native.open_existing.return_value = self.key
++        for _ in range(4):
++            self.assertIs(self.adapter.open_existing(), self.key)
++            self.assertIs(self.adapter.initialize_for_activation(), self.key)
++        self.coordinator.run.assert_not_called()
++        self.native.initialize_for_activation.assert_not_called()
++
++    def test_absence_elevates_once_then_reopens_and_signs_as_original_operator(self):
++        self.native.open_existing.side_effect = [None, self.key]
++        self.assertIs(self.adapter.initialize_for_activation(), self.key)
++        self.coordinator.run.assert_called_once_with("initialize")
++        self.key.sign.assert_called_once_with(b"publicvideo.device-setup.local-check.v1")
++        self.native.initialize_for_activation.assert_not_called()
++
++    def test_permission_failure_is_not_new_machine_or_automatic_repair(self):
++        self.native.open_existing.side_effect = DeviceIdentityError("KEY_ACCESS_DENIED", "denied")
++        with self.assertRaises(DeviceIdentityError):
++            self.adapter.initialize_for_activation()
++        self.coordinator.run.assert_not_called()
++
++    def test_software_or_sid_injection_rejected_before_any_native_read(self):
++        for kwargs in ({"software_approved": True}, {"software_approved": 0}, {"operator_sid": SID}):
++            with self.assertRaises(DeviceIdentityError):
++                self.adapter.initialize_for_activation(**kwargs)
++        self.native.open_existing.assert_not_called()
++
++    def test_explicit_repair_uses_existing_key_and_checks_operator_signature(self):
++        self.native.open_existing.return_value = self.key
++        self.adapter.repair_operator_access()
++        self.coordinator.run.assert_called_once_with("repair-access")
++        self.key.sign.assert_called_once()
++        self.key.close.assert_called_once()
++        self.native.initialize_for_activation.assert_not_called()
++
++    def test_missing_after_repair_never_creates_and_signature_error_closes_handle(self):
++        self.native.open_existing.return_value = None
++        with self.assertRaises(DeviceIdentityError) as caught:
++            self.adapter.repair_operator_access()
++        self.assertEqual(caught.exception.code, "KEY_NOT_FOUND")
++        self.native.open_existing.return_value = self.key
++        self.key.sign.side_effect = DeviceIdentityError("KEY_ACCESS_DENIED", "still denied")
++        with self.assertRaises(DeviceIdentityError):
++            self.adapter.repair_operator_access()
++        self.key.close.assert_called_once()
++        self.native.initialize_for_activation.assert_not_called()
++
++
++class HelperTest(unittest.TestCase):
++    def setUp(self):
++        self.api, self.identity = Mock(), Mock()
++        self.key = Key()
++        self.identity.open_existing.return_value = self.key
++        self.identity.initialize_for_activation.return_value = self.key
++        @contextmanager
++        def verified(*_):
++            yield SID
++        self.api.verified_operator.side_effect = verified
++        self.factory = Mock(return_value=self.api)
++        self.identity_factory = Mock(return_value=self.identity)
++
++    def dispatch(self, argv):
++        return dispatch_setup_helper(argv, api_factory=self.factory, identity_factory=self.identity_factory)
++
++    def test_ordinary_program_start_never_initializes_or_queries_windows(self):
++        self.assertIsNone(self.dispatch([]))
++        self.assertIsNone(self.dispatch(["--port", "8010"]))
++        self.factory.assert_not_called()
++
++    def test_strict_arguments_no_extra_paths_sids_tokens_or_commands(self):
++        for arguments in (
++            [HELPER_FLAG], [HELPER_FLAG, "delete", "1:2"],
++            [HELPER_FLAG, "initialize", SID], [HELPER_FLAG, "initialize", "1:2", "--render-job", "job.json"],
++            [HELPER_FLAG, "initialize", "1:2 & calc"], ["--no-browser", HELPER_FLAG, "initialize", "1:2"],
++            [HELPER_FLAG, "initialize", "01:2"], [HELPER_FLAG, "initialize", "4294967296:2"],
++        ):
++            self.assertEqual(self.dispatch(arguments), 20)
++        self.factory.assert_not_called()
++
++    def test_initialize_targets_original_process_sid_not_elevated_admin(self):
++        self.assertEqual(self.dispatch([HELPER_FLAG, "initialize", "123:456"]), 0)
++        self.api.verified_operator.assert_called_once_with(123, 456)
++        self.identity.initialize_for_activation.assert_called_once_with(operator_sid=SID)
++        self.api.grant_operator_read.assert_not_called()
++
++    def test_repair_never_initializes_and_no_key_means_failure(self):
++        self.assertEqual(self.dispatch([HELPER_FLAG, "repair-access", "123:456"]), 0)
++        self.api.grant_operator_read.assert_called_once_with(self.key, SID)
++        self.identity.initialize_for_activation.assert_not_called()
++        self.identity.open_existing.return_value = None
++        self.assertEqual(self.dispatch([HELPER_FLAG, "repair-access", "123:456"]), 21)
++        self.identity.initialize_for_activation.assert_not_called()
++
++    def test_untrusted_origin_cannot_reach_identity(self):
++        self.api.verified_operator.side_effect = DeviceIdentityError("KEY_SETUP_CONTEXT_INVALID", "bad")
++        self.assertEqual(self.dispatch([HELPER_FLAG, "initialize", "1:2"]), 20)
++        self.identity_factory.assert_not_called()
++
++    def test_unexpected_exception_is_sanitized_exit_code(self):
++        self.identity.open_existing.side_effect = RuntimeError("secret-token-not-output")
++        self.assertEqual(self.dispatch([HELPER_FLAG, "repair-access", "1:2"]), 23)
++
++    def test_actual_launcher_dispatches_before_config_logging_models_or_jobs(self):
++        from apps.processor import processor_windows
++        with patch("jyd_probe.device_identity_setup.dispatch_setup_helper", return_value=24) as helper, patch.object(processor_windows, "_load_processor_config") as config, patch.object(processor_windows, "_configure_environment") as environment:
++            self.assertEqual(processor_windows.main([HELPER_FLAG, "repair-access", "1:2"]), 24)
++        helper.assert_called_once()
++        config.assert_not_called()
++        environment.assert_not_called()
++
++
++class NativeSetupTest(unittest.TestCase):
++    def api(self):
++        api = NativeSetupApi.__new__(NativeSetupApi)
++        api._kernel, api._shell, api._ole, api._cng = Mock(), Mock(), Mock(), Mock()
++        api._kernel.OpenProcess.return_value = 77
++        api._kernel.WaitForSingleObject.return_value = 258
++        api._shell.IsUserAnAdmin.return_value = True
++        api._creation = Mock(return_value=456)
++        api._image = Mock(return_value="same-exe")
++        api._session = Mock(return_value=2)
++        api._cng.user_sid_for_process.return_value = SID
++        return api
++
++    def test_verified_parent_uses_readonly_handle_and_actual_original_user(self):
++        api = self.api()
++        with api.verified_operator(123, 456) as sid:
++            self.assertEqual(sid, SID)
++            api._kernel.CloseHandle.assert_not_called()
++        api._kernel.OpenProcess.assert_called_once_with(0x00101000, False, 123)
++        api._cng.user_sid_for_process.assert_called_once_with(77)
++        api._kernel.CloseHandle.assert_called_once_with(77)
++
++    def test_pid_reuse_exit_other_exe_session_zero_and_not_elevated_rejected(self):
++        for change in (
++            lambda a: setattr(a._creation, "return_value", 999),
++            lambda a: setattr(a._kernel.WaitForSingleObject, "return_value", 0),
++            lambda a: setattr(a._image, "side_effect", ["other-exe", "our-exe"]),
++            lambda a: setattr(a._session, "return_value", 0),
++            lambda a: setattr(a._session, "side_effect", [2, 3]),
++            lambda a: setattr(a._shell.IsUserAnAdmin, "return_value", False),
++        ):
++            api = self.api()
++            change(api)
++            with self.assertRaises(DeviceIdentityError) as caught:
++                with api.verified_operator(123, 456):
++                    self.fail("invalid parent accepted")
++            self.assertEqual(caught.exception.code, "KEY_SETUP_CONTEXT_INVALID")
++            api._cng.user_sid_for_process.assert_not_called()
++
++    def test_launch_uses_same_exe_runas_hidden_no_shell_or_sensitive_arguments(self):
++        api = self.api()
++        path = os.path.normcase(os.path.realpath(r"D:\工作台 space\JianyingRenderServer.exe"))
++        api._image.return_value = path
++        api._ole.CoInitializeEx.return_value = 0
++        captured = {}
++        def launch(pointer):
++            info = pointer._obj
++            captured.update(file=info.lpFile, verb=info.lpVerb, params=info.lpParameters, show=info.nShow, mask=info.fMask)
++            info.hProcess = 99
++            return True
++        api._shell.ShellExecuteExW.side_effect = launch
++        with patch.object(sys, "executable", path):
++            self.assertEqual(api.launch("initialize"), 99)
++        self.assertEqual(captured, {"file": path, "verb": "runas", "params": f"{HELPER_FLAG} initialize {os.getpid()}:456", "show": 0, "mask": 0x540})
++        api._ole.CoUninitialize.assert_called_once()
++
++    def test_native_cancel_is_distinct_and_com_is_released(self):
++        api = self.api()
++        api._image.return_value = os.path.normcase(os.path.realpath(sys.executable))
++        api._ole.CoInitializeEx.return_value = 0
++        api._shell.ShellExecuteExW.return_value = False
++        with patch("ctypes.get_last_error", return_value=1223):
++            with self.assertRaises(DeviceIdentityError) as caught:
++                api.launch("initialize")
++        self.assertEqual(caught.exception.code, "KEY_SETUP_CANCELLED")
++        api._ole.CoUninitialize.assert_called_once()
++
++    def test_native_wait_keeps_running_distinct_from_exit(self):
++        api = self.api()
++        self.assertIsNone(api.wait(77, 0))
++        api._kernel.GetExitCodeProcess.assert_not_called()
++        api._kernel.WaitForSingleObject.return_value = 0
++        def result(handle, output):
++            output._obj.value = 24
++            return True
++        api._kernel.GetExitCodeProcess.side_effect = result
++        self.assertEqual(api.wait(77, 0), 24)
++
++    def test_source_setup_is_disabled_without_loading_any_windows_library(self):
++        with patch.object(sys, "frozen", False, create=True), patch("ctypes.WinDLL") as library:
++            with self.assertRaises(DeviceIdentityError) as caught:
++                NativeSetupApi()
++        self.assertEqual(caught.exception.code, "KEY_SETUP_RELEASE_REQUIRED")
++        library.assert_not_called()
++
++    def test_native_structure_layout_and_sid_bounds(self):
++        is64 = ctypes.sizeof(ctypes.c_void_p) == 8
++        for structure, expected in ((_ShellExecuteInfo, 112 if is64 else 60), (_Descriptor, 40 if is64 else 20), (_Trustee, 32 if is64 else 20), (_ExplicitAccess, 48 if is64 else 32)):
++            self.assertEqual(ctypes.sizeof(structure), expected)
++        for sid in (SID, "S-1-12-1-1-2-3-4"):
++            self.assertEqual(validate_operator_sid(sid), sid)
++        for sid in ("S-1-1-0", "S-1-5-18", "S-1-5-32-544", "S-1-5-21-1-2-3-4294967296", SID + ";x"):
++            with self.assertRaises(DeviceIdentityError):
++                validate_operator_sid(sid)
++        for marker in ("1:0", "-1:2", "1:18446744073709551616"):
++            with self.assertRaises(DeviceIdentityError):
++                parse_operator_process(marker)
++
++
++class NativeAclTest(unittest.TestCase):
++    def api(self):
++        api = Mock()
++        api._check = NativeCngApi._check
++        def read(handle, name, output, size, actual, flags):
++            actual._obj.value = 64
++            return 0
++        api._ncrypt.NCryptGetProperty.side_effect = read
++        api._ncrypt.NCryptSetProperty.return_value = 0
++        def dacl(original, present, acl, defaulted):
++            present._obj.value = True
++            acl._obj.value = 111
++            return True
++        api._advapi.GetSecurityDescriptorDacl.side_effect = dacl
++        def control(original, value, revision):
++            value._obj.value = 0x1000
++            return True
++        api._advapi.GetSecurityDescriptorControl.side_effect = control
++        def sid(value, pointer):
++            pointer._obj.value = 44
++            return True
++        api._advapi.ConvertStringSidToSidW.side_effect = sid
++        def merge(count, entry, original, target):
++            self.assertEqual(count, 1)
++            self.assertEqual(original.value, 111)
++            self.assertEqual(entry._obj.permissions, 0x80000000)
++            self.assertEqual(entry._obj.mode, 1)
++            self.assertEqual(entry._obj.trustee.name, 44)
++            target._obj.value = 55
++            return 0
++        api._advapi.SetEntriesInAclW.side_effect = merge
++        def relative(original, target, size):
++            size._obj.value = 64
++            if target is None:
++                ctypes.set_last_error(122)
++                return False
++            return True
++        api._advapi.MakeSelfRelativeSD.side_effect = relative
++        return api
++
++    def test_acl_merge_retains_other_entries_and_persists_only_dacl(self):
++        api = self.api()
++        grant_operator_read_access(api, 9, SID)
++        args = api._ncrypt.NCryptSetProperty.call_args.args
++        self.assertEqual(args[0:2], (9, "Security Descr"))
++        self.assertEqual(args[4], 0x80000044)
++        api._advapi.SetSecurityDescriptorControl.assert_called_once()
++        self.assertEqual([call.args[0].value for call in api._kernel.LocalFree.call_args_list], [55, 44])
++        api._ncrypt.NCryptCreatePersistedKey.assert_not_called()
++        api._ncrypt.NCryptExportKey.assert_not_called()
++
++    def test_missing_or_null_acl_fails_before_any_mutation(self):
++        for present, pointer in ((False, 0), (True, 0)):
++            api = self.api()
++            def dacl(original, exists, acl, defaulted):
++                exists._obj.value = present
++                acl._obj.value = pointer
++                return True
++            api._advapi.GetSecurityDescriptorDacl.side_effect = dacl
++            with self.assertRaises(DeviceIdentityError) as caught:
++                grant_operator_read_access(api, 9, SID)
++            self.assertEqual(caught.exception.code, "KEY_POLICY_INVALID")
++            api._advapi.SetEntriesInAclW.assert_not_called()
++            api._ncrypt.NCryptSetProperty.assert_not_called()
++
++    def test_write_failure_frees_native_allocations_without_key_deletion(self):
++        api = self.api()
++        api._ncrypt.NCryptSetProperty.return_value = 0x80090010
++        with self.assertRaises(DeviceIdentityError):
++            grant_operator_read_access(api, 9, SID)
++        self.assertEqual(api._kernel.LocalFree.call_count, 2)
++        api._ncrypt.NCryptDeleteKey.assert_not_called()
++
++    def test_group_sid_is_rejected_before_native_calls(self):
++        api = self.api()
++        with self.assertRaises(DeviceIdentityError):
++            grant_operator_read_access(api, 9, "S-1-1-0")
++        api._ncrypt.NCryptGetProperty.assert_not_called()
++
++
++if __name__ == "__main__":
++    unittest.main()
+*** End Patch

@@ -1,0 +1,726 @@
+*** Begin Patch
+*** Update File: src/jyd_probe/auth_center.py
+@@
+     def upload_workbench_batch_asset(
+         self, token: str, path: Path, *, kind: str, filename: str
+     ) -> dict[str, Any]:
+@@
+         )
++
++    def list_h3_execution_accounts(self, token: str) -> dict[str, Any]:
++        return self._post(
++            "/api/workbench/h3-execution-accounts",
++            {"access_token": token},
++        )
++
++    def prepare_h3_batch(self, token: str, payload: dict[str, Any]) -> dict[str, Any]:
++        return self._post(
++            "/api/workbench/h3-batches/prepare",
++            {"access_token": token, **payload},
++            timeout_seconds=360.0,
++        )
++
++    def confirm_h3_batch(self, token: str, batch_id: str) -> dict[str, Any]:
++        return self._post(
++            f"/api/workbench/h3-batches/{batch_id}/confirm",
++            {"access_token": token, "cost_confirmed": True},
++            timeout_seconds=120.0,
++        )
++
++    def get_h3_batch(self, token: str, batch_id: str) -> dict[str, Any]:
++        return self._post(
++            f"/api/workbench/h3-batches/{batch_id}",
++            {"access_token": token},
++        )
+*** Update File: src/jyd_probe/project_store.py
+@@
+ PROJECT_ITEM_STATUSES = {
+@@
+     "AUDIO_FAILED",
++    "H3_COST_PENDING",
++    "H3_QUEUED",
++    "H3_RUNNING",
++    "H3_FAILED",
+@@
+ ACTIVE_ITEM_STATUSES = {
+@@
+     "AUDIO_RUNNING",
++    "H3_QUEUED",
++    "H3_RUNNING",
+@@
+ FAILED_ITEM_STATUSES = {
+@@
+     "AUDIO_FAILED",
++    "H3_FAILED",
+@@
+     def set_digital_human_resolution(
+@@
+         return self.get_project(owner_user_id, project_id)
++
++    def set_h3_configuration(
++        self,
++        owner_user_id: str,
++        project_id: str,
++        *,
++        identity_image_ids: list[str],
++        defaults: dict[str, Any],
++    ) -> dict[str, Any]:
++        """Freeze the project-level H3 inputs while retaining paid history."""
++
++        clean_ids = list(dict.fromkeys(str(value or "").strip() for value in identity_image_ids))
++        clean_ids = [value for value in clean_ids if value]
++        if len(clean_ids) > 5:
++            raise ValueError("H3 人物参考图最多选择 5 张")
++        if not isinstance(defaults, dict):
++            raise ValueError("H3 默认参数必须是对象")
++        continuity = str(defaults.get("continuity_mode") or "fast").strip()
++        if continuity not in {"fast", "soft_chain"}:
++            raise ValueError("H3 衔接模式无效")
++        aspect = str(
++            defaults.get("aspect_ratio") or "9:16 (Portrait Widescreen)"
++        ).strip()
++        if aspect not in {"9:16 (Portrait Widescreen)", "16:9 (Widescreen)"}:
++            raise ValueError("H3 画面比例无效")
++        try:
++            megapixels = float(defaults.get("megapixels", 1.0))
++            tail = float(defaults.get("generation_tail_seconds", 0.5))
++        except (TypeError, ValueError) as exc:
++            raise ValueError("H3 清晰度或时长余量格式错误") from exc
++        if not 0.2 <= megapixels <= 2.0:
++            raise ValueError("H3 清晰度必须在 0.2–2.0 MP")
++        if not 0 <= tail <= 1:
++            raise ValueError("H3 时长余量必须在 0–1 秒")
++        normalized_defaults = {
++            "continuity_mode": continuity,
++            "aspect_ratio": aspect,
++            "megapixels": round(megapixels, 2),
++            "multiple": 32,
++            "generation_tail_seconds": round(tail, 3),
++        }
++        with self._transaction() as connection:
++            project = self._owned_project(connection, owner_user_id, project_id)
++            if clean_ids:
++                placeholders = ",".join("?" for _ in clean_ids)
++                found = {
++                    str(row["image_id"])
++                    for row in connection.execute(
++                        f"SELECT image_id FROM project_input_images WHERE project_id=? AND image_id IN ({placeholders})",
++                        (project_id, *clean_ids),
++                    ).fetchall()
++                }
++                if found != set(clean_ids):
++                    raise KeyError("H3 人物参考图不存在")
++            settings = _object(project["settings_json"], {})
++            previous = settings.get("h3") if isinstance(settings.get("h3"), dict) else {}
++            current_contract = {
++                "identity_image_ids": list(previous.get("identity_image_ids") or []),
++                "defaults": dict(previous.get("defaults") or {}),
++            }
++            next_contract = {
++                "identity_image_ids": clean_ids,
++                "defaults": normalized_defaults,
++            }
++            if settings.get("generation_mode") == "minimax_h3_ref2va" and current_contract == next_contract:
++                return self._project_payload(connection, project_id)
++            settings["generation_mode"] = "minimax_h3_ref2va"
++            settings["h3"] = {
++                "schema": "jyd.project-h3.v1",
++                **next_contract,
++                "config_version": int(previous.get("config_version") or 0) + 1,
++                "remote_batch_id": None,
++                "remote_status": None,
++                "fee_snapshot": None,
++                "prepare_key": None,
++            }
++            now = _now()
++            connection.execute(
++                "UPDATE projects SET settings_json=?, revision=revision+1, updated_at=? WHERE project_id=?",
++                (_json(settings), now, project_id),
++            )
++            rows = connection.execute(
++                "SELECT * FROM project_items WHERE project_id=?", (project_id,)
++            ).fetchall()
++            for item in rows:
++                item_settings = _object(item["settings_json"], {})
++                h3 = item_settings.get("h3") if isinstance(item_settings.get("h3"), dict) else {}
++                item_settings["h3"] = {
++                    **h3,
++                    "remote_item_id": None,
++                    "remote_status": None,
++                    "invalidated_reason": "H3_PROJECT_INPUT_CHANGED",
++                }
++                subtitles = _object(item["subtitles_json"], _default_subtitles())
++                subtitles["render_cues"] = []
++                subtitles["bound_video_asset_id"] = None
++                subtitles["status"] = "READY" if subtitles.get("raw_cues") else "NOT_AVAILABLE"
++                next_status = "AUDIO_READY" if item["current_audio_asset_id"] else "DRAFT"
++                connection.execute(
++                    """
++                    UPDATE project_items
++                    SET current_base_video_asset_id=NULL, current_video_asset_id=NULL,
++                        subtitles_json=?, settings_json=?, status=?, updated_at=?
++                    WHERE item_id=?
++                    """,
++                    (_json(subtitles), _json(item_settings), next_status, now, item["item_id"]),
++                )
++            self._refresh_project_status(connection, project_id, now=now)
++        return self.get_project(owner_user_id, project_id)
++
++    def add_h3_reference_video(
++        self,
++        *,
++        owner_user_id: str,
++        project_id: str,
++        item_id: str,
++        filename: str,
++        managed_path: str,
++        metadata: dict[str, Any],
++    ) -> dict[str, Any]:
++        """Version one row reference video and invalidate H3/downstream only."""
++
++        clean_name = Path(str(filename or "")).name.strip()
++        clean_path = str(managed_path or "").strip()
++        if not clean_name or not clean_path:
++            raise ValueError("H3 参考视频信息不完整")
++        with self._transaction() as connection:
++            project = self._owned_project(connection, owner_user_id, project_id)
++            item = self._owned_item(connection, project_id, item_id)
++            if str(item["status"]) in ACTIVE_ITEM_STATUSES:
++                raise ValueError("当前脚本行正在生成，不能替换 H3 参考视频")
++            version = int(
++                connection.execute(
++                    "SELECT COALESCE(MAX(version),0)+1 FROM project_assets WHERE item_id=? AND asset_type='h3_reference_video'",
++                    (item_id,),
++                ).fetchone()[0]
++            )
++            asset_id = uuid.uuid4().hex
++            now = _now()
++            connection.execute(
++                """
++                INSERT INTO project_assets(
++                    asset_id, project_id, item_id, asset_type, version,
++                    status, source_type, filename, managed_path,
++                    external_ref_json, metadata_json, created_at, updated_at
++                ) VALUES(?, ?, ?, 'h3_reference_video', ?, 'READY', 'project_upload', ?, ?, '{}', ?, ?, ?)
++                """,
++                (asset_id, project_id, item_id, version, clean_name, clean_path, _json(metadata), now, now),
++            )
++            item_settings = _object(item["settings_json"], {})
++            h3 = item_settings.get("h3") if isinstance(item_settings.get("h3"), dict) else {}
++            item_settings["h3"] = {
++                **h3,
++                "reference_video_asset_id": asset_id,
++                "reference_video_version": version,
++                "remote_item_id": None,
++                "remote_status": None,
++                "invalidated_reason": "H3_REFERENCE_VIDEO_CHANGED",
++            }
++            subtitles = _object(item["subtitles_json"], _default_subtitles())
++            subtitles["render_cues"] = []
++            subtitles["bound_video_asset_id"] = None
++            subtitles["status"] = "READY" if subtitles.get("raw_cues") else "NOT_AVAILABLE"
++            next_status = "AUDIO_READY" if item["current_audio_asset_id"] else "DRAFT"
++            connection.execute(
++                """
++                UPDATE project_items
++                SET current_base_video_asset_id=NULL, current_video_asset_id=NULL,
++                    subtitles_json=?, settings_json=?, status=?, updated_at=?
++                WHERE item_id=?
++                """,
++                (_json(subtitles), _json(item_settings), next_status, now, item_id),
++            )
++            settings = _object(project["settings_json"], {})
++            h3_project = settings.get("h3") if isinstance(settings.get("h3"), dict) else {}
++            settings["generation_mode"] = "minimax_h3_ref2va"
++            settings["h3"] = {
++                "schema": "jyd.project-h3.v1",
++                **h3_project,
++                "remote_batch_id": None,
++                "remote_status": None,
++                "fee_snapshot": None,
++                "prepare_key": None,
++            }
++            connection.execute(
++                "UPDATE projects SET settings_json=?, revision=revision+1, updated_at=? WHERE project_id=?",
++                (_json(settings), now, project_id),
++            )
++            self._refresh_project_status(connection, project_id, now=now)
++        return self.get_project(owner_user_id, project_id)
++
++    def set_h3_batch_snapshot(
++        self,
++        owner_user_id: str,
++        project_id: str,
++        *,
++        prepare_key: str,
++        snapshot: dict[str, Any],
++    ) -> dict[str, Any]:
++        if not isinstance(snapshot, dict):
++            raise ValueError("H3 批次快照格式错误")
++        remote_batch_id = str(snapshot.get("batch_id") or "").strip()
++        if not remote_batch_id:
++            raise ValueError("H3 批次编号缺失")
++        remote_status = str(snapshot.get("status") or "").strip().upper()
++        remote_items = {
++            str(value.get("row_id") or ""): value
++            for value in snapshot.get("items", [])
++            if isinstance(value, dict)
++        }
++        with self._transaction() as connection:
++            project = self._owned_project(connection, owner_user_id, project_id)
++            settings = _object(project["settings_json"], {})
++            h3 = settings.get("h3") if isinstance(settings.get("h3"), dict) else {}
++            settings["generation_mode"] = "minimax_h3_ref2va"
++            settings["h3"] = {
++                "schema": "jyd.project-h3.v1",
++                **h3,
++                "remote_batch_id": remote_batch_id,
++                "remote_status": remote_status,
++                "fee_snapshot": snapshot.get("fee_snapshot"),
++                "prepare_key": str(prepare_key or h3.get("prepare_key") or ""),
++                "last_synced_at": _now(),
++            }
++            now = _now()
++            connection.execute(
++                "UPDATE projects SET settings_json=?, updated_at=? WHERE project_id=?",
++                (_json(settings), now, project_id),
++            )
++            rows = connection.execute(
++                "SELECT * FROM project_items WHERE project_id=? ORDER BY position", (project_id,)
++            ).fetchall()
++            for item in rows:
++                remote = remote_items.get(str(item["row_key"])) or {}
++                remote_item_status = str(remote.get("status") or remote_status).upper()
++                if remote_status == "AWAITING_COST_CONFIRMATION":
++                    item_status = "H3_COST_PENDING"
++                elif remote_item_status in {"SUCCESS", "COMPLETED"}:
++                    item_status = "H3_RUNNING"
++                elif remote_item_status in {"FAILED", "PARTIAL_FAILED"}:
++                    item_status = "H3_FAILED"
++                elif remote_status in {"ACTIVE", "QUEUED", "RUNNING"}:
++                    item_status = "H3_RUNNING"
++                else:
++                    item_status = str(item["status"])
++                item_settings = _object(item["settings_json"], {})
++                item_h3 = item_settings.get("h3") if isinstance(item_settings.get("h3"), dict) else {}
++                item_settings["h3"] = {
++                    **item_h3,
++                    "remote_item_id": remote.get("item_id"),
++                    "remote_status": remote_item_status,
++                    "segments": remote.get("segments") if isinstance(remote.get("segments"), list) else [],
++                    "invalidated_reason": None,
++                }
++                connection.execute(
++                    "UPDATE project_items SET settings_json=?, status=?, updated_at=? WHERE item_id=?",
++                    (_json(item_settings), item_status, now, item["item_id"]),
++                )
++            self._refresh_project_status(connection, project_id, now=now)
++        return self.get_project(owner_user_id, project_id)
+@@
+             item_payload = {
+@@
+                 "inputs": {
+                     "image": current_image,
++                    "h3_reference_video": by_id.get(
++                        str(item_settings.get("h3", {}).get("reference_video_asset_id") or "")
++                    ) if isinstance(item_settings.get("h3"), dict) else None,
+*** Add File: src/jyd_probe/project_h3.py
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++from .auth_center import AuthCenterClient
++from .project_store import ProjectStore
++
++
++H3_MODE = "minimax_h3_ref2va"
++
++
++class ProjectH3Coordinator:
++    """Bind the cloud H3 quote/confirm lifecycle to one existing JYD project."""
++
++    def __init__(self, store: ProjectStore, client: AuthCenterClient):
++        self.store = store
++        self.client = client
++
++    def accounts(self, token: str) -> dict[str, Any]:
++        return self.client.list_h3_execution_accounts(token)
++
++    @staticmethod
++    def _h3_settings(project: dict[str, Any]) -> dict[str, Any]:
++        settings = project.get("settings") if isinstance(project.get("settings"), dict) else {}
++        h3 = settings.get("h3") if isinstance(settings.get("h3"), dict) else {}
++        if settings.get("generation_mode") != H3_MODE:
++            raise ValueError("请先把项目生成方式切换为 MiniMax H3")
++        return h3
++
++    def prepare(
++        self,
++        owner_user_id: str,
++        project_id: str,
++        token: str,
++        *,
++        idempotency_key: str,
++        selected_account_ids: list[int],
++    ) -> dict[str, Any]:
++        clean_key = str(idempotency_key or "").strip()
++        if not clean_key:
++            raise ValueError("H3 费用预览幂等键不能为空")
++        if not selected_account_ids or any(type(value) is not int or value <= 0 for value in selected_account_ids):
++            raise ValueError("请选择有效的 H3 执行账号")
++        project = self.store.get_project(owner_user_id, project_id)
++        h3 = self._h3_settings(project)
++        if h3.get("prepare_key") == clean_key and h3.get("remote_batch_id"):
++            snapshot = self.client.get_h3_batch(token, str(h3["remote_batch_id"]))
++            project = self.store.set_h3_batch_snapshot(
++                owner_user_id, project_id, prepare_key=clean_key, snapshot=snapshot
++            )
++            return {"project": project, "h3_batch": snapshot}
++
++        image_by_id = {str(value.get("image_id")): value for value in project.get("input_images", [])}
++        cloud_images: list[str] = []
++        for image_id in h3.get("identity_image_ids") or []:
++            image = image_by_id.get(str(image_id))
++            if image is None:
++                raise ValueError("H3 人物参考图已经不存在，请重新选择")
++            path = Path(str(image.get("managed_path") or ""))
++            if not path.is_file():
++                raise ValueError(f"H3 人物参考图文件不存在: {image.get('filename') or image_id}")
++            uploaded = self.client.upload_workbench_batch_asset(
++                token, path, kind="image", filename=str(image.get("filename") or path.name)
++            )
++            cloud_images.append(str(uploaded.get("asset_id") or ""))
++
++        rows: list[dict[str, Any]] = []
++        for item in project.get("items", []):
++            audio = item.get("outputs", {}).get("audio")
++            audio_ref = audio.get("external_ref", {}) if isinstance(audio, dict) else {}
++            if not audio_ref.get("batch_id") or not audio_ref.get("remote_item_id"):
++                raise ValueError(f"第 {item.get('row_key')} 行还没有可复用的 MiniMax 完整音频")
++            reference = item.get("inputs", {}).get("h3_reference_video")
++            if not isinstance(reference, dict):
++                raise ValueError(f"第 {item.get('row_key')} 行尚未绑定 H3 参考视频")
++            path = Path(str(reference.get("managed_path") or ""))
++            if not path.is_file():
++                raise ValueError(f"第 {item.get('row_key')} 行 H3 参考视频文件不存在")
++            uploaded = self.client.upload_workbench_batch_asset(
++                token, path, kind="video", filename=str(reference.get("filename") or path.name)
++            )
++            item_h3 = item.get("settings", {}).get("h3", {}) if isinstance(item.get("settings"), dict) else {}
++            row: dict[str, Any] = {
++                "row_id": str(item.get("row_key") or item.get("item_id")),
++                "script_text": str(item.get("script_text") or ""),
++                "video_asset_id": str(uploaded.get("asset_id") or ""),
++                "audio_batch_id": str(audio_ref["batch_id"]),
++                "audio_item_id": str(audio_ref["remote_item_id"]),
++                "audio_generation_version": int(audio_ref.get("generation_version") or 1),
++            }
++            overrides = item_h3.get("overrides") if isinstance(item_h3.get("overrides"), dict) else {}
++            if overrides:
++                row["overrides"] = overrides
++            rows.append(row)
++
++        defaults = h3.get("defaults") if isinstance(h3.get("defaults"), dict) else {}
++        snapshot = self.client.prepare_h3_batch(
++            token,
++            {
++                "name": str(project.get("name") or "JYD H3 批次"),
++                "request_key": clean_key,
++                "reference_image_asset_ids": cloud_images,
++                "selected_account_ids": selected_account_ids,
++                "defaults": {
++                    "continuity_mode": defaults.get("continuity_mode", "fast"),
++                    "generation_tail_seconds": defaults.get("generation_tail_seconds", 0.5),
++                    "resolution": {
++                        "aspect_ratio": defaults.get("aspect_ratio", "9:16 (Portrait Widescreen)"),
++                        "megapixels": defaults.get("megapixels", 1.0),
++                        "multiple": 32,
++                    },
++                },
++                "rows": rows,
++            },
++        )
++        batch_id = str(snapshot.get("batch_id") or "")
++        self.store.add_link(
++            owner_user_id=owner_user_id,
++            project_id=project_id,
++            system="runninghub_h3",
++            relation="generation_batch",
++            external_id=batch_id,
++            metadata={"prepare_key": clean_key},
++        )
++        project = self.store.set_h3_batch_snapshot(
++            owner_user_id, project_id, prepare_key=clean_key, snapshot=snapshot
++        )
++        return {"project": project, "h3_batch": snapshot}
++
++    def confirm(self, owner_user_id: str, project_id: str, token: str) -> dict[str, Any]:
++        project = self.store.get_project(owner_user_id, project_id)
++        h3 = self._h3_settings(project)
++        batch_id = str(h3.get("remote_batch_id") or "")
++        if not batch_id:
++            raise ValueError("请先计算 H3 分段与费用")
++        snapshot = self.client.confirm_h3_batch(token, batch_id)
++        project = self.store.set_h3_batch_snapshot(
++            owner_user_id,
++            project_id,
++            prepare_key=str(h3.get("prepare_key") or ""),
++            snapshot=snapshot,
++        )
++        return {"project": project, "h3_batch": snapshot}
++
++    def sync(self, owner_user_id: str, project_id: str, token: str) -> dict[str, Any]:
++        project = self.store.get_project(owner_user_id, project_id)
++        h3 = self._h3_settings(project)
++        batch_id = str(h3.get("remote_batch_id") or "")
++        if not batch_id:
++            return {"project": project, "h3_batch": None}
++        snapshot = self.client.get_h3_batch(token, batch_id)
++        project = self.store.set_h3_batch_snapshot(
++            owner_user_id,
++            project_id,
++            prepare_key=str(h3.get("prepare_key") or ""),
++            snapshot=snapshot,
++        )
++        return {"project": project, "h3_batch": snapshot}
+*** Update File: src/jyd_probe/web_api.py
+@@
+ from .project_composition import (
+@@
+ )
++from .project_h3 import ProjectH3Coordinator
+@@
+     def project_composition_coordinator(
+@@
+         return ProjectCompositionCoordinator(
+@@
+         )
++
++    def project_h3_coordinator(client: AuthCenterClient) -> ProjectH3Coordinator:
++        return ProjectH3Coordinator(project_store, client)
++
++    @app.get("/api/new/h3/accounts")
++    def list_new_h3_accounts(request: Request) -> dict[str, Any]:
++        client, token = digital_human_access(request)
++        try:
++            return project_h3_coordinator(client).accounts(token)
++        except AuthCenterError as exc:
++            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++
++    @app.put("/api/new/projects/{project_id}/h3/settings")
++    def update_new_project_h3_settings(
++        project_id: str, request: Request, payload: dict[str, Any] = Body(...)
++    ) -> dict[str, Any]:
++        user = current_project_user(request)
++        image_ids = payload.get("identity_image_ids")
++        if not isinstance(image_ids, list):
++            raise HTTPException(status_code=422, detail="identity_image_ids 必须是数组")
++        try:
++            return project_store.set_h3_configuration(
++                user["user_id"],
++                project_id,
++                identity_image_ids=image_ids,
++                defaults=payload.get("defaults") if isinstance(payload.get("defaults"), dict) else {},
++            )
++        except KeyError as exc:
++            raise HTTPException(status_code=404, detail=str(exc)) from exc
++        except ValueError as exc:
++            raise HTTPException(status_code=422, detail=str(exc)) from exc
++
++    @app.post("/api/new/projects/{project_id}/items/{item_id}/h3/reference-video", status_code=201)
++    async def upload_new_project_h3_reference_video(
++        project_id: str,
++        item_id: str,
++        request: Request,
++        filename: str = "",
++    ) -> dict[str, Any]:
++        user = current_project_user(request)
++        content = await request.body()
++        if not content:
++            raise HTTPException(status_code=422, detail="H3 参考视频不能为空")
++        if len(content) > settings.max_video_upload_bytes:
++            raise HTTPException(status_code=413, detail="H3 参考视频超过大小限制")
++        safe_name = _safe_filename(filename or request.headers.get("x-filename") or "reference.mp4")
++        if Path(safe_name).suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}:
++            raise HTTPException(status_code=422, detail="H3 参考视频格式不支持")
++        directory = settings.storage_root / "new_projects" / project_id / item_id / "h3_reference"
++        directory.mkdir(parents=True, exist_ok=True)
++        target = directory / f"{uuid.uuid4().hex}_{safe_name}"
++        target.write_bytes(content)
++        try:
++            return project_store.add_h3_reference_video(
++                owner_user_id=user["user_id"],
++                project_id=project_id,
++                item_id=item_id,
++                filename=safe_name,
++                managed_path=str(target),
++                metadata={"size_bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()},
++            )
++        except KeyError as exc:
++            _unlink_if_exists(target)
++            raise HTTPException(status_code=404, detail=str(exc)) from exc
++        except ValueError as exc:
++            _unlink_if_exists(target)
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
++
++    @app.post("/api/new/projects/{project_id}/h3/prepare", status_code=201)
++    def prepare_new_project_h3(
++        project_id: str, request: Request, payload: dict[str, Any] = Body(...)
++    ) -> dict[str, Any]:
++        user = current_project_user(request)
++        client, token = digital_human_access(request)
++        selected = payload.get("selected_account_ids")
++        if not isinstance(selected, list):
++            raise HTTPException(status_code=422, detail="selected_account_ids 必须是数组")
++        try:
++            return project_h3_coordinator(client).prepare(
++                user["user_id"], project_id, token,
++                idempotency_key=str(payload.get("idempotency_key") or ""),
++                selected_account_ids=selected,
++            )
++        except KeyError as exc:
++            raise HTTPException(status_code=404, detail=str(exc)) from exc
++        except AuthCenterError as exc:
++            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++        except (OSError, ValueError) as exc:
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
++
++    @app.post("/api/new/projects/{project_id}/h3/confirm")
++    def confirm_new_project_h3(
++        project_id: str, request: Request, payload: dict[str, Any] = Body(...)
++    ) -> dict[str, Any]:
++        if payload.get("cost_confirmed") is not True:
++            raise HTTPException(status_code=409, detail="请明确确认 H3 分段费用")
++        user = current_project_user(request)
++        client, token = digital_human_access(request)
++        try:
++            return project_h3_coordinator(client).confirm(user["user_id"], project_id, token)
++        except KeyError as exc:
++            raise HTTPException(status_code=404, detail=str(exc)) from exc
++        except AuthCenterError as exc:
++            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++        except ValueError as exc:
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
++
++    @app.get("/api/new/projects/{project_id}/h3/status")
++    def sync_new_project_h3(project_id: str, request: Request) -> dict[str, Any]:
++        user = current_project_user(request)
++        client, token = digital_human_access(request)
++        try:
++            return project_h3_coordinator(client).sync(user["user_id"], project_id, token)
++        except KeyError as exc:
++            raise HTTPException(status_code=404, detail=str(exc)) from exc
++        except AuthCenterError as exc:
++            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++        except ValueError as exc:
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
+*** Add File: tests/test_project_h3.py
++from __future__ import annotations
++
++from pathlib import Path
++import sys
++
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(PROJECT_ROOT / "src"))
++
++from jyd_probe.project_h3 import ProjectH3Coordinator  # noqa: E402
++from jyd_probe.project_store import ProjectStore  # noqa: E402
++
++
++class FakeH3Client:
++    def __init__(self) -> None:
++        self.uploads: list[tuple[str, str]] = []
++        self.prepared: dict | None = None
++        self.snapshot = {
++            "batch_id": "h3-batch-1",
++            "status": "AWAITING_COST_CONFIRMATION",
++            "fee_snapshot": {"segment_count": 2, "estimated_paid_calls": 2},
++            "items": [{"item_id": "remote-row-1", "row_id": "1", "status": "AWAITING_COST_CONFIRMATION", "segments": []}],
++        }
++
++    def list_h3_execution_accounts(self, token: str) -> dict:
++        return {"accounts": [{"id": 7}], "token_seen": token}
++
++    def upload_workbench_batch_asset(self, token: str, path: Path, *, kind: str, filename: str) -> dict:
++        self.uploads.append((kind, filename))
++        return {"asset_id": f"cloud-{kind}-{len(self.uploads)}"}
++
++    def prepare_h3_batch(self, token: str, payload: dict) -> dict:
++        self.prepared = payload
++        return dict(self.snapshot)
++
++    def confirm_h3_batch(self, token: str, batch_id: str) -> dict:
++        assert batch_id == "h3-batch-1"
++        self.snapshot = {
++            **self.snapshot,
++            "status": "ACTIVE",
++            "items": [{"item_id": "remote-row-1", "row_id": "1", "status": "PENDING", "segments": []}],
++        }
++        return dict(self.snapshot)
++
++    def get_h3_batch(self, token: str, batch_id: str) -> dict:
++        assert batch_id == "h3-batch-1"
++        return dict(self.snapshot)
++
++
++def test_h3_project_contract_reuses_existing_audio_and_original_project(tmp_path: Path) -> None:
++    store = ProjectStore(tmp_path / "control.db")
++    project = store.create_project(
++        owner_user_id="user-1",
++        owner_username="tester",
++        name="H3 正式项目",
++        items=[{"row_key": "1", "script_text": "第一条台词。"}],
++    )
++    project_id = project["project_id"]
++    item_id = project["items"][0]["item_id"]
++    image_path = tmp_path / "identity.png"
++    image_path.write_bytes(b"identity")
++    project = store.register_input_image(
++        "user-1", project_id,
++        filename="identity.png", content_type="image/png", size_bytes=8,
++        sha256="a" * 64, managed_path=str(image_path),
++    )
++    image_id = project["input_images"][0]["image_id"]
++    audio_path = tmp_path / "voice.mp3"
++    audio_path.write_bytes(b"audio")
++    store.add_asset(
++        owner_user_id="user-1", project_id=project_id, item_id=item_id,
++        asset_type="audio", source_type="minimax", status="READY",
++        filename="voice.mp3", managed_path=str(audio_path),
++        external_ref={"batch_id": "audio-batch", "remote_item_id": "audio-item", "generation_version": 3},
++        make_current=True,
++    )
++    reference_path = tmp_path / "reference.mp4"
++    reference_path.write_bytes(b"video")
++    store.add_h3_reference_video(
++        owner_user_id="user-1", project_id=project_id, item_id=item_id,
++        filename="reference.mp4", managed_path=str(reference_path),
++        metadata={"sha256": "b" * 64},
++    )
++    store.set_h3_configuration(
++        "user-1", project_id,
++        identity_image_ids=[image_id],
++        defaults={"continuity_mode": "fast", "aspect_ratio": "9:16 (Portrait Widescreen)", "megapixels": 1, "generation_tail_seconds": 0.5},
++    )
++    client = FakeH3Client()
++    coordinator = ProjectH3Coordinator(store, client)  # type: ignore[arg-type]
++
++    prepared = coordinator.prepare(
++        "user-1", project_id, "token", idempotency_key="quote-1", selected_account_ids=[7]
++    )
++    assert prepared["project"]["project_id"] == project_id
++    assert prepared["project"]["items"][0]["status"] == "H3_COST_PENDING"
++    assert client.prepared is not None
++    assert client.prepared["rows"][0]["audio_generation_version"] == 3
++    assert client.prepared["rows"][0]["script_text"] == "第一条台词。"
++    assert client.uploads == [("image", "identity.png"), ("video", "reference.mp4")]
++
++    confirmed = coordinator.confirm("user-1", project_id, "token")
++    assert confirmed["project"]["project_id"] == project_id
++    assert confirmed["project"]["settings"]["h3"]["remote_batch_id"] == "h3-batch-1"
++    assert confirmed["project"]["items"][0]["status"] == "H3_RUNNING"
++    assert confirmed["project"]["items"][0]["outputs"]["audio"]["asset_id"]
+*** End Patch
+

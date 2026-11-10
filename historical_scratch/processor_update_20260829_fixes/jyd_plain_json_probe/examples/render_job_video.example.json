@@ -1,0 +1,49 @@
+{
+  "schema": "jyd.render_job.v1",
+  "source": {
+    "type": "video",
+    "media_path": "C:/Users/san/Desktop/测试/1.mp4",
+    "work_root": "D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/_generated_video_drafts",
+    "canvas": {
+      "width": 0,
+      "height": 0,
+      "fps": 30
+    }
+  },
+  "output": {
+    "draft_root": "D:/剪映草稿/JianyingPro Drafts",
+    "draft_name": "",
+    "mp4_path": "D:/输出/render_job_video_001.mp4",
+    "skip_export": false
+  },
+  "texts": [
+    {
+      "type": "add",
+      "scope": "top",
+      "track_name": "auto_title",
+      "text": "这里是新增文字",
+      "start_us": 0,
+      "duration_us": 5000000,
+      "style_json_path": "D:/工作内容/轻盈健/公寓/text_style_library/抖音美好体测试.json",
+      "apply_clip": true,
+      "transform_x": 0.0,
+      "transform_y": 0.0,
+      "size": 8.0
+    }
+  ],
+  "audios": [],
+  "effects": [
+    {
+      "effect_json_path": "D:/工作内容/轻盈健/公寓/effect_library/流星雨.json",
+      "target_video_track_index": 0,
+      "target_video_segment_index": 0,
+      "start_us": -1,
+      "duration_us": 0
+    }
+  ],
+  "export": {
+    "resolution": "1080P",
+    "framerate": "30fps",
+    "timeout": 1200
+  }
+}

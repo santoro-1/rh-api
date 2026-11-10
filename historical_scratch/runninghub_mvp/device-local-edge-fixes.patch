@@ -1,0 +1,50 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_queue.py
+@@
+-                    if stored.get("thumbprint") and stored["thumbprint"] != decision.thumbprint:
++                    if decision.mode == "ENFORCE" and not stored.get("thumbprint"):
++                        raise DeviceAuthorizationError("DEVICE_LOCAL_REBIND_REQUIRED", "该历史任务需要所属账号确认本机授权后继续")
++                    if decision.mode == "ENFORCE" and stored["thumbprint"] != decision.thumbprint:
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_local_web.py
+@@
+-            path in {"/api/render", "/api/render/batch", "/api/render/excel-batch"}
+-            or re.fullmatch(r"/api/new/projects/[^/]+/(?:postprocess/generate|variants/generate|items/[^/]+/(?:postprocess/export|variants/(?:supplement|retry)))", path))
++            re.fullmatch(r"/api/new/projects/[^/]+/(?:postprocess/generate|variants/generate|items/[^/]+/(?:postprocess/export|variants/(?:supplement|retry)))", path))
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/web_api.py
+@@
+ from .device_local_queue import device_guarded_queue_job
++from .device_auth_protocol import DeviceAuthorizationError
++from .device_identity_windows import DeviceIdentityError
+@@
+         job_payload = _read_json(job_dir / "job.json")
++        if previous.get("device_authorization"):
++            running_status["device_authorization"] = previous["device_authorization"]
+         _write_json(status_path, running_status)
+@@
+     @app.post("/api/jobs/{job_id}/resume-authorization")
+     def resume_local_job_authorization(job_id: str, request: Request):
++        from .device_authorization_routes import _same_origin_action
++        _same_origin_action(request)
+         user = current_project_user(request)
+@@
+     def render(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+         try:
+             return render_queue.submit(payload)
+-        except HTTPException:
++        except (HTTPException, DeviceAuthorizationError, DeviceIdentityError):
+             raise
+@@
+     def render_batch(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+         try:
+             jobs, variants = _expand_batch_payload(payload)
+             return render_queue.submit_batch(jobs, variants)
+-        except HTTPException:
++        except (HTTPException, DeviceAuthorizationError, DeviceIdentityError):
+             raise
+@@
+                 temporary_template_ids=[str(item) for item in temporary_ids],
+             )
+-        except HTTPException:
++        except (HTTPException, DeviceAuthorizationError, DeviceIdentityError):
+             raise
+*** End Patch

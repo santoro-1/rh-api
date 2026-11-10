@@ -1,0 +1,14 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_h3_video_sequence.py
+@@
+-        if busy:
+-            connection.execute(
+-                "UPDATE project_items SET status='POSTPROCESS_RUNNING' WHERE item_id=?",
+-                (item["item_id"],),
+-            )
++    if busy:
++        store.create_operation(
++            owner_user_id="u1", project_id=project["project_id"], item_id=item["item_id"],
++            operation_type="POSTPROCESS_GENERATE", idempotency_key="active-render",
++        )
+*** End Patch

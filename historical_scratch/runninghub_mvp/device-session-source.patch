@@ -1,0 +1,323 @@
+*** Begin Patch
+*** Add File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/src/jyd_probe/device_authorization.py
++"""Per-account device sessions: refresh credentials, never recreate identity.
++
++No startup key creation, provider calls, business retry, or UI signing endpoint.
++The session is consumed by server-side admission, not trusted browser booleans.
++"""
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++import re
++import tempfile
++import threading
++import time
++from urllib.error import HTTPError, URLError
++from urllib.request import HTTPRedirectHandler, Request, build_opener
++
++from .device_auth_protocol import (
++    LEASE_TYPE, DeviceAuthorizationError, TrustedIssuer, VerifiedCredentials,
++    assert_key_available, canonical_json, make_proof, sha256_b64, strict_json,
++)
++from .device_identity_windows import DeviceIdentityError, WindowsDeviceIdentity
++
++BASE = "/api/workbench/device-auth"
++MAX_RESPONSE_BYTES = 65536
++
++
++class _NoRedirect(HTTPRedirectHandler):
++    def redirect_request(self, req, fp, code, msg, headers, newurl):
++        # A redirect may change htu or leak the account token/proof to another host.
++        return None
++
++
++class DeviceAuthTransport:
++    def __init__(self, trust: TrustedIssuer, *, timeout_seconds: float = 4, opener=None):
++        self.trust = trust
++        self.timeout_seconds = max(1, min(30, float(timeout_seconds)))
++        self._opener = opener if opener is not None else build_opener(_NoRedirect())
++
++    def request(self, *, method: str, path: str, headers: dict, payload: dict | None = None) -> dict:
++        if path not in {BASE + "/" + suffix for suffix in ("challenge", "register", "status", "exchange", "refresh")}:
++            raise DeviceAuthorizationError("UNTRUSTED_DEVICE_AUTH_TARGET", "设备授权接口地址无效")
++        uri = self.trust.request_uri(path)
++        request = Request(uri, method=method, data=None if payload is None else canonical_json(payload).encode("ascii"),
++                          headers={"Accept": "application/json", "Content-Type": "application/json", **headers})
++        try:
++            with self._opener.open(request, timeout=self.timeout_seconds) as response:
++                if response.geturl() != uri:
++                    raise DeviceAuthorizationError("DEVICE_AUTH_REDIRECT_REJECTED", "设备授权服务不允许重定向")
++                raw = response.read(MAX_RESPONSE_BYTES + 1)
++                status = int(response.status)
++        except HTTPError as exc:
++            try:
++                raw = exc.read(MAX_RESPONSE_BYTES + 1)
++            finally:
++                exc.close()
++            self._raise_response(int(exc.code), raw)
++        except (URLError, OSError, TimeoutError) as exc:
++            raise DeviceAuthorizationError("DEVICE_AUTH_UNREACHABLE", "暂时无法连接设备授权服务", status_code=503, transient=True) from exc
++        if not 200 <= status < 300:
++            self._raise_response(status, raw)
++        try:
++            if len(raw) > MAX_RESPONSE_BYTES:
++                raise ValueError()
++            result = strict_json(raw)
++            if not isinstance(result, dict):
++                raise ValueError()
++            return result
++        except (ValueError, UnicodeError, RecursionError) as exc:
++            raise DeviceAuthorizationError("INVALID_DEVICE_AUTH_RESPONSE", "设备授权服务返回格式无效", status_code=502) from exc
++
++    @staticmethod
++    def _raise_response(status: int, raw: bytes):
++        code = "DEVICE_AUTH_REJECTED"
++        if 300 <= status < 400:
++            code = "DEVICE_AUTH_REDIRECT_REJECTED"
++        elif len(raw) <= MAX_RESPONSE_BYTES:
++            try:
++                data = strict_json(raw)
++                value = data.get("code") if isinstance(data, dict) else None
++                if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", value):
++                    code = value
++            except (ValueError, UnicodeError, RecursionError):
++                pass
++        # Do not put response bodies, tokens or private diagnostics into logs/UI.
++        raise DeviceAuthorizationError(code, f"设备授权服务未批准此操作（HTTP {status}）", status_code=status,
++                                       transient=status in {429, 502, 503, 504} and code not in {"DEVICE_AUTH_NOT_CONFIGURED"})
++
++
++class DeviceLeaseCache:
++    """Non-authoritative signed lease cache; never stores login/access tokens.
++
++    A cache may display a verified last-known device after restart. It cannot grant
++    offline admission after process restart because no trusted monotonic anchor
++    survives. The original key and account can restore the grant ONLINE, without
++    another administrator approval or another device registration.
++    """
++    def __init__(self, root: Path):
++        self.root = Path(root)
++
++    @classmethod
++    def for_machine(cls):
++        program_data = os.environ.get("ProgramData", "")
++        if not program_data or not Path(program_data).is_absolute():
++            raise DeviceAuthorizationError("DEVICE_CACHE_UNAVAILABLE", "无法定位设备授权状态目录", status_code=503)
++        return cls(Path(program_data) / "PublicVideoWorkbench" / "Licensing")
++
++    def path_for(self, user_id: int, thumbprint: str) -> Path:
++        if type(user_id) is not int or user_id < 1 or not re.fullmatch(r"[A-Za-z0-9_-]{43}", thumbprint):
++            raise ValueError("invalid cache identity")
++        return self.root / thumbprint / f"account-{user_id}.json"
++
++    def save(self, user_id: int, thumbprint: str, credentials: VerifiedCredentials) -> None:
++        target = self.path_for(user_id, thumbprint)
++        if credentials.claims["user_id"] != user_id or credentials.claims["cnf"]["jkt"] != thumbprint:
++            raise ValueError("cache identity mismatch")
++        target.parent.mkdir(parents=True, exist_ok=True)
++        data = canonical_json({"schema": "publicvideo.device-cache.v1", "local_lease": credentials.local_lease})
++        temporary = None
++        try:
++            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
++                                             prefix=".lease-", suffix=".tmp", delete=False) as output:
++                temporary = Path(output.name)
++                output.write(data)
++                output.flush()
++                os.fsync(output.fileno())
++            os.replace(temporary, target)
++        finally:
++            if temporary is not None:
++                temporary.unlink(missing_ok=True)
++
++    def hint(self, trust: TrustedIssuer, *, user_id: int, thumbprint: str, now: float) -> dict | None:
++        try:
++            path = self.path_for(user_id, thumbprint)
++            with path.open("rb") as source:
++                raw = source.read(MAX_RESPONSE_BYTES + 1)
++            if len(raw) > MAX_RESPONSE_BYTES:
++                return None
++            record = strict_json(raw)
++            if set(record) != {"schema", "local_lease"} or record["schema"] != "publicvideo.device-cache.v1":
++                return None
++            claims = trust.verify(record["local_lease"], typ=LEASE_TYPE, user_id=user_id, thumbprint=thumbprint, now=now)
++            return {"device_id": claims["device_id"], "grant_id": claims["grant_id"], "state": "AUTH_REFRESH_REQUIRED"}
++        except (OSError, ValueError, TypeError, KeyError, RecursionError, DeviceAuthorizationError):
++            return None
++
++
++class DeviceAuthorizationSession:
++    """One logged-in account on THIS backend's machine, not a browser's machine."""
++    def __init__(self, *, user_id: int, login_token: str, trust: TrustedIssuer,
++                 identity: WindowsDeviceIdentity, transport=None, cache: DeviceLeaseCache | None = None,
++                 wall_clock=time.time, monotonic_clock=time.monotonic):
++        if type(user_id) is not int or user_id < 1 or not login_token:
++            raise ValueError("authenticated account required")
++        self.user_id, self.trust, self.identity = user_id, trust, identity
++        self._login_token = login_token
++        self._transport = transport if transport is not None else DeviceAuthTransport(trust)
++        self._cache, self._wall, self._mono = cache, wall_clock, monotonic_clock
++        self._lock = threading.RLock()
++        self._key = None
++        self._credentials = None
++        self._anchor_wall = self._anchor_mono = self._refresh_at = 0.0
++        self._nonce = None
++        self.state, self.error_code = "AUTH_REFRESH_REQUIRED", None
++        self.cache_warning = False
++
++    def _ensure_key(self):
++        if self._key is None:
++            self._key = self.identity.open_existing()
++        if self._key is None:
++            raise DeviceAuthorizationError("DEVICE_UNREGISTERED", "此电脑尚未申请设备授权")
++        return self._key
++
++    def _proof_request(self, purpose: str, *, token: str, bound: bool, payload: dict | None = None) -> dict:
++        key = self._ensure_key()
++        authorization = ("DPoP " if bound else "Bearer ") + token
++        challenge = self._transport.request(method="POST", path=BASE + "/challenge",
++                                            headers={"Authorization": authorization},
++                                            payload={"public_jwk": key.public_jwk, "purpose": purpose})
++        proof = make_proof(key, self.trust, method="GET" if purpose == "status" else "POST", path=BASE + "/" + purpose,
++                           access_token=token, nonce=challenge.get("nonce"), now=int(self._wall()))
++        return self._transport.request(method="GET" if purpose == "status" else "POST", path=BASE + "/" + purpose,
++                                       headers={"Authorization": authorization, "DPoP": proof}, payload=payload)
++
++    def _still_valid(self) -> bool:
++        if self._credentials is None:
++            return False
++        elapsed = self._mono() - self._anchor_mono
++        wall_elapsed = self._wall() - self._anchor_wall
++        if elapsed < 0 or abs(elapsed - wall_elapsed) > 5:
++            return False
++        return elapsed < self._credentials.claims["exp"] - self._anchor_wall and self._wall() < self._credentials.claims["exp"]
++
++    def _failed(self, error: DeviceAuthorizationError | DeviceIdentityError) -> None:
++        self.error_code = error.code
++        if isinstance(error, DeviceAuthorizationError) and error.transient and self._still_valid():
++            self.state = "OFFLINE_GRACE"
++            # Backoff does not change the lease expiration or monotonic anchor.
++            self._refresh_at = self._mono() + 15
++            return
++        self._credentials, self._nonce = None, None
++        states = {"DEVICE_UNREGISTERED": "UNREGISTERED", "DEVICE_PENDING": "PENDING",
++                  "DEVICE_REJECTED": "REJECTED", "DEVICE_SUSPENDED": "SUSPENDED", "DEVICE_REVOKED": "REVOKED",
++                  "LOGIN_REQUIRED": "LOGIN_REQUIRED", "CLIENT_UPGRADE_REQUIRED": "CLIENT_UPGRADE_REQUIRED"}
++        self.state = "KEY_UNAVAILABLE" if isinstance(error, DeviceIdentityError) else states.get(error.code, "AUTH_REFRESH_REQUIRED")
++
++    def refresh(self, *, force: bool = False) -> dict:
++        with self._lock:
++            if not force and self._still_valid() and self._mono() < self._refresh_at:
++                return self.summary()
++            try:
++                key = self._ensure_key()
++                previous = self._credentials if self._still_valid() else None
++                result = self._proof_request("refresh" if previous else "exchange",
++                                             token=previous.access_token if previous else self._login_token,
++                                             bound=previous is not None)
++                # Verify after the round trip so a slow response cannot extend the lease.
++                credentials = VerifiedCredentials.from_response(result, self.trust, user_id=self.user_id,
++                                                                 thumbprint=key.thumbprint, now=self._wall())
++                self._credentials = credentials
++                self._anchor_wall, self._anchor_mono = self._wall(), self._mono()
++                self._refresh_at = self._anchor_mono + credentials.refresh_after_seconds
++                self._nonce = None
++                self.state, self.error_code = "ACTIVE", None
++                if self._cache is not None:
++                    try:
++                        self._cache.save(self.user_id, key.thumbprint, credentials)
++                        self.cache_warning = False
++                    except OSError:
++                        # Cache is optional; do not discard valid online authorization.
++                        self.cache_warning = True
++                return self.summary()
++            except (DeviceAuthorizationError, DeviceIdentityError) as exc:
++                self._failed(exc)
++                raise
++
++    def register(self, *, label: str = "", client_version: str = "", operator_sid: str | None = None,
++                 software_approved: bool = False) -> dict:
++        """Explicit activation action only, never invoked by refresh/cache recovery."""
++        with self._lock:
++            try:
++                if self._key is None:
++                    self._key = self.identity.initialize_for_activation(operator_sid=operator_sid, software_approved=software_approved)
++                result = self._proof_request("register", token=self._login_token, bound=False,
++                                             payload={"protection": self._key.protection, "label": label, "client_version": client_version})
++                # Status is informational. Only signed credentials confer permission.
++                self._credentials, self._nonce = None, None
++                self.state = str(result.get("state", "AUTH_REFRESH_REQUIRED"))
++                self.error_code = None
++                return result
++            except (DeviceAuthorizationError, DeviceIdentityError) as exc:
++                self._failed(exc)
++                raise
++
++    def require_local(self, scope: str) -> dict:
++        if scope not in {"local:draft", "local:render"}:
++            raise ValueError("local admission scope required")
++        with self._lock:
++            try:
++                self.refresh()
++            except DeviceAuthorizationError as exc:
++                if not exc.transient or not self._still_valid():
++                    raise
++            if not self._still_valid():
++                self.state = "AUTH_REFRESH_REQUIRED"
++                raise DeviceAuthorizationError("AUTH_REFRESH_REQUIRED", "请联网重新校验设备授权", status_code=401)
++            if scope not in self._credentials.claims["scopes"]:
++                raise DeviceAuthorizationError("DEVICE_SCOPE_DENIED", "此设备未获得该功能的授权")
++            try:
++                assert_key_available(self._ensure_key())
++            except (DeviceIdentityError, DeviceAuthorizationError) as exc:
++                self._failed(exc)
++                raise
++            # This is a diagnostic/admission binding, not a permanent queue pass.
++            return {name: self._credentials.claims[name] for name in ("user_id", "device_id", "grant_id", "grant_revision", "policy_revision")}
++
++    def request_headers(self, *, method: str, path: str, scope: str | None) -> dict[str, str]:
++        with self._lock:
++            self.trust.request_uri(path)
++            self.refresh()
++            if not self._still_valid():
++                raise DeviceAuthorizationError("AUTH_REFRESH_REQUIRED", "请重新校验设备授权", status_code=401)
++            if scope is not None and scope not in self._credentials.claims["scopes"]:
++                raise DeviceAuthorizationError("DEVICE_SCOPE_DENIED", "此设备未获得该功能的授权")
++            key, token = self._ensure_key(), self._credentials.access_token
++            token_hash = sha256_b64(token)
++            if self._nonce is None or self._nonce[1] <= self._mono() or self._nonce[2] != token_hash:
++                result = self._transport.request(method="POST", path=BASE + "/challenge",
++                                                 headers={"Authorization": "DPoP " + token},
++                                                 payload={"public_jwk": key.public_jwk, "purpose": "request"})
++                ttl = result.get("expires_in")
++                if type(ttl) is not int or ttl < 1:
++                    raise DeviceAuthorizationError("INVALID_DEVICE_CHALLENGE", "设备验证挑战有效期无效")
++                self._nonce = (result.get("nonce"), self._mono() + min(90, ttl - 1), token_hash)
++            proof = make_proof(key, self.trust, method=method, path=path, access_token=token, nonce=self._nonce[0], now=int(self._wall()))
++            return {"Authorization": "DPoP " + token, "DPoP": proof}
++
++    def summary(self) -> dict:
++        with self._lock:
++            valid = self._still_valid()
++            state = self.state if self.state != "ACTIVE" or valid else "AUTH_REFRESH_REQUIRED"
++            result = {"state": state, "error_code": self.error_code, "cache_warning": self.cache_warning,
++                      "user_id": self.user_id, "thumbprint": self._key.thumbprint if self._key else None,
++                      "protection_report": self._key.protection if self._key else None,
++                      "protection_verified": False}
++            if self._credentials:
++                result.update({name: self._credentials.claims[name] for name in ("device_id", "grant_id", "exp")})
++            return result
++
++    def close(self) -> None:
++        with self._lock:
++            self._credentials, self._nonce, self._login_token = None, None, ""
++            if self._key is not None:
++                self._key.close()
++                self._key = None
++            self.state = "LOGIN_REQUIRED"
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/requirements.txt
+@@
+ numpy>=1.23,<3
++PyJWT[crypto]>=2.10.1,<3
+*** End Patch

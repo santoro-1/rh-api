@@ -1,0 +1,127 @@
+*** Begin Patch
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization_routes.py
+@@
+     def test_pending_is_not_mislabeled_as_new_machine(self):
++        self.login()
++        self.session.refresh.side_effect = DeviceAuthorizationError(
++            "DEVICE_PENDING", "waiting"
++        )
++        response = self.client.post(
++            "/api/new/device-authorization/refresh", headers=self.headers
++        )
++        self.assertEqual(response.status_code, 403)
++        self.assertEqual(response.json()["state"], "PENDING")
++
++    def test_repair_requires_website_user_same_origin_and_literal_confirmation(self):
++        path = "/api/new/device-authorization/repair-key-access"
++        response = self.client.post(path, json={"confirm_repair": True}, headers=self.headers)
++        self.assertEqual(response.status_code, 401)
++        self.login()
++        for value in (False, "true", 1, None):
++            self.assertEqual(self.client.post(path, json={"confirm_repair": value}, headers=self.headers).status_code, 422)
++        for headers in ({}, {"Origin": "https://evil.example", "X-Device-Authorization-Action": "1"}):
++            self.assertEqual(self.client.post(path, json={"confirm_repair": True}, headers=headers).status_code, 403)
++        for name in ("operator_sid", "process_id", "software_approved", "key_name", "command", "device_id"):
++            self.assertEqual(self.client.post(path, json={"confirm_repair": True, name: "injected"}, headers=self.headers).status_code, 422)
++        self.session.repair_key_access.assert_not_called()
++
++    def test_repair_invokes_only_existing_key_recovery_and_returns_safe_summary(self):
++        self.login()
++        self.session.repair_key_access.return_value = {"state": "ACTIVE", "device_id": "original-id", "grant_id": "original-grant"}
++        response = self.client.post("/api/new/device-authorization/repair-key-access", json={"confirm_repair": True}, headers=self.headers)
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.json()["device_id"], "original-id")
++        self.assertEqual(response.headers["cache-control"], "no-store")
++        self.session.repair_key_access.assert_called_once_with()
++        self.session.register.assert_not_called()
++        self.assertNotIn("website-account-token", response.text)
++
++    def test_setup_in_progress_and_cancel_are_not_new_device_or_login_failure(self):
++        from jyd_probe.device_identity_windows import DeviceIdentityError
++        self.login()
++        for code, state in (("KEY_SETUP_IN_PROGRESS", "KEY_INITIALIZING"), ("KEY_SETUP_CANCELLED", "KEY_UNAVAILABLE"), ("KEY_ACCESS_DENIED", "KEY_UNAVAILABLE")):
++            self.session.register.side_effect = DeviceIdentityError(code, "native sanitized status")
++            response = self.client.post("/api/new/device-authorization/apply", json={"confirm_initialize": True}, headers=self.headers)
++            self.assertEqual(response.status_code, 409)
++            self.assertEqual(response.json()["state"], state)
++            self.assertEqual(response.json()["code"], code)
++        self.session.repair_key_access.assert_not_called()
++
++    def test_repair_cannot_turn_a_revoked_device_into_active(self):
+         self.login()
+-        self.session.refresh.side_effect = DeviceAuthorizationError(
+-            "DEVICE_PENDING", "waiting"
++        self.session.repair_key_access.side_effect = DeviceAuthorizationError(
++            "DEVICE_REVOKED", "revoked"
+         )
+         response = self.client.post(
+-            "/api/new/device-authorization/refresh", headers=self.headers
++            "/api/new/device-authorization/repair-key-access", json={"confirm_repair": True}, headers=self.headers
+         )
+         self.assertEqual(response.status_code, 403)
+-        self.assertEqual(response.json()["state"], "PENDING")
++        self.assertEqual(response.json()["state"], "REVOKED")
++        self.session.register.assert_not_called()
+*** Update File: D:/工作内容/轻盈健/公寓/jyd_plain_json_probe/tests/test_device_authorization.py
+@@
+-    def verified(self, payload=None, **kwargs):
++    def test_explicit_repair_reopens_same_key_and_refreshes_without_registering(self):
++        self.session.refresh()
++        original_thumbprint = self.signer.thumbprint
++        replacement_handle = copy.copy(self.signer)
++        replacement_handle.closed = False
++        self.identity.repair_operator_access = Mock(side_effect=lambda: setattr(self.identity, "signer", replacement_handle))
++        self.transport.calls.clear()
++        result = self.session.repair_key_access()
++        self.assertTrue(self.signer.closed)
++        self.assertEqual(result["state"], "ACTIVE")
++        self.assertEqual(result["thumbprint"], original_thumbprint)
++        self.assertEqual((result["device_id"], result["grant_id"]), ("device-a", "grant-a"))
++        self.assertEqual(self.identity.created, 0)
++        self.assertEqual([item["path"] for item in self.transport.calls], ["/api/workbench/device-auth/challenge", "/api/workbench/device-auth/exchange"])
++
++    def test_repair_failure_clears_credentials_without_creating_new_key(self):
++        self.session.refresh()
++        self.identity.repair_operator_access = Mock(side_effect=DeviceIdentityError("KEY_SETUP_CANCELLED", "cancelled"))
++        with self.assertRaises(DeviceIdentityError):
++            self.session.repair_key_access()
++        self.assertIsNone(self.session._credentials)
++        self.assertIsNone(self.session._key)
++        self.assertEqual(self.session.state, "KEY_UNAVAILABLE")
++        self.assertEqual(self.identity.created, 0)
++        self.session.close()
++        self.identity.repair_operator_access.reset_mock()
++        with self.assertRaises(DeviceAuthorizationError):
++            self.session.repair_key_access()
++        self.identity.repair_operator_access.assert_not_called()
++
++    def test_key_setup_waiting_keeps_distinct_state_without_automatic_repair(self):
++        self.identity.open_existing = Mock(side_effect=DeviceIdentityError("KEY_SETUP_IN_PROGRESS", "pending"))
++        with self.assertRaises(DeviceIdentityError):
++            self.session.status()
++        self.assertEqual(self.session.summary()["state"], "KEY_INITIALIZING")
++        self.assertEqual(self.transport.calls, [])
++        self.assertEqual(self.identity.created, 0)
++
++    def test_session_first_activation_uses_helper_then_normal_refresh_needs_no_uac(self):
++        from jyd_probe.device_identity_setup import DeviceSetupCoordinator, InteractiveWindowsDeviceIdentity
++        self.identity.signer = None
++        process = Mock()
++        process.launch.return_value = 77
++        def finished(*_):
++            self.identity.signer = self.signer
++            return 0
++        process.wait.side_effect = finished
++        adapter = InteractiveWindowsDeviceIdentity(identity=self.identity, coordinator=DeviceSetupCoordinator(api_factory=lambda: process))
++        session = self.new_session(identity=adapter)
++        self.assertEqual(session.register(label="250", client_version="v1")["status"], "PENDING")
++        self.assertEqual(session.refresh()["state"], "ACTIVE")
++        for _ in range(3):
++            self.clock.advance(301)
++            self.assertEqual(session.refresh()["thumbprint"], self.signer.thumbprint)
++        process.launch.assert_called_once_with("initialize")
++        self.assertEqual(self.identity.created, 0)
++        self.assertEqual(sum(item["path"].endswith("/register") for item in self.transport.calls), 1)
++
++    def verified(self, payload=None, **kwargs):
+*** End Patch
