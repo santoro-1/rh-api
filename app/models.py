@@ -1648,6 +1648,12 @@ class StagedAsset(Base):
     relative_path: Mapped[str] = mapped_column(String(500), nullable=False)
     original_name: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_channel: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    asset_role: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    upload_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    source_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    transport_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    transport_profile: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[Optional[datetime]] = mapped_column(
@@ -1655,6 +1661,77 @@ class StagedAsset(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="staged_assets")
+
+    __table_args__ = (
+        Index(
+            "uq_staged_assets_h3_upload_key",
+            "user_id",
+            "source_channel",
+            "upload_key",
+            unique=True,
+        ),
+    )
+
+
+class MediaAsset(Base):
+    """Private OSS object; never interpret object_key as a local path."""
+
+    __tablename__ = "media_assets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    asset_role: Mapped[str] = mapped_column(String(40), nullable=False)
+    upload_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    original_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    verified_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    object_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    multipart_upload_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    part_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="UPLOADING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "uq_media_assets_upload_key",
+            "user_id",
+            "source_channel",
+            "upload_key",
+            unique=True,
+        ),
+    )
+
+
+class MediaVerificationJob(Base):
+    """Durable, single-purpose cloud verification receipt for an OSS asset."""
+
+    __tablename__ = "media_verification_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    asset_id: Mapped[str] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    lease_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    receipt_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class LongAudioProject(Base):

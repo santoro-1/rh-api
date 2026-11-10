@@ -54,9 +54,17 @@ def _stage(client, token: str, kind: str, name: str, content_type: str) -> str:
         "image": b"\x89PNG\r\n\x1a\nidentity-image",
         "video": b"\x00\x00\x00\x18ftypisomh3-video",
     }[kind]
+    digest = hashlib.sha256(content).hexdigest()
     response = client.post(
-        "/api/workbench/batch-assets",
-        data={"access_token": token, "kind": kind},
+        "/api/workbench/h3-assets",
+        data={
+            "access_token": token,
+            "kind": kind,
+            "asset_role": "reference_image" if kind == "image" else "reference_video",
+            "upload_key": f"h3workbench-{kind}-{uuid.uuid4().hex}",
+            "source_sha256": digest,
+            "transport_profile": "original-v1",
+        },
         files={"file": (name, content, content_type)},
     )
     assert response.status_code == 201, response.text
@@ -183,6 +191,7 @@ def _finished_audio(
 def _enable_h3_pool(username: str, *, access_password: str | None = None) -> int:
     with SessionLocal() as db:
         user = db.query(User).filter_by(username=username).one()
+        user.h3_access_enabled = True
         grant = RunningHubDualPoolGrant(
             user_id=user.id,
             is_enabled=True,

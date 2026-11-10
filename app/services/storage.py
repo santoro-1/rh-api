@@ -41,7 +41,8 @@ def safe_relative_path(path: str, data_dir: Path) -> Path:
 
 
 def _validate_content_signature(path: Path, kind: str) -> None:
-    header = path.read_bytes()[:32]
+    with path.open("rb") as source:
+        header = source.read(32)
     if kind == "image":
         valid = (
             header.startswith(b"\xff\xd8\xff")

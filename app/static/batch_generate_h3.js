@@ -9,6 +9,8 @@
   const state = {images: [], videos: [], audios: [], scripts: []};
   let accountIds = [];
   let requestKey = crypto.randomUUID();
+  const uploadSessionKey = crypto.randomUUID().replaceAll("-", "");
+  let uploadSequence = 0;
   let preparedBatchId = "";
 
   const byId = (id) => document.getElementById(id);
@@ -21,6 +23,9 @@
   function errorMessage(payload, fallback) {
     if (Array.isArray(payload?.errors) && payload.errors.length) {
       return payload.errors.map((entry) => entry.message).join("；");
+    }
+    if (payload?.detail && typeof payload.detail === "object") {
+      return payload.detail.message || fallback;
     }
     return payload?.detail || fallback;
   }
@@ -89,6 +94,48 @@
     clearError();
     for (const file of files) {
       byId("h3-upload-progress").textContent = `正在上传：${file.name}`;
+      if (kind !== "audio") {
+        const assetRole = kind === "image" ? "reference_image" : "reference_video";
+        const uploadKey = `h3web-${uploadSessionKey}-${assetRole}-${uploadSequence++}`;
+        const lookup = async () => {
+          const response = await fetch("/api/h3-page/assets/lookup", {
+            method: "POST",
+            headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
+            body: JSON.stringify({upload_key: uploadKey}),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(errorMessage(payload, `${file.name} 上传状态查询失败`));
+          return payload;
+        };
+        let payload = await lookup();
+        if (!payload.found) {
+          const form = new FormData();
+          form.append("file", file);
+          form.append("kind", kind);
+          form.append("asset_role", assetRole);
+          form.append("upload_key", uploadKey);
+          form.append("transport_profile", "original-v1");
+          try {
+            const response = await fetch("/api/h3-page/assets", {
+              method: "POST",
+              headers: {"X-CSRF-Token": csrf},
+              body: form,
+            });
+            payload = await response.json();
+            if (!response.ok) throw new Error(errorMessage(payload, `${file.name} 上传失败`));
+          } catch (error) {
+            const recovered = await lookup();
+            if (!recovered.found) throw error;
+            payload = recovered;
+          }
+        }
+        state[bucket].push({
+          assetId: payload.asset_id,
+          originalName: file.name,
+          previewUrl: "",
+        });
+        continue;
+      }
       const form = new FormData();
       form.append("file", file);
       form.append("kind", kind);

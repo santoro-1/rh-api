@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,14 @@ from app.models import GenerationBatchItem, H3RemoteAsrJob, User
 from app.routes.dependencies import check_rate_limit, get_current_user, get_page_user
 from app.services.batch_assets import StagedAssetError
 from app.services.csrf import require_csrf
+from app.services.h3.input_uploads import (
+    H3_TRANSPORT_PROFILE,
+    H3_WEB_SOURCE,
+    H3InputUploadError,
+    lookup_h3_asset,
+    stage_h3_asset,
+)
+from app.services.h3_pool import user_has_h3_pool_entitlement
 from app.services.h3_workbench import (
     H3WorkbenchError,
     confirm_h3_workbench_batch,
@@ -30,6 +38,79 @@ router = APIRouter(prefix="/api/h3-page", tags=["h3-page"])
 
 def _error(exc: Exception, *, status_code: int = 400) -> HTTPException:
     return HTTPException(status_code=status_code, detail=str(exc))
+
+
+def _h3_upload_error(exc: H3InputUploadError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.code, "message": str(exc)},
+    )
+
+
+def _require_h3_access(db: Session, user: User) -> None:
+    if not user_has_h3_pool_entitlement(db, user):
+        raise HTTPException(status_code=403, detail="当前账号未开通 H3 权限")
+
+
+@router.post("/assets/lookup")
+async def page_h3_asset_lookup(
+    request: Request,
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del csrf_ok
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="H3 素材查询内容不是有效对象")
+    _require_h3_access(db, current_user)
+    check_rate_limit(request, f"h3-page-asset-lookup:{current_user.id}", 120)
+    try:
+        return lookup_h3_asset(
+            db,
+            current_user,
+            get_settings(),
+            source_channel=H3_WEB_SOURCE,
+            upload_key=str(payload.get("upload_key") or ""),
+        )
+    except H3InputUploadError as exc:
+        raise _h3_upload_error(exc) from exc
+
+
+@router.post("/assets")
+def page_h3_asset_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    kind: str = Form(...),
+    asset_role: str = Form(...),
+    upload_key: str = Form(...),
+    transport_profile: str = Form(H3_TRANSPORT_PROFILE),
+    source_sha256: str = Form(""),
+    csrf_ok: None = Depends(require_csrf),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    del csrf_ok
+    _require_h3_access(db, current_user)
+    check_rate_limit(request, f"h3-page-asset-upload:{current_user.id}", 60)
+    try:
+        response, reused = stage_h3_asset(
+            db,
+            current_user,
+            file,
+            get_settings(),
+            source_channel=H3_WEB_SOURCE,
+            kind=kind,
+            asset_role=asset_role,
+            upload_key=upload_key,
+            source_sha256=source_sha256 or None,
+            transport_profile=transport_profile,
+        )
+    except H3InputUploadError as exc:
+        raise _h3_upload_error(exc) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(response, status_code=200 if reused else 201)
 
 
 @router.get("/accounts")

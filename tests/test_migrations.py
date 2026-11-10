@@ -73,7 +73,7 @@ def test_h3_remote_asr_migration_preserves_existing_head_trim_job() -> None:
                 "AND name='h3_head_trim_jobs'"
             ).fetchone()
         connection.close()
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert migrated[:5] == (
             1,
             "h3-task",
@@ -124,7 +124,7 @@ def test_h3_manual_prompt_override_migration_adds_nullable_frozen_field() -> Non
             }
         connection.close()
 
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert columns["prompt_override"] == 0
     finally:
         database.unlink(missing_ok=True)
@@ -149,7 +149,7 @@ def test_legacy_task_pool_migration_adds_nullable_candidate_snapshot() -> None:
             }
         connection.close()
 
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert columns["runninghub_execution_account_ids_json"] == 0
 
         _run_alembic(
@@ -188,7 +188,7 @@ def test_h3_motion_reference_pool_migration_is_reversible() -> None:
                 )
             }
         connection.close()
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert {
             "motion_reference_index",
             "motion_reference_path",
@@ -263,7 +263,7 @@ def test_h3_access_password_migration_preserves_existing_capability() -> None:
             ).fetchall()
         connection.close()
 
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert "access_password_encrypted" in columns
         assert row == ("workflow", None)
         assert foreign_key_errors == []
@@ -347,7 +347,7 @@ def test_h3_user_access_migration_backfills_existing_h3_members() -> None:
             ).fetchall()
         connection.close()
 
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert grants == [(1, 1), (2, 0)]
         assert foreign_key_errors == []
     finally:
@@ -491,7 +491,7 @@ def test_alembic_config_resolves_paths_outside_project_directory(tmp_path):
                 "PRAGMA table_info('h3_remote_asr_jobs')"
             )
         }
-    assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
     assert "runninghub_failed_reason" in task_columns
     assert "runninghub_attempt_history" in task_columns
     assert "runninghub_auto_retry_count" in task_columns
@@ -744,7 +744,7 @@ def test_system_voice_category_migration_resumes_after_interrupted_add_column():
             ).fetchone()[0]
         connection.close()
 
-        assert version == "0051_ark_analysis_operations"
+        assert version == "0054_media_verification_jobs"
         assert category_columns == 1
         assert quick_check == "ok"
     finally:
@@ -806,7 +806,7 @@ def test_shared_minimax_voice_migration_backfills_same_key_accounts():
             ).fetchall()
         connection.close()
 
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert bindings == [("binding-1",), ("binding-2",)]
         assert voices == [
             (1, 1, "provider-shared", "ACTIVE", "binding-1"),
@@ -979,7 +979,7 @@ def test_runninghub_execution_pool_migration_preserves_existing_parent_child_row
             foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         connection.close()
 
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert counts == {
             "users": 1,
             "runninghub_configs": 1,
@@ -1116,7 +1116,7 @@ def test_dual_pool_migration_preserves_seedvr2_rows_and_seeds_controlled_grant()
             ).fetchall()
         connection.close()
 
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert grant == (7, 1, 1)
         assert batch_snapshot == (None, None)
         assert foreign_key_errors == []
@@ -1209,7 +1209,7 @@ def test_item_execution_pool_migration_copies_legacy_batch_snapshots():
             ).fetchone()
         connection.close()
 
-        assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
         assert snapshots == ("[3,5]", "[7]")
     finally:
         database.unlink(missing_ok=True)
@@ -1287,7 +1287,7 @@ def test_multi_camera_migration_bootstraps_only_exact_active_accounts(tmp_path):
         ).fetchall()
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-    assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
     assert grants == [(1, 1), (2, 1)]
     assert foreign_key_errors == []
 
@@ -1316,7 +1316,7 @@ def test_ark_operation_ledger_migration_is_add_only_and_reversible(tmp_path):
         )
         connection.commit()
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
-    assert revision == "0051_ark_analysis_operations"
+        assert revision == "0054_media_verification_jobs"
     assert foreign_key_errors == []
 
     _run_alembic(database, "0050_device_work_admission", command="downgrade")
@@ -1330,3 +1330,116 @@ def test_ark_operation_ledger_migration_is_add_only_and_reversible(tmp_path):
         user = connection.execute("SELECT username FROM users WHERE id = 1").fetchone()
     assert "ark_analysis_operations" not in tables
     assert user == ("ledger-user",)
+
+
+def test_h3_upload_metadata_migration_keeps_history_nullable_and_adds_unique_key(tmp_path):
+    database = tmp_path / "h3-upload-metadata.db"
+    _run_alembic(database, "0051_ark_analysis_operations")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO users "
+            "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+            "VALUES (1, 'h3-upload-user', 'hash', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO staged_assets "
+            "(id, user_id, kind, relative_path, original_name, size_bytes, created_at, expires_at) "
+            "VALUES ('legacy-asset', 1, 'video', 'legacy.mp4', 'legacy.mp4', 1, "
+            "CURRENT_TIMESTAMP, '2099-01-01 00:00:00')"
+        )
+        connection.commit()
+
+    _run_alembic(database, "head")
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        historical = connection.execute(
+            "SELECT source_channel, asset_role, upload_key, source_sha256, "
+            "transport_sha256, transport_profile FROM staged_assets WHERE id='legacy-asset'"
+        ).fetchone()
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(staged_assets)")}
+        connection.execute(
+            "INSERT INTO staged_assets "
+            "(id, user_id, kind, relative_path, original_name, size_bytes, source_channel, "
+            "asset_role, upload_key, source_sha256, transport_sha256, transport_profile, "
+            "created_at, expires_at) VALUES "
+            "('h3-one', 1, 'video', 'one.mp4', 'one.mp4', 1, 'h3_workbench', "
+            "'reference_video', 'upload-key-1', ?, ?, 'original-v1', CURRENT_TIMESTAMP, "
+            "'2099-01-01 00:00:00')",
+            ("a" * 64, "a" * 64),
+        )
+        duplicate_rejected = False
+        try:
+            connection.execute(
+                "INSERT INTO staged_assets "
+                "(id, user_id, kind, relative_path, original_name, size_bytes, source_channel, "
+                "asset_role, upload_key, created_at, expires_at) VALUES "
+                "('h3-two', 1, 'video', 'two.mp4', 'two.mp4', 1, 'h3_workbench', "
+                "'reference_video', 'upload-key-1', CURRENT_TIMESTAMP, '2099-01-01 00:00:00')"
+            )
+        except sqlite3.IntegrityError:
+            duplicate_rejected = True
+        connection.rollback()
+
+        assert revision == "0054_media_verification_jobs"
+    assert historical == (None, None, None, None, None, None)
+    assert {
+        "source_channel", "asset_role", "upload_key", "source_sha256",
+        "transport_sha256", "transport_profile",
+    } <= columns
+    assert duplicate_rejected is True
+
+
+def test_media_asset_migration_adds_isolated_oss_table_without_moving_history(tmp_path):
+    database = tmp_path / "media-assets.db"
+    _run_alembic(database, "0052_h3_upload_metadata")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO users "
+            "(id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+            "VALUES (1, 'media-user', 'hash', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO staged_assets "
+            "(id, user_id, kind, relative_path, original_name, size_bytes, created_at, expires_at) "
+            "VALUES ('local-old', 1, 'video', 'uploads/old.mp4', 'old.mp4', 1, "
+            "CURRENT_TIMESTAMP, '2099-01-01 00:00:00')"
+        )
+        connection.commit()
+    _run_alembic(database, "head")
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        legacy = connection.execute(
+            "SELECT relative_path FROM staged_assets WHERE id='local-old'"
+        ).fetchone()
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(media_assets)")}
+        assert revision == "0054_media_verification_jobs"
+    assert legacy == ("uploads/old.mp4",)
+    assert {"object_key", "multipart_upload_id", "expected_sha256", "status"} <= columns
+
+
+def test_media_verification_migration_preserves_uploaded_asset(tmp_path):
+    database = tmp_path / "media-verification.db"
+    _run_alembic(database, "0053_media_assets")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO users (id, username, password_hash, is_admin, is_active, created_at, updated_at) "
+            "VALUES (1, 'verify-user', 'hash', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO media_assets (id, user_id, kind, source_channel, asset_role, upload_key, "
+            "original_name, size_bytes, expected_sha256, object_key, multipart_upload_id, part_size, "
+            "status, created_at, updated_at, expires_at) VALUES "
+            "('asset-1', 1, 'video', 'web_legacy', 'input_video', 'upload-key-1', "
+            "'clip.mp4', 4, ?, 'media/users/1/asset-1/source', 'upload-1', 8388608, "
+            "'UPLOADED', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '2099-01-01 00:00:00')",
+            ("a" * 64,),
+        )
+        connection.commit()
+    _run_alembic(database, "head")
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        asset = connection.execute("SELECT status FROM media_assets WHERE id='asset-1'").fetchone()
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(media_verification_jobs)")}
+    assert revision == "0054_media_verification_jobs"
+    assert asset == ("UPLOADED",)
+    assert {"asset_id", "lease_id", "attempts", "receipt_sha256"} <= columns

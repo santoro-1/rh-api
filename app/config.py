@@ -108,6 +108,15 @@ class Settings:
     media_worker_archive_limit_mb: int
     log_retention_days: int
     log_max_bytes: int
+    media_oss_enabled: bool
+    media_oss_bucket: str
+    media_oss_region: str
+    media_oss_public_endpoint: str
+    media_oss_internal_endpoint: str
+    media_cloud_worker_enabled: bool
+    media_cloud_worker_token: str
+    media_cloud_worker_lease_seconds: int
+    media_cloud_worker_max_active: int
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -264,6 +273,30 @@ class Settings:
                 else "runninghub.cn,runninghub.ai,myqcloud.com,tencentcos.cn"
             ),
         )
+        media_oss_enabled = _as_bool(os.getenv("MEDIA_OSS_ENABLED"), False)
+        media_oss_bucket = os.getenv("MEDIA_OSS_BUCKET", "").strip()
+        media_oss_region = os.getenv("MEDIA_OSS_REGION", "cn-hangzhou").strip()
+        media_oss_public_endpoint = os.getenv("MEDIA_OSS_PUBLIC_ENDPOINT", "").strip()
+        media_oss_internal_endpoint = os.getenv("MEDIA_OSS_INTERNAL_ENDPOINT", "").strip()
+        media_cloud_worker_enabled = _as_bool(os.getenv("MEDIA_CLOUD_WORKER_ENABLED"), False)
+        media_cloud_worker_token = os.getenv("MEDIA_CLOUD_WORKER_TOKEN", "").strip()
+        media_cloud_worker_lease_seconds = _as_int("MEDIA_CLOUD_WORKER_LEASE_SECONDS", 900)
+        media_cloud_worker_max_active = _as_int("MEDIA_CLOUD_WORKER_MAX_ACTIVE", 2)
+        if media_cloud_worker_enabled and (
+            not media_oss_enabled or len(media_cloud_worker_token) < 32
+            or not 60 <= media_cloud_worker_lease_seconds <= 3600
+            or not 1 <= media_cloud_worker_max_active <= 16
+        ):
+            raise ValueError("云端素材核验必须启用 OSS、独立长令牌及安全的租约/并发上限")
+        if media_oss_enabled and (
+            not media_oss_bucket
+            or media_oss_region != "cn-hangzhou"
+            or not media_oss_public_endpoint.startswith("https://")
+            or not media_oss_internal_endpoint.startswith("https://")
+            or not os.getenv("OSS_ACCESS_KEY_ID", "").strip()
+            or not os.getenv("OSS_ACCESS_KEY_SECRET", "").strip()
+        ):
+            raise ValueError("OSS 直传必须配置杭州 Bucket、HTTPS Endpoint 和专用凭据")
 
         return cls(
             app_env=app_env,
@@ -347,6 +380,15 @@ class Settings:
             media_worker_archive_limit_mb=media_worker_archive_limit_mb,
             log_retention_days=_as_int("LOG_RETENTION_DAYS", 7),
             log_max_bytes=_as_int("LOG_MAX_BYTES", 10 * 1024 * 1024),
+            media_oss_enabled=media_oss_enabled,
+            media_oss_bucket=media_oss_bucket,
+            media_oss_region=media_oss_region,
+            media_oss_public_endpoint=media_oss_public_endpoint,
+            media_oss_internal_endpoint=media_oss_internal_endpoint,
+            media_cloud_worker_enabled=media_cloud_worker_enabled,
+            media_cloud_worker_token=media_cloud_worker_token,
+            media_cloud_worker_lease_seconds=media_cloud_worker_lease_seconds,
+            media_cloud_worker_max_active=media_cloud_worker_max_active,
         )
 
     @property

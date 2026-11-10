@@ -22,6 +22,8 @@ from app.routes import (
     h3_page,
     long_audio,
     media_worker_api,
+    media_assets,
+    cloud_media_jobs,
     operations,
     runninghub_pool_admin,
     tasks,
@@ -143,6 +145,8 @@ def create_app() -> FastAPI:
     app.include_router(voices.router)
     app.include_router(long_audio.router)
     app.include_router(media_worker_api.router)
+    app.include_router(media_assets.router)
+    app.include_router(cloud_media_jobs.router)
     app.include_router(operations.router)
     app.include_router(workbench.router)
     app.include_router(workbench_ltx.router)

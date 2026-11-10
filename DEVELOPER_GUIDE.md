@@ -6,6 +6,12 @@
 
 ## 1. 项目定位与边界
 
+> 2026-09-04 H3 输入上传第一阶段：`staged_assets` 通过迁移 `0052_h3_upload_metadata` 增加来源、
+> 角色、幂等键和双摘要；网页与 JYD 分用 H3 专用接口。服务端落盘、摘要均为 1 MiB 分块，格式
+> 检查仅读取前 32 字节；JYD multipart 使用准确 Content-Length 和独立 Session。当前固定
+> `original-v1`，原始与传输摘要相同，不做转码。上传状态不确定时只按稳定键 lookup，未确认素材
+> ID 前不调用 H3 prepare。本地已实现，未部署。
+
 > 2026-09-01 设备授权 v1.16：新增受控 Linux 签名根初始化/轮换/检查和 JYD 公钥编入工具；服务器私钥拒绝写入源码，构建继续拒绝空根/测试根/私钥字段。非 LTX 新工作台的声音、普通数字人、分析及对应 Worker 已接设备准入，已有远程 ID/下载恢复不重提，旧网页来源保持原规则。相关回归 113 项、付费 Worker 专项 4 项、迁移 17 项、密钥合同 44 项通过（集合重叠）。LTX、正式密钥创建、完整全量回归和真实双机/连续升级仍未完成，暂不可出正式包。最新事实见 [主文档第 25 节](工作台设备授权与免重复激活开发文档.md#25-签名根工具与非-ltx-付费入口准入2026-09-01)。
 
 > 2026-09-01 Agent 接线：中央 HTTP、执行机账号/原密钥、CLI/GUI 登录及持久执行回执已接入；相同结果幂等补报，迟到失败不能覆盖成功，已启动任务不因租约失效自动重排。真实代码合同 `66 passed`，模拟 GUI/网络/回执模块 `18 passed`；范围及未完成的人工核实恢复见 [主文档第 23 节](工作台设备授权与免重复激活开发文档.md)。本阶段未新增云端迁移或供应商调用；发布公钥/整包与实机验收仍未完成。以下为历史记录。
@@ -78,6 +84,13 @@
 心跳并续租。远程媒体任务租约默认 1800 秒，节点掉线后任务可重新回队。
 
 ### 2.2 本地与生产差异
+
+媒体直传 OSS 的隔离底座位于 `app/routes/media_assets.py`、`app/services/media_uploads.py` 和
+`app/services/media_oss.py`，由 `0053_media_assets` 存储分片会话。`0054_media_verification_jobs`
+及 `app/cloud_media_verifier.py` 提供默认关闭的云端核验任务、租约/回执和单次 FC 入口；尚未配置
+真实 FC 镜像或触发器，也未接入现有付费预检、后续处理或结果归档。`MEDIA_OSS_ENABLED` 和
+`MEDIA_CLOUD_WORKER_ENABLED` 均默认关闭。现行本地路径
+仍是线上合同，不能据此关闭 multipart 或启用新链路。当前状态和接口见 `docs/` 五份媒体文档。
 
 - 本地默认 `MEDIA_PROCESSING_MODE=local`，媒体 Worker 可直接使用本机 ASR/FFmpeg。
 - 生产默认 `MEDIA_PROCESSING_MODE=remote`。Ubuntu 服务器不安装 FunASR；授权的

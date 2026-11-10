@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import requests
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -31,6 +31,14 @@ from app.services.h3_workbench import (
     prepare_h3_segment_regeneration,
     prepare_h3_segment_retry,
 )
+from app.services.h3.input_uploads import (
+    H3_TRANSPORT_PROFILE,
+    H3_WORKBENCH_SOURCE,
+    H3InputUploadError,
+    lookup_h3_asset,
+    stage_h3_asset,
+)
+from app.services.h3_pool import user_has_h3_pool_entitlement
 from app.services.h3.delivery import (
     resolve_h3_provider_video_ips,
     validate_h3_provider_video_url,
@@ -134,6 +142,74 @@ def _service_error(exc: Exception) -> HTTPException:
 
 def _bearer_user(request: Request, db: Session) -> User:
     return workbench_user(request, db)
+
+
+def _h3_upload_error(exc: H3InputUploadError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.code, "message": str(exc)},
+    )
+
+
+def _require_h3_access(db: Session, user: User) -> None:
+    if not user_has_h3_pool_entitlement(db, user):
+        raise HTTPException(status_code=403, detail="当前账号未开通 H3 权限")
+
+
+@router.post("/api/workbench/h3-assets/lookup")
+def lookup_workbench_h3_asset(
+    request: Request,
+    payload: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    user = _token_user(str(payload.get("access_token") or ""), db, request)
+    _require_h3_access(db, user)
+    check_rate_limit(request, f"workbench-h3-asset-lookup:{user.id}", 120)
+    try:
+        return lookup_h3_asset(
+            db,
+            user,
+            get_settings(),
+            source_channel=H3_WORKBENCH_SOURCE,
+            upload_key=str(payload.get("upload_key") or ""),
+        )
+    except H3InputUploadError as exc:
+        raise _h3_upload_error(exc) from exc
+
+
+@router.post("/api/workbench/h3-assets")
+def upload_workbench_h3_asset(
+    request: Request,
+    file: UploadFile = File(...),
+    kind: str = Form(...),
+    asset_role: str = Form(...),
+    upload_key: str = Form(...),
+    source_sha256: str = Form(...),
+    transport_profile: str = Form(H3_TRANSPORT_PROFILE),
+    access_token: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user = _token_user(access_token, db, request, new_work=True)
+    _require_h3_access(db, user)
+    check_rate_limit(request, f"workbench-h3-asset-upload:{user.id}", 60)
+    try:
+        response, reused = stage_h3_asset(
+            db,
+            user,
+            file,
+            get_settings(),
+            source_channel=H3_WORKBENCH_SOURCE,
+            kind=kind,
+            asset_role=asset_role,
+            upload_key=upload_key,
+            source_sha256=source_sha256,
+            transport_profile=transport_profile,
+        )
+    except H3InputUploadError as exc:
+        raise _h3_upload_error(exc) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(response, status_code=200 if reused else 201)
 
 
 @router.post("/api/workbench/h3-execution-accounts")

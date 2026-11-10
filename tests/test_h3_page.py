@@ -36,6 +36,20 @@ N/A"""
 
 
 def _stage(client, kind: str, name: str, content: bytes, content_type: str) -> str:
+    if kind in {"image", "video"}:
+        role = "reference_image" if kind == "image" else "reference_video"
+        response = client.post(
+            "/api/h3-page/assets",
+            data={
+                "kind": kind,
+                "asset_role": role,
+                "upload_key": f"h3page-{kind}-{hashlib.sha256(content).hexdigest()}",
+                "transport_profile": "original-v1",
+            },
+            files={"file": (name, content, content_type)},
+        )
+        assert response.status_code in {200, 201}, response.text
+        return response.json()["asset_id"]
     response = client.post(
         "/api/batch-assets",
         data={"kind": kind},
