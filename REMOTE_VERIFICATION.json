@@ -1,0 +1,53 @@
+{
+  "verified": true,
+  "source": "fresh GitHub fetch and ls-remote",
+  "rh_api_refs": {
+    "main": "46442d301cd4f0dfa4599573f84f022a6082ceac",
+    "archive/workspace-closeout-20261110": "dd0b274a8f01e56119a65a9c89094de019ba1bc7",
+    "archive/stash-pre-sync-20261110": "cefd0ca01a16058ba6213a6ac937a410e00f3ff0",
+    "archive/stash-local-scripts-20261110": "6cafcca1542ec0cf3df014b31007b0291e8df396",
+    "archive/stash-semantic-docs-20261110": "efa29907d6e079aace76ad95b6ad34f5a7248d36",
+    "archive/stash-media-worker-20261110": "e302d03e93e2ba2bb7b81e2601d47000be89aa22"
+  },
+  "archive_file_checksums_verified": 1591,
+  "archive_source_manifest_count": 1589,
+  "stashes": [
+    {
+      "branch": "archive/stash-pre-sync-20261110",
+      "sha": "cefd0ca01a16058ba6213a6ac937a410e00f3ff0",
+      "untracked_files_preserved": 6
+    },
+    {
+      "branch": "archive/stash-local-scripts-20261110",
+      "sha": "6cafcca1542ec0cf3df014b31007b0291e8df396",
+      "untracked_files_preserved": 18
+    },
+    {
+      "branch": "archive/stash-semantic-docs-20261110",
+      "sha": "efa29907d6e079aace76ad95b6ad34f5a7248d36",
+      "untracked_files_preserved": 6
+    },
+    {
+      "branch": "archive/stash-media-worker-20261110",
+      "sha": "e302d03e93e2ba2bb7b81e2601d47000be89aa22",
+      "untracked_files_preserved": 0
+    }
+  ],
+  "other_refs": [
+    {
+      "repo": "https://github.com/santoro-1/jianji-auto.git",
+      "branch": "main",
+      "sha": "ec255c73b6d18b73118d78cb8cb033185de8940a"
+    },
+    {
+      "repo": "https://github.com/santoro-1/jianji-auto.git",
+      "branch": "archive/video-gongyu-20261110",
+      "sha": "05d889fd6563af424f667381d9a20a9999c4e34d"
+    },
+    {
+      "repo": "https://github.com/santoro-1/santoro-1-ltx-lip-sync-workbench.git",
+      "branch": "main",
+      "sha": "807ac9f68c28619fc61049f76e75084fc982612a"
+    }
+  ]
+}
