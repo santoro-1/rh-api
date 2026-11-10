@@ -166,3 +166,11 @@ runninghub_mvp/
    `AGENTS.md` 的任务路由。
 5. `README.md` 保持为使用入口，`PROJECT_STATUS.md` 只保留交接快照。
 6. 文档与实现冲突时，按代码、迁移、测试、现行开发文档、历史记录的顺序核对。
+
+## 7. 阶段归档与恢复
+
+本阶段于 2026-11-10 按用户要求收尾。仓库外的根级文档、独立 H3 工作台、辅助脚本及历史补丁，
+保存在本仓库 [`archive/workspace-closeout-20261110`](https://github.com/santoro-1/rh-api/tree/archive/workspace-closeout-20261110)
+分支；先读该分支 `README.md`，再查看 `workspace/HANDOFF.md` 和 `MANIFEST.json`。
+四份历史本地 stash 单独保存在 `archive/stash-*-20261110` 分支，恢复方法见归档 README。
+当前源码提交不代表 OSS/FC 已完成真实联调，也不表示生产部署。
